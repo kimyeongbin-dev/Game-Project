@@ -3,8 +3,17 @@ Game Project Backend - FastAPI
 Phase 1: 기본 인프라 및 API 설정
 """
 
+import sys
+from pathlib import Path
+
+# 프로젝트 루트를 path에 추가 (games 패키지 접근용)
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+from routers.quoridor import router as quoridor_router
 
 app = FastAPI(
     title="Game Project API",
@@ -33,6 +42,9 @@ async def health_check():
     """헬스 체크 엔드포인트"""
     return {"status": "healthy"}
 
+
+# Routers
+app.include_router(quoridor_router)
 
 # TODO: Phase 1 구현 예정
 # - /api/v1/users: 유저 CRUD
