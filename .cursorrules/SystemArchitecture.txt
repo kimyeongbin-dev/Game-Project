@@ -1,0 +1,13 @@
+/Game
+├── /docs                       # AI가 참조할 설계도, API 명세서, 규칙
+├── /backend_fastapi            # Backend: Python (FastAPI)
+├── /frontend-web_streamlit     # Frontend: Streamlit (Web Hub)
+├── /frontend-mobile_flutter    # Frontend: Flutter (iOS/Android)
+├── /games                      # 개별 게임 모듈 (공통 로직)
+│   ├── /game-Quoridor          # 예: 쿼리도 게임
+│   └── /game-Gomoku            # 예: 오목 게임
+├── .cursorrules                # AI 전용 지침 파일 (Claude/Gemini용)
+│   ├── Roadmap.txt             # 프로젝트 개발 단계
+│   ├── TechStack.txt           # 사용할 기술 스택과 환경 설정
+│   ├── SystemArchitecture.txt  # 프로젝트 파일 구조
+│   └── Rules.txt               # Gemini와 Claude의 작업 원칙
