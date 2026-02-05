@@ -94,20 +94,14 @@ def ai_move():
     return False
 
 
-def render_integrated_board(game_state: dict, valid_moves: list):
+def render_interactive_board(game_state: dict, valid_moves: list):
     """
-    통합 보드 렌더링 - 셀, 벽, 벽 설치 위치를 모두 표시
-
-    보드 구조 (17x17 그리드):
-    - 홀수 행/열: 셀 (9개)
-    - 짝수 행/열: 벽 위치
+    통합 인터랙티브 보드 - Flutter 스타일 HTML 디자인 + 셀 클릭 기능
     """
     valid_positions = {(m["row"], m["col"]) for m in valid_moves}
 
     p1_pos = game_state["players"]["player1"]["position"]
     p2_pos = game_state["players"]["player2"]["position"]
-    p1_position = (p1_pos["row"], p1_pos["col"])
-    p2_position = (p2_pos["row"], p2_pos["col"])
 
     walls = game_state.get("walls", [])
     wall_mode = st.session_state.wall_mode
@@ -116,559 +110,272 @@ def render_integrated_board(game_state: dict, valid_moves: list):
     status = game_state["status"]
     is_player_turn = current_turn == 1 and status == "in_progress"
 
-    # 벽 위치를 빠르게 조회하기 위한 세트 생성
-    # 수평 벽: (row, col)과 (row, col+1) 사이의 아래쪽 경계를 차단
-    # 수직 벽: (row, col)과 (row+1, col) 사이의 오른쪽 경계를 차단
-    h_wall_segments = set()  # (cell_row, cell_col) - 이 셀 아래에 수평 벽 세그먼트
-    v_wall_segments = set()  # (cell_row, cell_col) - 이 셀 오른쪽에 수직 벽 세그먼트
-    wall_centers = set()     # 벽 중심점 (row, col, orientation)
+    # 벽 세그먼트 계산
+    h_wall_segments = set()
+    v_wall_segments = set()
+    wall_centers = set()
 
     for wall in walls:
         r, c, o = wall["row"], wall["col"], wall["orientation"]
-        wall_centers.add((r, c, o))
+        wall_centers.add((r, c))
         if o == "horizontal":
-            # 수평 벽은 (r,c)-(r+1,c)와 (r,c+1)-(r+1,c+1) 사이를 차단
-            h_wall_segments.add((r, c))
-            h_wall_segments.add((r, c + 1))
+            h_wall_segments.add(f"{r},{c}")
+            h_wall_segments.add(f"{r},{c+1}")
         else:
-            # 수직 벽은 (r,c)-(r,c+1)와 (r+1,c)-(r+1,c+1) 사이를 차단
-            v_wall_segments.add((r, c))
-            v_wall_segments.add((r + 1, c))
+            v_wall_segments.add(f"{r},{c}")
+            v_wall_segments.add(f"{r+1},{c}")
 
-    # CSS 스타일
-    st.markdown("""
+    # CSS 스타일 - Flutter 디자인 유지
+    cell_size = 44
+    gap_size = 6
+
+    st.markdown(f"""
     <style>
-    .stButton > button {
-        padding: 0 !important;
-        min-height: 0 !important;
-    }
+    .unified-board {{
+        display: inline-grid;
+        grid-template-columns: {' '.join([f'{cell_size}px' if i % 2 == 0 else f'{gap_size}px' for i in range(17)])};
+        grid-template-rows: {' '.join([f'{cell_size}px' if i % 2 == 0 else f'{gap_size}px' for i in range(17)])};
+        gap: 0;
+        background: linear-gradient(145deg, #d4a574, #c49a6c);
+        padding: 12px;
+        border-radius: 12px;
+        border: 3px solid #8B4513;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    }}
+    .board-cell {{
+        background: linear-gradient(145deg, #fff8dc, #f5deb3);
+        border-radius: 4px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 22px;
+        border: 1px solid #d2b48c;
+    }}
+    .board-cell.valid {{
+        background: linear-gradient(145deg, #98fb98, #7ccd7c);
+        box-shadow: 0 0 8px rgba(0,200,0,0.4);
+        animation: pulse 1.5s infinite;
+    }}
+    .board-cell.goal-top {{
+        background: linear-gradient(145deg, #e6f3ff, #cce5ff);
+    }}
+    .board-cell.goal-bottom {{
+        background: linear-gradient(145deg, #ffe6e6, #ffcccc);
+    }}
+    .wall-h {{
+        background: #654321;
+        border-radius: 2px;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.3);
+    }}
+    .wall-v {{
+        background: #654321;
+        border-radius: 2px;
+        box-shadow: 1px 0 2px rgba(0,0,0,0.3);
+    }}
+    .wall-gap {{
+        background: transparent;
+    }}
+    .wall-gap.placeable {{
+        background: rgba(139, 69, 19, 0.2);
+        border-radius: 2px;
+        border: 1px dashed #8B4513;
+    }}
+    .intersection {{
+        background: transparent;
+    }}
+    .intersection.has-wall {{
+        background: #654321;
+        border-radius: 2px;
+    }}
+    .player-token {{
+        width: 32px;
+        height: 32px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 11px;
+        font-weight: bold;
+        color: white;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+    }}
+    .player-token.p1 {{
+        background: linear-gradient(145deg, #4a90d9, #357abd);
+    }}
+    .player-token.p2 {{
+        background: linear-gradient(145deg, #e05555, #c94444);
+    }}
+    .player-token.current {{
+        animation: pulse 0.8s infinite alternate;
+    }}
+    @keyframes pulse {{
+        from {{ transform: scale(1); }}
+        to {{ transform: scale(1.08); }}
+    }}
+    .valid-dot {{
+        width: 12px;
+        height: 12px;
+        background: #228b22;
+        border-radius: 50%;
+        box-shadow: 0 0 6px rgba(34,139,34,0.5);
+    }}
+
+    /* 클릭 그리드 스타일 */
+    .click-grid {{
+        display: inline-grid;
+        grid-template-columns: repeat(9, {cell_size}px);
+        grid-template-rows: repeat(9, {cell_size}px);
+        gap: {gap_size}px;
+        margin-top: -{ (cell_size + gap_size) * 9 - gap_size + 24 }px;
+        margin-left: 12px;
+        position: relative;
+    }}
+    .click-cell {{
+        width: {cell_size}px;
+        height: {cell_size}px;
+        background: transparent;
+        border: none;
+        cursor: pointer;
+        border-radius: 4px;
+    }}
+    .click-cell:hover {{
+        background: rgba(255,255,255,0.2);
+    }}
+    .click-cell.valid:hover {{
+        background: rgba(0,200,0,0.3);
+    }}
+    .click-cell:disabled {{
+        cursor: default;
+    }}
+    .click-cell:disabled:hover {{
+        background: transparent;
+    }}
     </style>
     """, unsafe_allow_html=True)
 
-    # 17x17 그리드 생성 (9셀 + 8벽 공간)
-    # 행 구조: 셀행, 수평벽행, 셀행, 수평벽행, ...
+    # HTML 보드 생성 (시각적 표시)
+    board_html = '<div style="display:flex;justify-content:center;"><div class="unified-board">'
 
     for grid_row in range(17):
-        cols = st.columns([0.3] + [1 if grid_row % 2 == 0 else 0.3] * 17)
-
-        # 행 번호 표시 (셀 행만)
-        if grid_row % 2 == 0:
-            cell_row = grid_row // 2
-            cols[0].write(f"**{cell_row}**")
-        else:
-            cols[0].write("")
-
         for grid_col in range(17):
-            col_idx = grid_col + 1
+            is_cell_row = grid_row % 2 == 0
+            is_cell_col = grid_col % 2 == 0
 
-            if grid_row % 2 == 0 and grid_col % 2 == 0:
-                # 셀 위치 (홀수x홀수 in 0-indexed: 0,2,4,6,8,10,12,14,16)
-                cell_row = grid_row // 2
-                cell_col = grid_col // 2
+            if is_cell_row and is_cell_col:
+                cell_row, cell_col = grid_row // 2, grid_col // 2
                 position = (cell_row, cell_col)
 
-                # 셀 내용 결정
-                if position == p1_position:
-                    label = "🔵"
-                elif position == p2_position:
-                    label = "🔴"
+                css_class = "board-cell"
+                content = ""
+
+                if position == (p1_pos["row"], p1_pos["col"]):
+                    turn_class = " current" if current_turn == 1 and status == "in_progress" else ""
+                    content = f'<div class="player-token p1{turn_class}">P1</div>'
+                elif position == (p2_pos["row"], p2_pos["col"]):
+                    turn_class = " current" if current_turn == 2 and status == "in_progress" else ""
+                    content = f'<div class="player-token p2{turn_class}">AI</div>'
                 elif position in valid_positions and not wall_mode and is_player_turn:
-                    label = "⭕"
+                    css_class += " valid"
+                    content = '<div class="valid-dot"></div>'
+                elif cell_row == 0:
+                    css_class += " goal-top"
+                    content = '<span style="color:#4a90d9;font-size:14px;">▲</span>'
+                elif cell_row == 8:
+                    css_class += " goal-bottom"
+                    content = '<span style="color:#c94444;font-size:14px;">▼</span>'
+
+                board_html += f'<div class="{css_class}">{content}</div>'
+
+            elif is_cell_row and not is_cell_col:
+                cell_row = grid_row // 2
+                wall_col = grid_col // 2
+                has_wall = f"{cell_row},{wall_col}" in v_wall_segments
+
+                if has_wall:
+                    board_html += '<div class="wall-v"></div>'
+                elif wall_mode and wall_orientation == "vertical" and is_player_turn:
+                    if cell_row < 8 and wall_col < 8 and (cell_row, wall_col) not in wall_centers:
+                        board_html += '<div class="wall-gap placeable"></div>'
+                    else:
+                        board_html += '<div class="wall-gap"></div>'
                 else:
-                    label = "·"
+                    board_html += '<div class="wall-gap"></div>'
 
-                is_valid = position in valid_positions and not wall_mode and is_player_turn
-                btn_type = "primary" if is_valid else "secondary"
-
-                with cols[col_idx]:
-                    if st.button(label, key=f"c_{cell_row}_{cell_col}",
-                                use_container_width=True, type=btn_type,
-                                disabled=not is_valid):
-                        if is_valid:
-                            if move_pawn(cell_row, cell_col):
-                                st.rerun()
-
-            elif grid_row % 2 == 0 and grid_col % 2 == 1:
-                # 수직 벽 위치 (셀 사이 세로)
-                cell_row = grid_row // 2
-                wall_col = grid_col // 2  # 0~7
-
-                # 이 위치에 벽이 있는지 확인
-                has_wall = (cell_row, wall_col) in v_wall_segments
-
-                with cols[col_idx]:
-                    if has_wall:
-                        st.markdown("**┃**")
-                    elif wall_mode and wall_orientation == "vertical" and is_player_turn:
-                        # 벽 설치 가능 위치 표시
-                        if cell_row < 8 and wall_col < 8:
-                            # 이 위치에 벽을 설치할 수 있는지 확인
-                            can_place = (cell_row, wall_col, "vertical") not in wall_centers
-                            if can_place and st.button("│", key=f"vw_{cell_row}_{wall_col}"):
-                                if place_wall(cell_row, wall_col, "vertical"):
-                                    st.session_state.wall_mode = False
-                                    st.rerun()
-                    else:
-                        st.write("")
-
-            elif grid_row % 2 == 1 and grid_col % 2 == 0:
-                # 수평 벽 위치 (셀 사이 가로)
-                wall_row = grid_row // 2  # 0~7
-                cell_col = grid_col // 2
-
-                has_wall = (wall_row, cell_col) in h_wall_segments
-
-                with cols[col_idx]:
-                    if has_wall:
-                        st.markdown("**━**")
-                    elif wall_mode and wall_orientation == "horizontal" and is_player_turn:
-                        if wall_row < 8 and cell_col < 8:
-                            can_place = (wall_row, cell_col, "horizontal") not in wall_centers
-                            if can_place and st.button("─", key=f"hw_{wall_row}_{cell_col}"):
-                                if place_wall(wall_row, cell_col, "horizontal"):
-                                    st.session_state.wall_mode = False
-                                    st.rerun()
-                    else:
-                        st.write("")
-
-            else:
-                # 교차점 (벽이 만나는 곳)
-                with cols[col_idx]:
-                    st.write("")
-
-
-def render_simple_board(game_state: dict, valid_moves: list):
-    """
-    간단한 통합 보드 - 벽을 시각적으로 표시
-    """
-    valid_positions = {(m["row"], m["col"]) for m in valid_moves}
-
-    p1_pos = game_state["players"]["player1"]["position"]
-    p2_pos = game_state["players"]["player2"]["position"]
-    p1_position = (p1_pos["row"], p1_pos["col"])
-    p2_position = (p2_pos["row"], p2_pos["col"])
-
-    walls = game_state.get("walls", [])
-    wall_mode = st.session_state.wall_mode
-    wall_orientation = st.session_state.wall_orientation
-    current_turn = game_state["current_turn"]
-    status = game_state["status"]
-    is_player_turn = current_turn == 1 and status == "in_progress"
-
-    # 벽 세그먼트 계산
-    h_walls = set()  # (row, col) - row행 아래, col열에 수평벽
-    v_walls = set()  # (row, col) - row행, col열 오른쪽에 수직벽
-
-    for wall in walls:
-        r, c, o = wall["row"], wall["col"], wall["orientation"]
-        if o == "horizontal":
-            h_walls.add((r, c))
-            h_walls.add((r, c + 1))
-        else:
-            v_walls.add((r, c))
-            v_walls.add((r + 1, c))
-
-    # 열 헤더
-    header = st.columns([0.5] + [1] * 9)
-    header[0].write("")
-    for c in range(9):
-        header[c + 1].write(f"**{c}**")
-
-    # 보드 렌더링
-    for row in range(9):
-        # 셀 행
-        cols = st.columns([0.5] + [1] * 9)
-        cols[0].write(f"**{row}**")
-
-        for col in range(9):
-            position = (row, col)
-
-            # 셀 스타일 결정
-            if position == p1_position:
-                label = "🔵"
-            elif position == p2_position:
-                label = "🔴"
-            elif position in valid_positions and not wall_mode and is_player_turn:
-                label = "⭕"
-            elif row == 0:
-                label = "🏁" if col == 4 else "·"
-            elif row == 8:
-                label = "🏁" if col == 4 else "·"
-            else:
-                label = "·"
-
-            # 벽 표시를 위한 이모지 추가
-            right_wall = "┃" if (row, col) in v_walls else ""
-            bottom_wall = "━" if (row, col) in h_walls else ""
-
-            is_valid = position in valid_positions and not wall_mode and is_player_turn
-
-            with cols[col + 1]:
-                # 벽 표시
-                wall_indicator = ""
-                if (row, col) in v_walls and col < 8:
-                    wall_indicator += "▌"
-                if (row, col) in h_walls and row < 8:
-                    wall_indicator += "▄"
-
-                btn_label = label
-                if wall_indicator:
-                    btn_label = f"{label}"
-
-                btn_type = "primary" if is_valid else "secondary"
-
-                if st.button(btn_label, key=f"cell_{row}_{col}",
-                            use_container_width=True, type=btn_type,
-                            disabled=wall_mode or not is_player_turn):
-                    if is_valid:
-                        if move_pawn(row, col):
-                            st.rerun()
-
-        # 수평 벽 행 (마지막 행 제외)
-        if row < 8:
-            wall_cols = st.columns([0.5] + [1] * 9)
-            wall_cols[0].write("")
-            for col in range(9):
-                with wall_cols[col + 1]:
-                    has_h_wall = (row, col) in h_walls
-                    if has_h_wall:
-                        st.markdown("<div style='background-color: #8B4513; height: 6px; margin: 0;'></div>",
-                                   unsafe_allow_html=True)
-                    else:
-                        st.write("")
-
-
-def render_visual_board(game_state: dict, valid_moves: list):
-    """
-    시각적 보드 렌더링 - HTML/CSS 기반
-    """
-    valid_positions = {(m["row"], m["col"]) for m in valid_moves}
-
-    p1_pos = game_state["players"]["player1"]["position"]
-    p2_pos = game_state["players"]["player2"]["position"]
-
-    walls = game_state.get("walls", [])
-    wall_mode = st.session_state.wall_mode
-    wall_orientation = st.session_state.wall_orientation
-    current_turn = game_state["current_turn"]
-    status = game_state["status"]
-    is_player_turn = current_turn == 1 and status == "in_progress"
-
-    # 벽 세그먼트 계산
-    h_walls = set()
-    v_walls = set()
-
-    for wall in walls:
-        r, c, o = wall["row"], wall["col"], wall["orientation"]
-        if o == "horizontal":
-            h_walls.add((r, c))
-            h_walls.add((r, c + 1))
-        else:
-            v_walls.add((r, c))
-            v_walls.add((r + 1, c))
-
-    # 보드 HTML 생성
-    board_html = """
-    <style>
-    .quoridor-board {
-        display: grid;
-        grid-template-columns: repeat(17, 1fr);
-        gap: 0;
-        max-width: 500px;
-        margin: 0 auto;
-        background: #DEB887;
-        padding: 10px;
-        border-radius: 8px;
-    }
-    .cell {
-        width: 40px;
-        height: 40px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 20px;
-        background: #F5DEB3;
-        border: 1px solid #D2B48C;
-    }
-    .h-wall-space {
-        height: 8px;
-        background: transparent;
-    }
-    .v-wall-space {
-        width: 8px;
-        background: transparent;
-    }
-    .wall-h {
-        background: #8B4513 !important;
-    }
-    .wall-v {
-        background: #8B4513 !important;
-    }
-    .intersection {
-        width: 8px;
-        height: 8px;
-        background: transparent;
-    }
-    .valid-move {
-        background: #90EE90;
-        cursor: pointer;
-    }
-    </style>
-    <div class="quoridor-board">
-    """
-
-    for grid_row in range(17):
-        for grid_col in range(17):
-            if grid_row % 2 == 0 and grid_col % 2 == 0:
-                # 셀
-                cell_row, cell_col = grid_row // 2, grid_col // 2
-                content = ""
-                css_class = "cell"
-
-                if (cell_row, cell_col) == (p1_pos["row"], p1_pos["col"]):
-                    content = "🔵"
-                elif (cell_row, cell_col) == (p2_pos["row"], p2_pos["col"]):
-                    content = "🔴"
-                elif (cell_row, cell_col) in valid_positions and is_player_turn:
-                    content = "⭕"
-                    css_class += " valid-move"
-
-                board_html += f'<div class="{css_class}">{content}</div>'
-
-            elif grid_row % 2 == 0 and grid_col % 2 == 1:
-                # 수직 벽 공간
-                cell_row = grid_row // 2
-                wall_col = grid_col // 2
-                has_wall = (cell_row, wall_col) in v_walls
-                css_class = "v-wall-space wall-v" if has_wall else "v-wall-space"
-                board_html += f'<div class="{css_class}"></div>'
-
-            elif grid_row % 2 == 1 and grid_col % 2 == 0:
-                # 수평 벽 공간
+            elif not is_cell_row and is_cell_col:
                 wall_row = grid_row // 2
                 cell_col = grid_col // 2
-                has_wall = (wall_row, cell_col) in h_walls
-                css_class = "h-wall-space wall-h" if has_wall else "h-wall-space"
-                board_html += f'<div class="{css_class}"></div>'
+                has_wall = f"{wall_row},{cell_col}" in h_wall_segments
+
+                if has_wall:
+                    board_html += '<div class="wall-h"></div>'
+                elif wall_mode and wall_orientation == "horizontal" and is_player_turn:
+                    if wall_row < 8 and cell_col < 8 and (wall_row, cell_col) not in wall_centers:
+                        board_html += '<div class="wall-gap placeable"></div>'
+                    else:
+                        board_html += '<div class="wall-gap"></div>'
+                else:
+                    board_html += '<div class="wall-gap"></div>'
 
             else:
-                # 교차점
-                board_html += '<div class="intersection"></div>'
+                int_row, int_col = grid_row // 2, grid_col // 2
+                has_h = any(w["row"] == int_row and w["col"] == int_col and w["orientation"] == "horizontal" for w in walls)
+                has_v = any(w["row"] == int_row and w["col"] == int_col and w["orientation"] == "vertical" for w in walls)
 
-    board_html += "</div>"
-
-    st.markdown(board_html, unsafe_allow_html=True)
-
-    # 버튼 기반 인터랙션 (HTML 클릭 이벤트 대신)
-    st.write("")
-
-    if is_player_turn and not wall_mode:
-        st.write("**이동할 위치 선택:**")
-        move_cols = st.columns(min(len(valid_moves), 6)) if valid_moves else []
-        for i, move in enumerate(valid_moves[:6]):
-            with move_cols[i % 6]:
-                if st.button(f"({move['row']},{move['col']})", key=f"mv_{move['row']}_{move['col']}"):
-                    if move_pawn(move['row'], move['col']):
-                        st.rerun()
-        if len(valid_moves) > 6:
-            move_cols2 = st.columns(min(len(valid_moves) - 6, 6))
-            for i, move in enumerate(valid_moves[6:]):
-                with move_cols2[i]:
-                    if st.button(f"({move['row']},{move['col']})", key=f"mv2_{move['row']}_{move['col']}"):
-                        if move_pawn(move['row'], move['col']):
-                            st.rerun()
-
-
-def render_compact_board(game_state: dict, valid_moves: list):
-    """
-    컴팩트 보드 - HTML/CSS 기반으로 벽을 연속된 막대로 표시
-    """
-    valid_positions = {(m["row"], m["col"]) for m in valid_moves}
-
-    p1_pos = game_state["players"]["player1"]["position"]
-    p2_pos = game_state["players"]["player2"]["position"]
-
-    walls = game_state.get("walls", [])
-    wall_mode = st.session_state.wall_mode
-    wall_orientation = st.session_state.wall_orientation
-    current_turn = game_state["current_turn"]
-    status = game_state["status"]
-    is_player_turn = current_turn == 1 and status == "in_progress"
-
-    # 벽 원본 위치 (연속 벽 렌더링용)
-    h_wall_origins = set()  # (row, col) - 수평 벽 시작점
-    v_wall_origins = set()  # (row, col) - 수직 벽 시작점
-
-    for wall in walls:
-        r, c, o = wall["row"], wall["col"], wall["orientation"]
-        if o == "horizontal":
-            h_wall_origins.add((r, c))
-        else:
-            v_wall_origins.add((r, c))
-
-    # CSS 스타일
-    st.markdown("""
-    <style>
-    .board-container {
-        display: inline-block;
-        background: #DEB887;
-        padding: 15px;
-        border-radius: 10px;
-        border: 3px solid #8B4513;
-    }
-    .board-grid {
-        display: grid;
-        grid-template-columns: repeat(17, auto);
-        gap: 0;
-    }
-    .cell {
-        width: 45px;
-        height: 45px;
-        background: #F5DEB3;
-        border: 1px solid #D2B48C;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 24px;
-    }
-    .cell-valid {
-        background: #90EE90;
-        cursor: pointer;
-    }
-    .cell-goal {
-        background: #FFE4B5;
-    }
-    .h-gap {
-        width: 8px;
-        height: 45px;
-        background: #DEB887;
-    }
-    .v-gap {
-        width: 45px;
-        height: 8px;
-        background: #DEB887;
-    }
-    .intersection {
-        width: 8px;
-        height: 8px;
-        background: #DEB887;
-    }
-    .wall-h {
-        background: #8B4513 !important;
-    }
-    .wall-v {
-        background: #8B4513 !important;
-    }
-    .wall-center {
-        background: #8B4513 !important;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-    # 보드 HTML 생성
-    board_html = '<div class="board-container"><div class="board-grid">'
-
-    for grid_row in range(17):
-        for grid_col in range(17):
-            if grid_row % 2 == 0 and grid_col % 2 == 0:
-                # 셀 (9x9)
-                cell_row, cell_col = grid_row // 2, grid_col // 2
-                css_class = "cell"
-                content = ""
-
-                if (cell_row, cell_col) == (p1_pos["row"], p1_pos["col"]):
-                    content = "🔵"
-                elif (cell_row, cell_col) == (p2_pos["row"], p2_pos["col"]):
-                    content = "🔴"
-                elif (cell_row, cell_col) in valid_positions and not wall_mode and is_player_turn:
-                    content = "⭕"
-                    css_class += " cell-valid"
-                elif cell_row == 0 or cell_row == 8:
-                    css_class += " cell-goal"
-
-                board_html += f'<div class="{css_class}">{content}</div>'
-
-            elif grid_row % 2 == 0 and grid_col % 2 == 1:
-                # 수직 벽 공간 (셀 사이 세로)
-                cell_row = grid_row // 2
-                wall_col = grid_col // 2
-
-                # 이 위치를 지나는 수직 벽이 있는지 확인
-                # 수직 벽 (r, c)는 (r, c)와 (r+1, c) 사이를 차단
-                has_wall = (cell_row, wall_col) in v_wall_origins or (cell_row - 1, wall_col) in v_wall_origins
-                css_class = "h-gap wall-v" if has_wall else "h-gap"
-                board_html += f'<div class="{css_class}"></div>'
-
-            elif grid_row % 2 == 1 and grid_col % 2 == 0:
-                # 수평 벽 공간 (셀 사이 가로)
-                wall_row = grid_row // 2
-                cell_col = grid_col // 2
-
-                # 이 위치를 지나는 수평 벽이 있는지 확인
-                # 수평 벽 (r, c)는 (r, c)와 (r, c+1) 아래를 차단
-                has_wall = (wall_row, cell_col) in h_wall_origins or (wall_row, cell_col - 1) in h_wall_origins
-                css_class = "v-gap wall-h" if has_wall else "v-gap"
-                board_html += f'<div class="{css_class}"></div>'
-
-            else:
-                # 교차점 (벽이 만나는 곳)
-                int_row = grid_row // 2
-                int_col = grid_col // 2
-
-                # 이 교차점을 지나는 벽이 있는지 확인
-                has_h_wall = (int_row, int_col) in h_wall_origins
-                has_v_wall = (int_row, int_col) in v_wall_origins
-
-                css_class = "intersection"
-                if has_h_wall or has_v_wall:
-                    css_class += " wall-center"
-                board_html += f'<div class="{css_class}"></div>'
+                if has_h or has_v:
+                    board_html += '<div class="intersection has-wall"></div>'
+                else:
+                    board_html += '<div class="intersection"></div>'
 
     board_html += '</div></div>'
     st.markdown(board_html, unsafe_allow_html=True)
 
-    st.write("")
+    # 클릭 영역 (9x9 투명 버튼 그리드) - 이동 모드
+    if is_player_turn and not wall_mode:
+        st.write("")
+        cols = st.columns([1, 6, 1])  # 중앙 정렬
+        with cols[1]:
+            for row in range(9):
+                btn_cols = st.columns(9)
+                for col in range(9):
+                    with btn_cols[col]:
+                        is_valid = (row, col) in valid_positions
+                        is_p1 = (row, col) == (p1_pos["row"], p1_pos["col"])
+                        is_p2 = (row, col) == (p2_pos["row"], p2_pos["col"])
 
-    # 인터랙션 버튼들
-    if is_player_turn:
-        if not wall_mode:
-            # 이동 모드 - 유효한 이동 위치 버튼
-            if valid_moves:
-                st.write("**이동할 위치 선택:**")
-                num_cols = min(len(valid_moves), 5)
-                move_cols = st.columns(num_cols)
-                for i, move in enumerate(valid_moves):
-                    with move_cols[i % num_cols]:
-                        if st.button(f"({move['row']}, {move['col']})", key=f"mv_{move['row']}_{move['col']}",
-                                   use_container_width=True, type="primary"):
-                            if move_pawn(move['row'], move['col']):
-                                st.rerun()
-        else:
-            # 벽 설치 모드
-            st.write(f"**벽 설치 위치 선택** ({'수평 ━━' if wall_orientation == 'horizontal' else '수직 ┃┃'}):")
-
-            # 벽 설치 가능 위치 계산
-            existing_walls = {(w["row"], w["col"], w["orientation"]) for w in walls}
-
-            # 8x8 그리드로 벽 설치 위치 표시
-            for wr in range(8):
-                wall_cols = st.columns(8)
-                for wc in range(8):
-                    with wall_cols[wc]:
-                        # 이미 같은 위치에 벽이 있거나 겹치는지 확인
-                        is_blocked = (wr, wc, wall_orientation) in existing_walls
-                        # 교차 검사 (같은 중심점의 다른 방향 벽)
-                        other_orient = "vertical" if wall_orientation == "horizontal" else "horizontal"
-                        is_blocked = is_blocked or (wr, wc, other_orient) in existing_walls
-
-                        if is_blocked:
-                            st.button("✕", key=f"w_{wr}_{wc}", disabled=True, use_container_width=True)
-                        else:
-                            label = "━" if wall_orientation == "horizontal" else "┃"
-                            if st.button(label, key=f"w_{wr}_{wc}", use_container_width=True):
-                                if place_wall(wr, wc, wall_orientation):
-                                    st.session_state.wall_mode = False
+                        if is_valid:
+                            if st.button("●", key=f"m_{row}_{col}", type="primary",
+                                       use_container_width=True):
+                                if move_pawn(row, col):
                                     st.rerun()
+                        elif is_p1:
+                            st.button("P1", key=f"m_{row}_{col}", disabled=True,
+                                    use_container_width=True)
+                        elif is_p2:
+                            st.button("AI", key=f"m_{row}_{col}", disabled=True,
+                                    use_container_width=True)
+                        else:
+                            st.button("", key=f"m_{row}_{col}", disabled=True,
+                                    use_container_width=True)
+
+    # 벽 설치 모드 - 8x8 그리드
+    elif is_player_turn and wall_mode:
+        orient_label = "수평 ━━" if wall_orientation == "horizontal" else "수직 ┃┃"
+        st.markdown(f"##### 벽 설치 위치 선택 ({orient_label})")
+
+        for wr in range(8):
+            wcols = st.columns(8)
+            for wc in range(8):
+                with wcols[wc]:
+                    is_blocked = (wr, wc) in wall_centers
+                    if is_blocked:
+                        st.button("✕", key=f"w_{wr}_{wc}", disabled=True,
+                                 use_container_width=True)
+                    else:
+                        label = "━" if wall_orientation == "horizontal" else "┃"
+                        if st.button(label, key=f"w_{wr}_{wc}", use_container_width=True):
+                            if place_wall(wr, wc, wall_orientation):
+                                st.session_state.wall_mode = False
+                                st.rerun()
 
 
 def main():
@@ -793,7 +500,7 @@ def main():
 
     # 보드 렌더링
     valid_moves = get_valid_moves() if is_player_turn else []
-    render_compact_board(game_state, valid_moves)
+    render_interactive_board(game_state, valid_moves)
 
     # 설치된 벽 정보
     walls = game_state.get("walls", [])

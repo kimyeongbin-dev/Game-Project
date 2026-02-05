@@ -5,7 +5,7 @@ Quoridor API Router
 
 from fastapi import APIRouter, HTTPException, status
 
-from ..schemas.quoridor import (
+from schemas.quoridor import (
     CreateGameRequest,
     CreateGameResponse,
     MoveRequest,
@@ -16,7 +16,7 @@ from ..schemas.quoridor import (
     GameStateSchema,
     ErrorResponse,
 )
-from ..services.quoridor_service import quoridor_service
+from services.quoridor_service import quoridor_service
 
 router = APIRouter(
     prefix="/api/v1/quoridor",

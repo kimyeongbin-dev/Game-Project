@@ -15,9 +15,9 @@ from games.__init__ import *
 
 # 게임 로직 임포트
 from games import GameState, Wall
-from games.core.board import Position
-from games.core.wall import Orientation
-from games.ai.simple_ai import SimpleAI
+from games.game_Quoridor.core.board import Position
+from games.game_Quoridor.core.wall import Orientation
+from games.game_Quoridor.ai.simple_ai import SimpleAI
 
 
 class QuoridorService:
