@@ -1,8 +1,7 @@
 /Game
 ├── /docs                       # AI가 참조할 설계도, API 명세서, 규칙
 ├── /backend_fastapi            # Backend: Python (FastAPI)
-├── /frontend-web_streamlit     # Frontend: Streamlit (Web Hub)
-├── /frontend-mobile_flutter    # Frontend: Flutter (iOS/Android)
+├── /frontend_flutter           # Frontend: Flutter (iOS/Android/Web)
 ├── /games                      # 개별 게임 모듈 (공통 로직)
 │   ├── /game-Quoridor          # 예: 쿼리도 게임
 │   └── /game-Gomoku            # 예: 오목 게임

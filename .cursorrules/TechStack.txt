@@ -1,6 +1,5 @@
 구분	기술 스택	이유
 백엔드	FastAPI (Python)	속도가 빠르고 AI가 코드를 가장 잘 생성함
 데이터베이스	PostgreSQL	대규모 유저 및 게임 데이터 관리에 적합
-모바일	Flutter	하나의 코드로 Android/iOS/Web 동시 대응
-웹 허브	Streamlit	Python 기반으로 데이터 대시보드 및 게임 선택창 구현 용이
+프론트엔드	Flutter	하나의 코드로 Android/iOS/Web 동시 대응
 인프라	Docker	어디서든 동일한 환경으로 실행 가능

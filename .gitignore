@@ -60,3 +60,11 @@ logs/
 
 # Claude Code
 .claude/
+
+# Flutter
+frontend_flutter/.dart_tool/
+frontend_flutter/.flutter-plugins
+frontend_flutter/.flutter-plugins-dependencies
+frontend_flutter/build/
+frontend_flutter/*.iml
+frontend_flutter/.metadata
