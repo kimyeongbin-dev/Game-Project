@@ -22,6 +22,12 @@ class GameStatus(Enum):
     FINISHED = "finished"
 
 
+class GameMode(Enum):
+    """게임 모드"""
+    VS_AI = "vs_ai"
+    LOCAL_2P = "local_2p"
+
+
 class ActionType(Enum):
     """액션 타입"""
     MOVE = "move"
@@ -54,13 +60,15 @@ class GameState:
         self,
         game_id: Optional[str] = None,
         player1_name: str = "Player",
-        player2_name: str = "AI"
+        player2_name: str = "AI",
+        game_mode: str = "vs_ai"
     ):
         self.game_id = game_id or str(uuid.uuid4())
         self.status = GameStatus.IN_PROGRESS
         self.current_turn = 1  # 1 또는 2
         self.turn_count = 0
         self.winner: Optional[int] = None
+        self.game_mode = GameMode(game_mode)
 
         # 플레이어 생성
         self.player1 = Player.create_player1(player1_name)
@@ -205,6 +213,7 @@ class GameState:
         new_state.current_turn = self.current_turn
         new_state.turn_count = self.turn_count
         new_state.winner = self.winner
+        new_state.game_mode = self.game_mode
         new_state.player1 = self.player1.copy()
         new_state.player2 = self.player2.copy()
         new_state.wall_manager = self.wall_manager.copy()
@@ -217,6 +226,7 @@ class GameState:
         return {
             "game_id": self.game_id,
             "status": self.status.value,
+            "game_mode": self.game_mode.value,
             "current_turn": self.current_turn,
             "turn_count": self.turn_count,
             "players": {
@@ -251,6 +261,7 @@ class GameState:
         game = cls.__new__(cls)
         game.game_id = data["game_id"]
         game.status = GameStatus(data["status"])
+        game.game_mode = GameMode(data.get("game_mode", "vs_ai"))
         game.current_turn = data["current_turn"]
         game.turn_count = data["turn_count"]
         game.winner = data.get("winner")

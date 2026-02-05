@@ -31,14 +31,23 @@ class QuoridorService:
     def create_game(
         self,
         player_name: str = "Player",
-        ai_difficulty: str = "normal"
+        player2_name: str = "Player 2",
+        ai_difficulty: str = "normal",
+        game_mode: str = "vs_ai"
     ) -> GameState:
         """새 게임 생성"""
-        game = GameState(player1_name=player_name, player2_name="AI")
+        # 로컬 2인 모드일 경우 player2_name 사용, AI 모드는 "AI"
+        p2_name = player2_name if game_mode == "local_2p" else "AI"
+        game = GameState(
+            player1_name=player_name,
+            player2_name=p2_name,
+            game_mode=game_mode
+        )
         self._games[game.game_id] = game
 
-        # AI 인스턴스 생성
-        self._ai_instances[game.game_id] = SimpleAI(difficulty=ai_difficulty)
+        # AI 모드일 때만 AI 인스턴스 생성
+        if game_mode == "vs_ai":
+            self._ai_instances[game.game_id] = SimpleAI(difficulty=ai_difficulty)
 
         return game
 

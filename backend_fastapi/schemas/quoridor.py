@@ -38,6 +38,7 @@ class GameStateSchema(BaseModel):
     """게임 상태 스키마"""
     game_id: str
     status: Literal["in_progress", "finished"]
+    game_mode: Literal["vs_ai", "local_2p"] = Field(default="vs_ai")
     current_turn: int = Field(..., ge=1, le=2)
     turn_count: int = Field(..., ge=0)
     players: PlayersSchema
@@ -52,7 +53,9 @@ class GameStateSchema(BaseModel):
 class CreateGameRequest(BaseModel):
     """게임 생성 요청"""
     player_name: str = Field(default="Player", max_length=50)
+    player2_name: str = Field(default="Player 2", max_length=50)
     ai_difficulty: Literal["easy", "normal", "hard"] = Field(default="normal")
+    game_mode: Literal["vs_ai", "local_2p"] = Field(default="vs_ai")
 
 
 class MoveRequest(BaseModel):
@@ -74,6 +77,7 @@ class CreateGameResponse(BaseModel):
     """게임 생성 응답"""
     game_id: str
     status: str
+    game_mode: str
     current_turn: int
     message: str
 

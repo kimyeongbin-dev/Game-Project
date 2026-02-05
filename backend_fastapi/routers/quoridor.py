@@ -35,12 +35,15 @@ async def create_game(request: CreateGameRequest = CreateGameRequest()):
     """새 게임 생성"""
     game = quoridor_service.create_game(
         player_name=request.player_name,
-        ai_difficulty=request.ai_difficulty
+        player2_name=request.player2_name,
+        ai_difficulty=request.ai_difficulty,
+        game_mode=request.game_mode
     )
 
     return CreateGameResponse(
         game_id=game.game_id,
         status=game.status.value,
+        game_mode=game.game_mode.value,
         current_turn=game.current_turn,
         message="Game created successfully"
     )
