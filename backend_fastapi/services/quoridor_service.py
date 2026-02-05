@@ -1,6 +1,6 @@
 """
 Quoridor Service
-게임 비즈니스 로직
+게임 비즈니스 로직 (DB 연동)
 """
 
 import sys
@@ -19,16 +19,93 @@ from games.game_Quoridor.core.board import Position
 from games.game_Quoridor.core.wall import Orientation
 from games.game_Quoridor.ai.simple_ai import SimpleAI
 
+# DB 관련 임포트
+from database import async_session_factory, is_db_available
+from database.repository import GameSessionRepository
+
 
 class QuoridorService:
-    """쿼리도 게임 서비스"""
+    """쿼리도 게임 서비스 (DB 연동)"""
 
     def __init__(self):
-        # 메모리 기반 게임 저장소 (프로덕션에서는 DB 사용)
+        # 메모리 기반 게임 저장소 (캐시 역할)
         self._games: dict[str, GameState] = {}
         self._ai_instances: dict[str, SimpleAI] = {}
+        self._ai_difficulties: dict[str, str] = {}
 
-    def create_game(
+    async def _get_repository(self) -> GameSessionRepository:
+        """DB 리포지토리 인스턴스 생성"""
+        session = async_session_factory()
+        return GameSessionRepository(session)
+
+    async def _save_to_db(
+        self,
+        game: GameState,
+        action: Optional[dict] = None,
+        is_new: bool = False,
+        ai_difficulty: Optional[str] = None
+    ) -> None:
+        """게임 상태를 DB에 저장"""
+        if not is_db_available():
+            return  # DB 없으면 스킵
+
+        try:
+            async with async_session_factory() as session:
+                repo = GameSessionRepository(session)
+
+                if is_new:
+                    # 새 게임 생성
+                    await repo.create(
+                        game_id=game.game_id,
+                        player1_name=game.player1.name,
+                        player2_name=game.player2.name,
+                        game_mode=game.game_mode.value,
+                        ai_difficulty=ai_difficulty,
+                        game_state=game.to_dict()
+                    )
+                else:
+                    # 기존 게임 업데이트
+                    status = game.status.value
+                    winner = game.winner
+                    await repo.update_game_state(
+                        game_id=game.game_id,
+                        game_state=game.to_dict(),
+                        action=action,
+                        status=status,
+                        winner=winner
+                    )
+        except Exception as e:
+            # DB 저장 실패해도 메모리 게임은 계속 진행
+            print(f"Warning: Failed to save game to DB: {e}")
+
+    async def _load_from_db(self, game_id: str) -> Optional[GameState]:
+        """DB에서 게임 상태 복구"""
+        if not is_db_available():
+            return None  # DB 없으면 None 반환
+
+        try:
+            async with async_session_factory() as session:
+                repo = GameSessionRepository(session)
+                game_session = await repo.get_by_id(game_id)
+
+                if not game_session:
+                    return None
+
+                # GameState 객체로 복원
+                game = GameState.from_dict(game_session.game_state)
+
+                # AI 인스턴스 복원 (vs_ai 모드일 때)
+                if game_session.game_mode.value == "vs_ai":
+                    difficulty = game_session.ai_difficulty or "normal"
+                    self._ai_instances[game_id] = SimpleAI(difficulty=difficulty)
+                    self._ai_difficulties[game_id] = difficulty
+
+                return game
+        except Exception as e:
+            print(f"Warning: Failed to load game from DB: {e}")
+            return None
+
+    async def create_game(
         self,
         player_name: str = "Player",
         player2_name: str = "Player 2",
@@ -48,28 +125,56 @@ class QuoridorService:
         # AI 모드일 때만 AI 인스턴스 생성
         if game_mode == "vs_ai":
             self._ai_instances[game.game_id] = SimpleAI(difficulty=ai_difficulty)
+            self._ai_difficulties[game.game_id] = ai_difficulty
+
+        # DB에 저장
+        await self._save_to_db(game, is_new=True, ai_difficulty=ai_difficulty)
 
         return game
 
-    def get_game(self, game_id: str) -> Optional[GameState]:
-        """게임 조회"""
-        return self._games.get(game_id)
+    async def get_game(self, game_id: str) -> Optional[GameState]:
+        """게임 조회 (메모리 -> DB 순으로 조회)"""
+        # 메모리에서 먼저 조회
+        game = self._games.get(game_id)
+        if game:
+            return game
 
-    def move_pawn(self, game_id: str, row: int, col: int) -> tuple[bool, str, Optional[GameState]]:
+        # 메모리에 없으면 DB에서 복구 시도
+        game = await self._load_from_db(game_id)
+        if game:
+            self._games[game_id] = game
+            return game
+
+        return None
+
+    async def move_pawn(self, game_id: str, row: int, col: int) -> tuple[bool, str, Optional[GameState]]:
         """
         폰 이동
 
         Returns:
             (성공 여부, 메시지, 게임 상태)
         """
-        game = self.get_game(game_id)
+        game = await self.get_game(game_id)
         if not game:
             return False, "Game not found", None
 
+        current_player = game.current_turn
         success, message = game.move_pawn(row, col)
+
+        if success:
+            # 액션 기록
+            action = {
+                "type": "move",
+                "player": current_player,
+                "row": row,
+                "col": col
+            }
+            # DB에 저장
+            await self._save_to_db(game, action=action)
+
         return success, message, game if success else None
 
-    def place_wall(
+    async def place_wall(
         self,
         game_id: str,
         row: int,
@@ -82,21 +187,35 @@ class QuoridorService:
         Returns:
             (성공 여부, 메시지, 게임 상태)
         """
-        game = self.get_game(game_id)
+        game = await self.get_game(game_id)
         if not game:
             return False, "Game not found", None
 
+        current_player = game.current_turn
         success, message = game.place_wall(row, col, orientation)
+
+        if success:
+            # 액션 기록
+            action = {
+                "type": "wall",
+                "player": current_player,
+                "row": row,
+                "col": col,
+                "orientation": orientation
+            }
+            # DB에 저장
+            await self._save_to_db(game, action=action)
+
         return success, message, game if success else None
 
-    def ai_move(self, game_id: str) -> tuple[bool, str, Optional[dict], Optional[GameState]]:
+    async def ai_move(self, game_id: str) -> tuple[bool, str, Optional[dict], Optional[GameState]]:
         """
         AI 턴 수행
 
         Returns:
             (성공 여부, 메시지, 액션 정보, 게임 상태)
         """
-        game = self.get_game(game_id)
+        game = await self.get_game(game_id)
         if not game:
             return False, "Game not found", None, None
 
@@ -126,11 +245,20 @@ class QuoridorService:
                 action.orientation.value if action.orientation else "horizontal"
             )
 
+        if success:
+            # 액션에 플레이어 정보 추가
+            action_with_player = {
+                **action_info,
+                "player": 2
+            }
+            # DB에 저장
+            await self._save_to_db(game, action=action_with_player)
+
         return success, message, action_info, game if success else None
 
-    def get_valid_moves(self, game_id: str) -> Optional[dict]:
+    async def get_valid_moves(self, game_id: str) -> Optional[dict]:
         """유효한 이동 목록 조회"""
-        game = self.get_game(game_id)
+        game = await self.get_game(game_id)
         if not game:
             return None
 
@@ -149,14 +277,100 @@ class QuoridorService:
             "walls_remaining": game.current_player.walls_remaining
         }
 
-    def delete_game(self, game_id: str) -> bool:
+    async def delete_game(self, game_id: str) -> bool:
         """게임 삭제"""
+        # 메모리에서 삭제
         if game_id in self._games:
             del self._games[game_id]
-            if game_id in self._ai_instances:
-                del self._ai_instances[game_id]
-            return True
-        return False
+        if game_id in self._ai_instances:
+            del self._ai_instances[game_id]
+        if game_id in self._ai_difficulties:
+            del self._ai_difficulties[game_id]
+
+        # DB에서 소프트 삭제
+        if not is_db_available():
+            return True  # DB 없으면 메모리 삭제만
+
+        try:
+            async with async_session_factory() as session:
+                repo = GameSessionRepository(session)
+                return await repo.soft_delete(game_id)
+        except Exception as e:
+            print(f"Warning: Failed to delete game from DB: {e}")
+            return True  # 메모리에서는 삭제됨
+
+    async def recover_game(self, game_id: str) -> Optional[GameState]:
+        """
+        DB에서 게임 복구 (서버 재시작 후 세션 복구용)
+
+        Returns:
+            복구된 GameState 또는 None
+        """
+        # 이미 메모리에 있으면 그대로 반환
+        if game_id in self._games:
+            return self._games[game_id]
+
+        # DB에서 복구
+        game = await self._load_from_db(game_id)
+        if game:
+            self._games[game_id] = game
+            return game
+
+        return None
+
+    async def get_active_sessions(self, limit: int = 50) -> list[dict]:
+        """진행 중인 게임 세션 목록"""
+        if not is_db_available():
+            # DB 없으면 메모리에서 진행 중인 게임 반환
+            return [
+                {
+                    "game_id": game.game_id,
+                    "player1_name": game.player1.name,
+                    "player2_name": game.player2.name,
+                    "game_mode": game.game_mode.value,
+                    "current_turn": game.current_turn,
+                    "turn_count": game.turn_count,
+                    "created_at": game.created_at.isoformat() + "Z",
+                    "updated_at": game.updated_at.isoformat() + "Z"
+                }
+                for game in list(self._games.values())[:limit]
+                if game.status.value == "in_progress"
+            ]
+
+        try:
+            async with async_session_factory() as session:
+                repo = GameSessionRepository(session)
+                sessions = await repo.get_active_sessions(limit=limit)
+                return [
+                    {
+                        "game_id": s.game_id,
+                        "player1_name": s.player1_name,
+                        "player2_name": s.player2_name,
+                        "game_mode": s.game_mode.value,
+                        "current_turn": s.current_turn,
+                        "turn_count": s.turn_count,
+                        "created_at": s.created_at.isoformat() + "Z",
+                        "updated_at": s.updated_at.isoformat() + "Z"
+                    }
+                    for s in sessions
+                ]
+        except Exception as e:
+            print(f"Warning: Failed to get active sessions: {e}")
+            return []
+
+    async def get_game_history(self, game_id: str) -> Optional[list]:
+        """게임 히스토리 조회 (리플레이용)"""
+        if not is_db_available():
+            # DB 없으면 히스토리 없음
+            return [] if game_id in self._games else None
+
+        try:
+            async with async_session_factory() as session:
+                repo = GameSessionRepository(session)
+                return await repo.get_game_history(game_id)
+        except Exception as e:
+            print(f"Warning: Failed to get game history: {e}")
+            return None
 
 
 # 싱글톤 인스턴스

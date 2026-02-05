@@ -119,3 +119,38 @@ class ErrorResponse(BaseModel):
     success: bool = False
     error: str
     message: str
+
+
+# Session & History Schemas (DB 연동)
+
+class SessionInfoSchema(BaseModel):
+    """세션 정보 스키마"""
+    game_id: str
+    player1_name: str
+    player2_name: str
+    game_mode: Literal["vs_ai", "local_2p"]
+    current_turn: int
+    turn_count: int
+    created_at: str
+    updated_at: str
+
+
+class ActiveSessionsResponse(BaseModel):
+    """진행 중인 세션 목록 응답"""
+    sessions: list[SessionInfoSchema]
+    count: int
+
+
+class HistoryEntrySchema(BaseModel):
+    """게임 히스토리 항목 스키마"""
+    turn: int
+    player: int
+    action: dict
+    timestamp: str
+
+
+class GameHistoryResponse(BaseModel):
+    """게임 히스토리 응답 (리플레이용)"""
+    game_id: str
+    history: list[HistoryEntrySchema]
+    total_moves: int
