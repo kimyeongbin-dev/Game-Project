@@ -2,7 +2,10 @@
 > **Claude와 Gemini AI를 활용한 나만의 게임 큐레이션 및 멀티 플랫폼 앱**
 
 본 프로젝트는 AI(Claude 3.5 & Gemini)를 활용하여 사용자가 좋아하는 게임들을 수집, 관리하고 분석하는 멀티 플랫폼 애플리케이션입니다. Flutter를 통한 유연한 UI와 FastAPI의 빠른 성능을 결합하여 안드로이드, iOS, Web, PC 모두를 지원합니다.
+---
 
+## Velog
+https://velog.io/@kimyeongbin/series/%ED%86%B5%ED%95%A9-%EA%B2%8C%EC%9E%84-%ED%94%8C%EB%9E%AB%ED%8F%BC
 ---
 
 ## 🛠 기술 스택 (Tech Stack)
