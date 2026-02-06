@@ -1,4 +1,6 @@
+# ===========================
 # Python
+# ===========================
 __pycache__/
 *.py[cod]
 *$py.class
@@ -19,52 +21,207 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+pip-log.txt
+pip-delete-this-directory.txt
 
 # Virtual environments
 venv/
 env/
 .venv/
 .env/
+ENV/
+env.bak/
+venv.bak/
 
-# Environment variables
+# Environment variables (SECURITY)
 .env
 .env.local
 .env.*.local
 *.env
+.envrc
+secrets.yaml
+secrets.json
 
-# IDE
+# ===========================
+# IDE & Editors
+# ===========================
 .idea/
 .vscode/
 *.swp
 *.swo
 *~
+*.sublime-project
+*.sublime-workspace
+.project
+.pydevproject
+.spyderproject
+.spyproject
+*.code-workspace
 
-# OS
+# ===========================
+# OS Generated Files
+# ===========================
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
+desktop.ini
 
-# Testing
+# ===========================
+# Testing & Coverage
+# ===========================
 .pytest_cache/
 .coverage
+.coverage.*
 htmlcov/
 .tox/
 .nox/
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+nosetests.xml
+test-results/
+test-reports/
 
+# ===========================
 # Logs
+# ===========================
 *.log
 logs/
+log/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
+# ===========================
 # Database
+# ===========================
 *.db
 *.sqlite3
+*.sqlite
+*.sql.backup
+*.dump
 
+# ===========================
 # Claude Code
+# ===========================
 .claude/
 
-# Flutter
+# ===========================
+# FastAPI / Backend
+# ===========================
+*.pid
+celerybeat-schedule
+celerybeat.pid
+alembic/versions/*.pyc
+
+# ===========================
+# Flutter / Dart
+# ===========================
+# Common Flutter ignores
+*.dart_tool/
+.dart_tool/
+*.flutter-plugins
+*.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+pubspec.lock
+doc/api/
+
+# Flutter build outputs
+**/build/
+
+# Platform specific
 frontend_flutter/.dart_tool/
 frontend_flutter/.flutter-plugins
 frontend_flutter/.flutter-plugins-dependencies
 frontend_flutter/build/
 frontend_flutter/*.iml
 frontend_flutter/.metadata
+frontend_flutter/.packages
+frontend_flutter/pubspec.lock
+
+# Android
+frontend_flutter/android/.gradle/
+frontend_flutter/android/local.properties
+frontend_flutter/android/key.properties
+frontend_flutter/android/*.jks
+frontend_flutter/android/*.keystore
+
+# iOS
+frontend_flutter/ios/Flutter/Generated.xcconfig
+frontend_flutter/ios/Flutter/flutter_export_environment.sh
+frontend_flutter/ios/ServiceDefinitions.json
+frontend_flutter/ios/Pods/
+frontend_flutter/ios/Podfile.lock
+frontend_flutter/ios/.symlinks/
+
+# macOS
+frontend_flutter/macos/Flutter/ephemeral/
+frontend_flutter/macos/Pods/
+frontend_flutter/macos/Podfile.lock
+
+# Windows
+frontend_flutter/windows/flutter/ephemeral/
+frontend_flutter/windows/flutter/generated_plugin_registrant.cc
+frontend_flutter/windows/flutter/generated_plugin_registrant.h
+frontend_flutter/windows/flutter/generated_plugins.cmake
+
+# Linux
+frontend_flutter/linux/flutter/ephemeral/
+frontend_flutter/linux/flutter/generated_plugin_registrant.cc
+frontend_flutter/linux/flutter/generated_plugin_registrant.h
+frontend_flutter/linux/flutter/generated_plugins.cmake
+
+# Web
+frontend_flutter/web/.last_build_id
+
+# ===========================
+# Build Artifacts
+# ===========================
+*.dll
+*.exe
+*.exp
+*.ilk
+*.lib
+*.obj
+*.pdb
+*.manifest
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# ===========================
+# Temporary Files
+# ===========================
+*.tmp
+*.temp
+*.bak
+*.backup
+*~
+.cache/
+.temp/
+tmp/
+temp/
+
+# ===========================
+# Secrets & Credentials (SECURITY)
+# ===========================
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+credentials.json
+service-account.json
+firebase-credentials.json
+google-services.json
+GoogleService-Info.plist
