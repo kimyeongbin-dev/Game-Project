@@ -4,6 +4,7 @@ pytest fixtures and configurations
 """
 
 import pytest
+import pytest_asyncio
 import asyncio
 import sys
 from pathlib import Path
@@ -33,7 +34,7 @@ def event_loop():
     loop.close()
 
 
-@pytest.fixture(scope="function")
+@pytest_asyncio.fixture(scope="function")
 async def async_engine():
     """비동기 테스트 엔진"""
     engine = create_async_engine(
@@ -53,7 +54,7 @@ async def async_engine():
     await engine.dispose()
 
 
-@pytest.fixture(scope="function")
+@pytest_asyncio.fixture(scope="function")
 async def async_session(async_engine) -> AsyncGenerator[AsyncSession, None]:
     """비동기 테스트 세션"""
     async_session_factory = async_sessionmaker(
@@ -67,7 +68,7 @@ async def async_session(async_engine) -> AsyncGenerator[AsyncSession, None]:
         yield session
 
 
-@pytest.fixture(scope="function")
+@pytest_asyncio.fixture(scope="function")
 async def repository(async_session) -> GameSessionRepository:
     """테스트용 리포지토리"""
     return GameSessionRepository(async_session)
