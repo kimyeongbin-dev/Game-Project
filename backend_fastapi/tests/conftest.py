@@ -5,7 +5,6 @@ pytest fixtures and configurations
 
 import pytest
 import pytest_asyncio
-import asyncio
 import sys
 from pathlib import Path
 from typing import AsyncGenerator
@@ -24,14 +23,6 @@ from database.repository import GameSessionRepository
 
 # 테스트용 인메모리 SQLite 데이터베이스
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
-
-
-@pytest.fixture(scope="session")
-def event_loop():
-    """세션 범위 이벤트 루프"""
-    loop = asyncio.get_event_loop_policy().new_event_loop()
-    yield loop
-    loop.close()
 
 
 @pytest_asyncio.fixture(scope="function")
