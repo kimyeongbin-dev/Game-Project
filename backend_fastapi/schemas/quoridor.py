@@ -52,7 +52,7 @@ class GameStateSchema(BaseModel):
 
 class CreateGameRequest(BaseModel):
     """게임 생성 요청"""
-    player_name: str = Field(default="Player 1", max_length=50)
+    player1_name: str = Field(default="Player 1", max_length=50)
     player2_name: str = Field(default="Player 2", max_length=50)
     ai_difficulty: Literal["easy", "normal", "hard"] = Field(default="normal")
     game_mode: Literal["vs_ai", "local_2p"] = Field(default="vs_ai")
