@@ -10,7 +10,6 @@ from database.repository import GameSessionRepository
 from database.models import GameStatus, GameMode
 
 
-@pytest.mark.asyncio
 class TestGameSessionCreate:
     """게임 세션 생성 테스트"""
 
@@ -50,7 +49,6 @@ class TestGameSessionCreate:
         assert session.ai_difficulty is None
 
 
-@pytest.mark.asyncio
 class TestGameSessionRead:
     """게임 세션 조회 테스트"""
 
@@ -98,7 +96,6 @@ class TestGameSessionRead:
         assert len(sessions) == 3
 
 
-@pytest.mark.asyncio
 class TestGameSessionUpdate:
     """게임 세션 업데이트 테스트"""
 
@@ -152,7 +149,6 @@ class TestGameSessionUpdate:
         assert session.winner == 1
 
 
-@pytest.mark.asyncio
 class TestGameSessionDelete:
     """게임 세션 삭제 테스트"""
 
@@ -198,7 +194,6 @@ class TestGameSessionDelete:
         assert session is None
 
 
-@pytest.mark.asyncio
 class TestGameMoves:
     """GameMove 테스트"""
 
