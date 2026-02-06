@@ -37,7 +37,7 @@ class PlayersSchema(BaseModel):
 class GameStateSchema(BaseModel):
     """게임 상태 스키마"""
     game_id: str
-    status: Literal["in_progress", "finished"]
+    status: Literal['in_progress', 'player1_win', 'player2_win', 'abandoned']
     game_mode: Literal["vs_ai", "local_2p"] = Field(default="vs_ai")
     current_turn: int = Field(..., ge=1, le=2)
     turn_count: int = Field(..., ge=0)
@@ -52,7 +52,7 @@ class GameStateSchema(BaseModel):
 
 class CreateGameRequest(BaseModel):
     """게임 생성 요청"""
-    player_name: str = Field(default="Player", max_length=50)
+    player_name: str = Field(default="Player 1", max_length=50)
     player2_name: str = Field(default="Player 2", max_length=50)
     ai_difficulty: Literal["easy", "normal", "hard"] = Field(default="normal")
     game_mode: Literal["vs_ai", "local_2p"] = Field(default="vs_ai")
@@ -154,3 +154,31 @@ class GameHistoryResponse(BaseModel):
     game_id: str
     history: list[HistoryEntrySchema]
     total_moves: int
+
+
+# ===== 리플레이 시스템 스키마 =====
+
+class MoveRecordSchema(BaseModel):
+    """수 기록 스키마 (GameMove 테이블 기반)"""
+    step_no: int = Field(..., ge=0, description="수 번호 (0부터 시작)")
+    player: int = Field(..., ge=1, le=2, description="플레이어 (1 또는 2)")
+    action_type: Literal["move", "wall"] = Field(..., description="액션 타입")
+    row: int = Field(..., ge=0, description="행 좌표")
+    col: int = Field(..., ge=0, description="열 좌표")
+    orientation: Optional[Literal["horizontal", "vertical"]] = Field(None, description="벽 방향 (wall일 때만)")
+    created_at: str = Field(..., description="기록 시간")
+
+
+class ReplayMovesResponse(BaseModel):
+    """리플레이 수 목록 응답"""
+    game_id: str
+    moves: list[MoveRecordSchema]
+    total_moves: int
+
+
+class ReplayStateResponse(BaseModel):
+    """리플레이 특정 스텝 상태 응답"""
+    game_id: str
+    step_no: int
+    game_state: dict
+    is_initial: bool = Field(default=False, description="초기 상태 여부")

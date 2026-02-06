@@ -11,7 +11,7 @@ from sqlalchemy.orm import declarative_base
 # 환경 변수에서 DB URL 가져오기 (기본값: 로컬 PostgreSQL)
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql+asyncpg://postgres:postgres@localhost:5432/quoridor_db"
+    "postgresql+asyncpg://postgres:8755@localhost:5432/quoridor_db"
 )
 
 # DB 활성화 여부 (환경 변수로 비활성화 가능)
@@ -51,6 +51,11 @@ def _create_engine():
 def is_db_available() -> bool:
     """DB 사용 가능 여부 반환"""
     return _db_available
+
+
+def get_session_factory():
+    """세션 팩토리 반환 (import 시점 문제 해결용)"""
+    return async_session_factory
 
 
 async def get_db_session() -> Optional[AsyncSession]:

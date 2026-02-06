@@ -19,7 +19,9 @@ from .pathfinder import Pathfinder
 class GameStatus(Enum):
     """게임 상태"""
     IN_PROGRESS = "in_progress"
-    FINISHED = "finished"
+    PLAYER1_WIN = "player1_win"    # Player 1 승리
+    PLAYER2_WIN = "player2_win"    # Player 2 / AI 승리
+    ABANDONED = "abandoned"
 
 
 class GameMode(Enum):
@@ -118,7 +120,7 @@ class GameState:
         Returns:
             (성공 여부, 메시지)
         """
-        if self.status == GameStatus.FINISHED:
+        if self.status in (GameStatus.PLAYER1_WIN, GameStatus.PLAYER2_WIN):
             return False, "Game is already finished"
 
         try:
@@ -141,7 +143,7 @@ class GameState:
         # 승리 확인
         if self.current_player.has_reached_goal():
             self.winner = self.current_turn
-            self.status = GameStatus.FINISHED
+            self.status = GameStatus.PLAYER1_WIN if self.current_turn == 1 else GameStatus.PLAYER2_WIN
             return True, f"Player {self.current_turn} wins!"
 
         # 턴 전환
@@ -161,7 +163,7 @@ class GameState:
         Returns:
             (성공 여부, 메시지)
         """
-        if self.status == GameStatus.FINISHED:
+        if self.status in (GameStatus.PLAYER1_WIN, GameStatus.PLAYER2_WIN):
             return False, "Game is already finished"
 
         if not self.current_player.has_walls():
@@ -260,7 +262,14 @@ class GameState:
         """딕셔너리에서 게임 상태 복원"""
         game = cls.__new__(cls)
         game.game_id = data["game_id"]
-        game.status = GameStatus(data["status"])
+
+        # 하위 호환성: 기존 "finished" 상태 처리
+        status_str = data["status"]
+        if status_str == "finished":
+            winner = data.get("winner")
+            status_str = "player1_win" if winner == 1 else "player2_win"
+        game.status = GameStatus(status_str)
+
         game.game_mode = GameMode(data.get("game_mode", "vs_ai"))
         game.current_turn = data["current_turn"]
         game.turn_count = data["turn_count"]

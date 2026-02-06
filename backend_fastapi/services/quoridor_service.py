@@ -20,7 +20,7 @@ from games.game_Quoridor.core.wall import Orientation
 from games.game_Quoridor.ai.simple_ai import SimpleAI
 
 # DB 관련 임포트
-from database import async_session_factory, is_db_available
+from database import get_session_factory, is_db_available
 from database.repository import GameSessionRepository
 
 
@@ -35,7 +35,7 @@ class QuoridorService:
 
     async def _get_repository(self) -> GameSessionRepository:
         """DB 리포지토리 인스턴스 생성"""
-        session = async_session_factory()
+        session = get_session_factory()()
         return GameSessionRepository(session)
 
     async def _save_to_db(
@@ -50,7 +50,7 @@ class QuoridorService:
             return  # DB 없으면 스킵
 
         try:
-            async with async_session_factory() as session:
+            async with get_session_factory()() as session:
                 repo = GameSessionRepository(session)
 
                 if is_new:
@@ -74,6 +74,20 @@ class QuoridorService:
                         status=status,
                         winner=winner
                     )
+
+                    # GameMove 테이블에도 저장 (리플레이용)
+                    if action:
+                        step_no = game.turn_count  # 현재 턴 카운트가 step_no
+                        await repo.add_move(
+                            game_id=game.game_id,
+                            step_no=step_no,
+                            player=action.get("player", 1),
+                            action_type=action.get("type", "move"),
+                            row=action.get("row", 0),
+                            col=action.get("col", 0),
+                            orientation=action.get("orientation"),
+                            game_state_snapshot=game.to_dict()
+                        )
         except Exception as e:
             # DB 저장 실패해도 메모리 게임은 계속 진행
             print(f"Warning: Failed to save game to DB: {e}")
@@ -84,7 +98,7 @@ class QuoridorService:
             return None  # DB 없으면 None 반환
 
         try:
-            async with async_session_factory() as session:
+            async with get_session_factory()() as session:
                 repo = GameSessionRepository(session)
                 game_session = await repo.get_by_id(game_id)
 
@@ -107,7 +121,7 @@ class QuoridorService:
 
     async def create_game(
         self,
-        player_name: str = "Player",
+        player1_name: str = "Player 1",
         player2_name: str = "Player 2",
         ai_difficulty: str = "normal",
         game_mode: str = "vs_ai"
@@ -116,7 +130,7 @@ class QuoridorService:
         # 로컬 2인 모드일 경우 player2_name 사용, AI 모드는 "AI"
         p2_name = player2_name if game_mode == "local_2p" else "AI"
         game = GameState(
-            player1_name=player_name,
+            player1_name=player1_name,
             player2_name=p2_name,
             game_mode=game_mode
         )
@@ -222,7 +236,7 @@ class QuoridorService:
         if game.current_turn != 2:
             return False, "Not AI's turn", None, None
 
-        if game.status.value == "finished":
+        if game.status.value in ("player1_win", "player2_win"):
             return False, "Game is already finished", None, None
 
         ai = self._ai_instances.get(game_id)
@@ -277,8 +291,8 @@ class QuoridorService:
             "walls_remaining": game.current_player.walls_remaining
         }
 
-    async def delete_game(self, game_id: str) -> bool:
-        """게임 삭제"""
+    async def abandon_game(self, game_id: str) -> bool:
+        """게임 포기 (기록은 보존, 활성 목록에서만 제외)"""
         # 메모리에서 삭제
         if game_id in self._games:
             del self._games[game_id]
@@ -287,17 +301,39 @@ class QuoridorService:
         if game_id in self._ai_difficulties:
             del self._ai_difficulties[game_id]
 
-        # DB에서 소프트 삭제
+        # DB에서 포기 처리
         if not is_db_available():
-            return True  # DB 없으면 메모리 삭제만
+            return True
 
         try:
-            async with async_session_factory() as session:
+            async with get_session_factory()() as session:
                 repo = GameSessionRepository(session)
-                return await repo.soft_delete(game_id)
+                return await repo.abandon_game(game_id)
+        except Exception as e:
+            print(f"Warning: Failed to abandon game in DB: {e}")
+            return True
+
+    async def delete_game(self, game_id: str) -> bool:
+        """게임 완전 삭제 (기록도 숨김)"""
+        # 메모리에서 삭제
+        if game_id in self._games:
+            del self._games[game_id]
+        if game_id in self._ai_instances:
+            del self._ai_instances[game_id]
+        if game_id in self._ai_difficulties:
+            del self._ai_difficulties[game_id]
+
+        # DB에서 완전 삭제
+        if not is_db_available():
+            return True
+
+        try:
+            async with get_session_factory()() as session:
+                repo = GameSessionRepository(session)
+                return await repo.hard_delete(game_id)
         except Exception as e:
             print(f"Warning: Failed to delete game from DB: {e}")
-            return True  # 메모리에서는 삭제됨
+            return True
 
     async def recover_game(self, game_id: str) -> Optional[GameState]:
         """
@@ -338,7 +374,7 @@ class QuoridorService:
             ]
 
         try:
-            async with async_session_factory() as session:
+            async with get_session_factory()() as session:
                 repo = GameSessionRepository(session)
                 sessions = await repo.get_active_sessions(limit=limit)
                 return [
@@ -359,18 +395,96 @@ class QuoridorService:
             return []
 
     async def get_game_history(self, game_id: str) -> Optional[list]:
-        """게임 히스토리 조회 (리플레이용)"""
+        """게임 히스토리 조회 (리플레이용) - 기존 JSONB 방식"""
         if not is_db_available():
-            # DB 없으면 히스토리 없음
             return [] if game_id in self._games else None
 
         try:
-            async with async_session_factory() as session:
+            async with get_session_factory()() as session:
                 repo = GameSessionRepository(session)
                 return await repo.get_game_history(game_id)
         except Exception as e:
             print(f"Warning: Failed to get game history: {e}")
             return None
+
+    # ===== 리플레이 시스템 메서드 =====
+
+    async def get_replay_moves(self, game_id: str) -> Optional[list[dict]]:
+        """리플레이용 수 목록 조회 (GameMove 테이블)"""
+        if not is_db_available():
+            return None
+
+        try:
+            async with get_session_factory()() as session:
+                repo = GameSessionRepository(session)
+                moves = await repo.get_moves(game_id)
+                return [move.to_dict() for move in moves]
+        except Exception as e:
+            print(f"Warning: Failed to get replay moves: {e}")
+            return None
+
+    async def get_state_at_step(self, game_id: str, step_no: int) -> Optional[dict]:
+        """특정 스텝에서의 게임 상태 조회"""
+        if not is_db_available():
+            return None
+
+        try:
+            async with get_session_factory()() as session:
+                repo = GameSessionRepository(session)
+
+                if step_no < 0:
+                    # 초기 상태 요청 시 게임 세션의 초기 상태 반환
+                    game_session = await repo.get_by_id(game_id)
+                    if not game_session:
+                        return None
+                    # 초기 상태 구성
+                    return self._get_initial_state(game_session)
+
+                return await repo.get_state_at_step(game_id, step_no)
+        except Exception as e:
+            print(f"Warning: Failed to get state at step: {e}")
+            return None
+
+    def _get_initial_state(self, game_session) -> dict:
+        """게임의 초기 상태 생성"""
+        return {
+            "game_id": game_session.game_id,
+            "status": "in_progress",
+            "game_mode": game_session.game_mode.value,
+            "current_turn": 1,
+            "turn_count": 0,
+            "players": {
+                "player1": {
+                    "name": game_session.player1_name,
+                    "position": {"row": 8, "col": 4},
+                    "walls_remaining": 10,
+                    "goal_row": 0
+                },
+                "player2": {
+                    "name": game_session.player2_name,
+                    "position": {"row": 0, "col": 4},
+                    "walls_remaining": 10,
+                    "goal_row": 8
+                }
+            },
+            "walls": [],
+            "winner": None,
+            "created_at": game_session.created_at.isoformat() + "Z",
+            "updated_at": game_session.created_at.isoformat() + "Z"
+        }
+
+    async def get_total_moves(self, game_id: str) -> int:
+        """게임의 총 수 개수"""
+        if not is_db_available():
+            return 0
+
+        try:
+            async with get_session_factory()() as session:
+                repo = GameSessionRepository(session)
+                return await repo.get_total_moves(game_id)
+        except Exception as e:
+            print(f"Warning: Failed to get total moves: {e}")
+            return 0
 
 
 # 싱글톤 인스턴스

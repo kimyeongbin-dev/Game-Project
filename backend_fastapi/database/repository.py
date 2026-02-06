@@ -8,7 +8,7 @@ from typing import Optional
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import GameSession, GameStatus, GameMode
+from .models import GameSession, GameStatus, GameMode, GameMove, ActionType
 
 
 class GameSessionRepository:
@@ -134,19 +134,8 @@ class GameSessionRepository:
         result = await self.session.execute(query)
         return list(result.scalars().all())
 
-    async def soft_delete(self, game_id: str) -> bool:
-        """게임 세션 소프트 삭제"""
-        game_session = await self.get_by_id(game_id)
-        if not game_session:
-            return False
-
-        game_session.is_deleted = True
-        game_session.updated_at = datetime.utcnow()
-        await self.session.commit()
-        return True
-
-    async def mark_abandoned(self, game_id: str) -> bool:
-        """게임을 포기 상태로 변경"""
+    async def abandon_game(self, game_id: str) -> bool:
+        """게임 포기 (기록은 보존, 활성 목록에서만 제외)"""
         game_session = await self.get_by_id(game_id)
         if not game_session:
             return False
@@ -156,9 +145,107 @@ class GameSessionRepository:
         await self.session.commit()
         return True
 
+    async def hard_delete(self, game_id: str) -> bool:
+        """게임 완전 삭제 (기록도 숨김)"""
+        game_session = await self.get_by_id(game_id)
+        if not game_session:
+            return False
+
+        game_session.status = GameStatus.ABANDONED
+        game_session.is_deleted = True
+        game_session.updated_at = datetime.utcnow()
+        await self.session.commit()
+        return True
+
     async def get_game_history(self, game_id: str) -> Optional[list]:
-        """게임 히스토리 조회 (리플레이용)"""
+        """게임 히스토리 조회 (리플레이용) - 기존 JSONB 방식"""
         game_session = await self.get_by_id(game_id)
         if not game_session:
             return None
         return game_session.game_history
+
+    # ===== GameMove 관련 메서드 (리플레이 시스템) =====
+
+    async def add_move(
+        self,
+        game_id: str,
+        step_no: int,
+        player: int,
+        action_type: str,
+        row: int,
+        col: int,
+        orientation: Optional[str],
+        game_state_snapshot: dict
+    ) -> GameMove:
+        """새로운 수 기록 추가"""
+        move = GameMove(
+            game_id=game_id,
+            step_no=step_no,
+            player=player,
+            action_type=ActionType(action_type),
+            row=row,
+            col=col,
+            orientation=orientation,
+            game_state_snapshot=game_state_snapshot
+        )
+        self.session.add(move)
+        await self.session.commit()
+        await self.session.refresh(move)
+        return move
+
+    async def get_moves(self, game_id: str) -> list[GameMove]:
+        """게임의 모든 수 조회 (step_no 순서)"""
+        result = await self.session.execute(
+            select(GameMove)
+            .where(GameMove.game_id == game_id)
+            .order_by(GameMove.step_no)
+        )
+        return list(result.scalars().all())
+
+    async def get_move_at_step(self, game_id: str, step_no: int) -> Optional[GameMove]:
+        """특정 스텝의 수 조회"""
+        result = await self.session.execute(
+            select(GameMove)
+            .where(GameMove.game_id == game_id, GameMove.step_no == step_no)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_state_at_step(self, game_id: str, step_no: int) -> Optional[dict]:
+        """특정 스텝에서의 게임 상태 스냅샷 조회"""
+        if step_no < 0:
+            # step 0 이전은 초기 상태 (게임 세션에서 조회)
+            game_session = await self.get_by_id(game_id)
+            if not game_session:
+                return None
+            # 초기 상태 반환 (첫 번째 move가 있으면 그 전 상태, 없으면 현재 상태)
+            moves = await self.get_moves(game_id)
+            if not moves:
+                return game_session.game_state
+            # 초기 상태는 별도로 저장하지 않았으므로 None 반환
+            return None
+
+        move = await self.get_move_at_step(game_id, step_no)
+        if not move:
+            return None
+        return move.game_state_snapshot
+
+    async def get_total_moves(self, game_id: str) -> int:
+        """게임의 총 수 개수"""
+        result = await self.session.execute(
+            select(GameMove)
+            .where(GameMove.game_id == game_id)
+        )
+        return len(list(result.scalars().all()))
+
+    async def delete_moves_after(self, game_id: str, step_no: int) -> int:
+        """특정 스텝 이후의 수 삭제 (되돌리기용)"""
+        result = await self.session.execute(
+            select(GameMove)
+            .where(GameMove.game_id == game_id, GameMove.step_no > step_no)
+        )
+        moves = list(result.scalars().all())
+        count = len(moves)
+        for move in moves:
+            await self.session.delete(move)
+        await self.session.commit()
+        return count
