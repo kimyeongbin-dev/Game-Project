@@ -69,7 +69,9 @@ jobs:
           DB_ENABLED: true
           TESTING: true
         run: |
-          pytest --tb=short -v --junitxml=test-results.xml || echo "No tests found or tests failed"
+          pytest --tb=long -v --junitxml=test-results.xml 2>&1 | tee pytest-output.log || true
+          echo "=== Test Summary ==="
+          tail -100 pytest-output.log
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
