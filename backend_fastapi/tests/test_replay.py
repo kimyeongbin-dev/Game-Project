@@ -15,7 +15,6 @@ sys.path.insert(0, str(project_root.parent))
 from database.repository import GameSessionRepository
 
 
-@pytest.mark.asyncio
 class TestReplayMoves:
     """리플레이 수 기록 테스트"""
 
@@ -146,7 +145,6 @@ class TestReplayMoves:
         assert state["current_turn"] == 2
 
 
-@pytest.mark.asyncio
 class TestReplayWallMoves:
     """벽 설치 리플레이 테스트"""
 
@@ -180,7 +178,6 @@ class TestReplayWallMoves:
         assert moves[0].orientation == "horizontal"
 
 
-@pytest.mark.asyncio
 class TestDeleteMoves:
     """수 삭제 테스트"""
 
