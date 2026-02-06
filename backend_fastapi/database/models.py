@@ -63,8 +63,8 @@ class GameSession(Base):
     turn_count = Column(Integer, default=0, nullable=False)
     winner = Column(Integer, nullable=True)
 
-    # AI 설정 (vs_ai 모드일 때)
-    ai_difficulty = Column(String(20), nullable=True, default="normal")
+    # AI 설정 (vs_ai 모드일 때만 사용)
+    ai_difficulty = Column(String(20), nullable=True)
 
     # 게임 상태 (전체 상태를 JSON으로 저장)
     # 포함 내용: board, players (positions, walls_remaining), walls
