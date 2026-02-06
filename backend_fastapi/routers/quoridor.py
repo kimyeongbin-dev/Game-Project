@@ -50,7 +50,7 @@ async def get_active_sessions(limit: int = Query(default=50, ge=1, le=100)):
 async def create_game(request: CreateGameRequest = CreateGameRequest()):
     """새 게임 생성"""
     game = await quoridor_service.create_game(
-        player_name=request.player_name,
+        player1_name=request.player1_name,
         player2_name=request.player2_name,
         ai_difficulty=request.ai_difficulty,
         game_mode=request.game_mode

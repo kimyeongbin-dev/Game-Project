@@ -4,9 +4,12 @@ PostgreSQL 연결 설정 및 세션 관리
 """
 
 import os
+import logging
 from typing import Optional
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
+
+logger = logging.getLogger(__name__)
 
 # 환경 변수에서 DB URL 가져오기 (기본값: 로컬 PostgreSQL)
 DATABASE_URL = os.getenv(
@@ -76,7 +79,7 @@ async def init_db():
     global _db_available
 
     if not DB_ENABLED:
-        print("Database disabled by configuration (DB_ENABLED=false)")
+        logger.info("Database disabled by configuration (DB_ENABLED=false)")
         _db_available = False
         return
 
@@ -85,11 +88,11 @@ async def init_db():
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         _db_available = True
-        print("Database connection established successfully")
+        logger.info("Database connection established successfully")
     except Exception as e:
         _db_available = False
-        print(f"Warning: Database connection failed: {e}")
-        print("Server will run in memory-only mode (game data will not persist)")
+        logger.warning(f"Database connection failed: {e}")
+        logger.info("Server will run in memory-only mode (game data will not persist)")
 
 
 async def close_db():
