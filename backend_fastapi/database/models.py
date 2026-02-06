@@ -4,10 +4,14 @@ SQLAlchemy 모델 정의
 """
 
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, Boolean, Integer, Enum as SQLEnum, ForeignKey
+from sqlalchemy import Column, String, DateTime, Boolean, Integer, Enum as SQLEnum, ForeignKey, JSON
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 import enum
+
+
+# PostgreSQL에서는 JSONB 사용, 다른 DB에서는 JSON 사용
+JsonType = JSON().with_variant(JSONB(), 'postgresql')
 
 from .config import Base
 
@@ -62,13 +66,13 @@ class GameSession(Base):
     # AI 설정 (vs_ai 모드일 때)
     ai_difficulty = Column(String(20), nullable=True, default="normal")
 
-    # 게임 상태 (전체 상태를 JSONB로 저장)
+    # 게임 상태 (전체 상태를 JSON으로 저장)
     # 포함 내용: board, players (positions, walls_remaining), walls
-    game_state = Column(JSONB, nullable=False)
+    game_state = Column(JsonType, nullable=False)
 
     # 게임 히스토리 (리플레이용 - 모든 수의 기록)
     # 배열 형태: [{"turn": 1, "player": 1, "action": {...}, "timestamp": "..."}, ...]
-    game_history = Column(JSONB, nullable=False, default=list)
+    game_history = Column(JsonType, nullable=False, default=list)
 
     # 타임스탬프
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -114,7 +118,7 @@ class GameMove(Base):
     orientation = Column(String(20), nullable=True)  # wall일 때만 사용
 
     # 이 수를 둔 후의 게임 상태 스냅샷 (리플레이용)
-    game_state_snapshot = Column(JSONB, nullable=False)
+    game_state_snapshot = Column(JsonType, nullable=False)
 
     # 타임스탬프
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
