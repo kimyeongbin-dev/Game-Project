@@ -1,17 +1,21 @@
 """
-Health check test - Workflow verification
+Health check test - Basic sanity tests
 """
 import pytest
+import sys
 
 
-def test_workflow_trigger():
-    """Simple test to verify GitHub Actions workflow is triggered."""
-    assert True, "Workflow test passed"
-
-
-def test_python_environment():
-    """Verify Python environment is set up correctly."""
-    import sys
+def test_python_version():
+    """Verify Python version."""
     assert sys.version_info >= (3, 9), "Python 3.9+ required"
-# Test 1770362397
 
+
+def test_imports():
+    """Verify required packages can be imported."""
+    import fastapi
+    import sqlalchemy
+    import pydantic
+
+    assert fastapi is not None
+    assert sqlalchemy is not None
+    assert pydantic is not None
