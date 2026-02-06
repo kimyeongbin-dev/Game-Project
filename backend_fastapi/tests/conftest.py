@@ -3,6 +3,7 @@ Test Configuration
 pytest fixtures and configurations
 """
 
+import os
 import pytest
 import pytest_asyncio
 import sys
@@ -15,23 +16,24 @@ sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root.parent))
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy.pool import StaticPool
 
 from database.config import Base
 from database.repository import GameSessionRepository
 
 
-# 테스트용 인메모리 SQLite 데이터베이스
-TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
+# 테스트용 PostgreSQL 데이터베이스 (환경변수에서 읽음)
+TEST_DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql+asyncpg://postgres:postgres@localhost:5432/quoridor_test_db"
+)
 
 
 @pytest_asyncio.fixture(scope="function")
 async def async_engine():
-    """비동기 테스트 엔진"""
+    """비동기 테스트 엔진 (PostgreSQL)"""
     engine = create_async_engine(
         TEST_DATABASE_URL,
         echo=False,
-        poolclass=StaticPool,
     )
 
     async with engine.begin() as conn:
