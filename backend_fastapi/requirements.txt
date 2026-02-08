@@ -1,28 +1,48 @@
 # FastAPI Backend Dependencies
-# Game Project - Phase 1
+# Docker 환경용 (아나콘다 환경에서 마이그레이션)
 
 # Web Framework
-fastapi>=0.109.0
-uvicorn[standard]>=0.27.0
+fastapi==0.128.0
+uvicorn[standard]==0.40.0
+starlette==0.50.0
 
 # Database
-sqlalchemy>=2.0.0
-aiosqlite>=0.19.0
-asyncpg>=0.29.0
-psycopg2-binary>=2.9.9
+sqlalchemy==2.0.46
+asyncpg==0.31.0
+psycopg2-binary==2.9.11
+aiosqlite==0.22.1
+
+# Pydantic & Validation
+pydantic==2.12.5
+pydantic-settings==2.12.0
+pydantic_core==2.41.5
+annotated-types==0.7.0
 
 # Authentication
-python-jose[cryptography]>=3.3.0
-passlib[bcrypt]>=1.7.4
+python-jose[cryptography]==3.5.0
+passlib[bcrypt]==1.7.4
+bcrypt==5.0.0
+cryptography==46.0.4
 
-# Validation & Serialization
-pydantic>=2.5.0
-pydantic-settings>=2.1.0
+# HTTP & Networking
+httpx==0.28.1
+httpcore==1.0.9
+anyio==4.12.1
+h11==0.16.0
+httptools==0.7.1
+websockets==16.0
 
-# CORS & Security
-python-multipart>=0.0.6
+# Utils
+python-dotenv==1.2.1
+python-multipart==0.0.22
+pyyaml==6.0.3
+click==8.3.1
+typing_extensions==4.15.0
+
+# Async Support
+greenlet==3.3.1
+watchfiles==1.1.1
 
 # Development & Testing
-pytest>=7.4.0
-pytest-asyncio>=0.23.0
-httpx>=0.26.0
+pytest==9.0.2
+pytest-asyncio==1.3.0
