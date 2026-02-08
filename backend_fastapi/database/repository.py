@@ -3,12 +3,18 @@ Game Session Repository
 게임 세션 데이터베이스 CRUD 작업
 """
 
-from datetime import datetime
+from datetime import datetime, date
 from typing import Optional
-from sqlalchemy import select, update, func, delete
+import secrets
+import re
+import bcrypt
+from sqlalchemy import select, update, func, delete, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import GameSession, GameStatus, GameMode, GameMove, ActionType
+from .models import (
+    GameSession, GameStatus, GameMode, GameMove, ActionType,
+    User, DailyChampion, MatchQueue, MatchQueueStatus, GameRoom, RoomStatus
+)
 
 
 class GameSessionRepository:
@@ -261,3 +267,335 @@ class GameSessionRepository:
             await self.session.commit()
 
         return count
+
+
+# ===== 유저 관련 Repository =====
+
+class UserRepository:
+    """유저 저장소"""
+
+    # 닉네임 규칙: 2-12자, 영문/숫자/한글
+    NICKNAME_PATTERN = re.compile(r'^[a-zA-Z0-9가-힣]{2,12}$')
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    def _generate_token(self) -> str:
+        """64자 세션 토큰 생성"""
+        return secrets.token_hex(32)
+
+    def _hash_password(self, password: str) -> str:
+        """비밀번호 해시"""
+        return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+    def _verify_password(self, password: str, hashed: str) -> bool:
+        """비밀번호 검증"""
+        return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+
+    def validate_nickname(self, nickname: str) -> tuple[bool, str]:
+        """닉네임 유효성 검사"""
+        if not nickname:
+            return False, "닉네임을 입력해주세요"
+        if len(nickname) < 2:
+            return False, "닉네임은 2자 이상이어야 합니다"
+        if len(nickname) > 12:
+            return False, "닉네임은 12자 이하여야 합니다"
+        if not self.NICKNAME_PATTERN.match(nickname):
+            return False, "닉네임은 영문, 숫자, 한글만 사용 가능합니다"
+        return True, ""
+
+    def validate_password(self, password: str) -> tuple[bool, str]:
+        """비밀번호 유효성 검사"""
+        if not password:
+            return False, "비밀번호를 입력해주세요"
+        if len(password) < 4:
+            return False, "비밀번호는 4자 이상이어야 합니다"
+        if len(password) > 50:
+            return False, "비밀번호는 50자 이하여야 합니다"
+        return True, ""
+
+    async def create(self, nickname: str, password: str) -> tuple[Optional[User], str]:
+        """유저 생성 (닉네임 중복 체크 + 비밀번호 해시)"""
+        # 닉네임 유효성 검사
+        is_valid, error_msg = self.validate_nickname(nickname)
+        if not is_valid:
+            return None, error_msg
+
+        # 비밀번호 유효성 검사
+        is_valid, error_msg = self.validate_password(password)
+        if not is_valid:
+            return None, error_msg
+
+        # 중복 체크
+        existing = await self.get_by_nickname(nickname)
+        if existing:
+            return None, "이미 사용 중인 닉네임입니다"
+
+        # 유저 생성
+        user = User(
+            nickname=nickname,
+            password_hash=self._hash_password(password),
+            session_token=self._generate_token(),
+            score=0,
+            wins=0,
+            losses=0,
+            is_online=True,
+            last_active_at=datetime.utcnow()
+        )
+        self.session.add(user)
+        await self.session.commit()
+        await self.session.refresh(user)
+        return user, ""
+
+    async def get_by_id(self, user_id: int) -> Optional[User]:
+        """ID로 유저 조회"""
+        result = await self.session.execute(
+            select(User).where(User.id == user_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_by_nickname(self, nickname: str) -> Optional[User]:
+        """닉네임으로 유저 조회"""
+        result = await self.session.execute(
+            select(User).where(User.nickname == nickname)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_by_token(self, token: str) -> Optional[User]:
+        """세션 토큰으로 유저 조회"""
+        result = await self.session.execute(
+            select(User).where(User.session_token == token)
+        )
+        return result.scalar_one_or_none()
+
+    async def login(self, nickname: str, password: str) -> tuple[Optional[User], str]:
+        """로그인 (비밀번호 검증 + 새 토큰 발급)"""
+        user = await self.get_by_nickname(nickname)
+        if not user:
+            return None, "닉네임 또는 비밀번호가 올바르지 않습니다"
+
+        # 비밀번호 검증
+        if not self._verify_password(password, user.password_hash):
+            return None, "닉네임 또는 비밀번호가 올바르지 않습니다"
+
+        # 새 토큰 발급 및 온라인 상태 업데이트
+        user.session_token = self._generate_token()
+        user.is_online = True
+        user.last_active_at = datetime.utcnow()
+        await self.session.commit()
+        await self.session.refresh(user)
+        return user, ""
+
+    async def logout(self, user_id: int) -> bool:
+        """로그아웃"""
+        user = await self.get_by_id(user_id)
+        if not user:
+            return False
+
+        user.is_online = False
+        user.current_game_id = None
+        await self.session.commit()
+        return True
+
+    async def update_heartbeat(self, user_id: int) -> bool:
+        """접속 상태 갱신 (heartbeat)"""
+        user = await self.get_by_id(user_id)
+        if not user:
+            return False
+
+        user.is_online = True
+        user.last_active_at = datetime.utcnow()
+        await self.session.commit()
+        return True
+
+    async def set_current_game(self, user_id: int, game_id: Optional[str]) -> bool:
+        """현재 게임 ID 설정"""
+        user = await self.get_by_id(user_id)
+        if not user:
+            return False
+
+        user.current_game_id = game_id
+        user.last_active_at = datetime.utcnow()
+        await self.session.commit()
+        return True
+
+    async def update_score(
+        self,
+        user_id: int,
+        score_change: float,
+        is_win: bool,
+        turn_count: Optional[int] = None
+    ) -> Optional[User]:
+        """점수 업데이트"""
+        user = await self.get_by_id(user_id)
+        if not user:
+            return None
+
+        # 점수 업데이트 (최소 0)
+        user.score = max(0, user.score + score_change)
+
+        # 승패 업데이트
+        if is_win:
+            user.wins += 1
+            # 최단 턴 업데이트
+            if turn_count and (user.best_turn_count is None or turn_count < user.best_turn_count):
+                user.best_turn_count = turn_count
+        else:
+            user.losses += 1
+
+        await self.session.commit()
+        await self.session.refresh(user)
+        return user
+
+    async def reset_stats(self, user_id: int) -> bool:
+        """유저 통계 리셋 (일일 리셋용)"""
+        user = await self.get_by_id(user_id)
+        if not user:
+            return False
+
+        user.score = 0
+        user.wins = 0
+        user.losses = 0
+        user.best_turn_count = None
+        await self.session.commit()
+        return True
+
+    async def delete_user(self, user_id: int) -> bool:
+        """유저 삭제"""
+        user = await self.get_by_id(user_id)
+        if not user:
+            return False
+
+        await self.session.delete(user)
+        await self.session.commit()
+        return True
+
+    async def delete_inactive_users(self, exclude_user_id: Optional[int] = None) -> int:
+        """게임 중이 아닌 유저 삭제 (일일 리셋용)"""
+        query = delete(User).where(User.current_game_id == None)
+        if exclude_user_id:
+            query = query.where(User.id != exclude_user_id)
+
+        result = await self.session.execute(query)
+        await self.session.commit()
+        return result.rowcount
+
+    async def delete_all_users(self) -> int:
+        """모든 유저 삭제"""
+        result = await self.session.execute(delete(User))
+        await self.session.commit()
+        return result.rowcount
+
+
+class RankingRepository:
+    """랭킹 저장소"""
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def get_leaderboard(self, limit: int = 20) -> list[User]:
+        """리더보드 조회 (점수 > 승수 > 최단 턴)"""
+        result = await self.session.execute(
+            select(User)
+            .order_by(
+                User.score.desc(),
+                User.wins.desc(),
+                User.best_turn_count.asc().nullslast()
+            )
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def get_top_user(self) -> Optional[User]:
+        """1위 유저 조회"""
+        result = await self.session.execute(
+            select(User)
+            .order_by(
+                User.score.desc(),
+                User.wins.desc(),
+                User.best_turn_count.asc().nullslast()
+            )
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_user_rank(self, user_id: int) -> int:
+        """유저의 현재 순위 조회"""
+        user = await self.session.execute(
+            select(User).where(User.id == user_id)
+        )
+        target_user = user.scalar_one_or_none()
+        if not target_user:
+            return 0
+
+        # 자신보다 높은 점수를 가진 유저 수 + 1
+        count_result = await self.session.execute(
+            select(func.count(User.id)).where(
+                or_(
+                    User.score > target_user.score,
+                    and_(
+                        User.score == target_user.score,
+                        User.wins > target_user.wins
+                    ),
+                    and_(
+                        User.score == target_user.score,
+                        User.wins == target_user.wins,
+                        User.best_turn_count < target_user.best_turn_count
+                    ) if target_user.best_turn_count else False
+                )
+            )
+        )
+        return (count_result.scalar() or 0) + 1
+
+    async def get_total_users(self) -> int:
+        """총 유저 수"""
+        result = await self.session.execute(select(func.count(User.id)))
+        return result.scalar() or 0
+
+    async def save_daily_champion(
+        self,
+        nickname: str,
+        score: float,
+        wins: int,
+        losses: int,
+        best_turn_count: Optional[int],
+        champion_date: date,
+        preserved_user_id: Optional[int] = None
+    ) -> DailyChampion:
+        """일일 챔피언 저장"""
+        champion = DailyChampion(
+            nickname=nickname,
+            score=score,
+            wins=wins,
+            losses=losses,
+            best_turn_count=best_turn_count,
+            champion_date=champion_date,
+            reset_at=datetime.utcnow(),
+            preserved_user_id=preserved_user_id
+        )
+        self.session.add(champion)
+        await self.session.commit()
+        await self.session.refresh(champion)
+        return champion
+
+    async def get_champion_by_date(self, target_date: date) -> Optional[DailyChampion]:
+        """특정 날짜의 챔피언 조회"""
+        result = await self.session.execute(
+            select(DailyChampion).where(DailyChampion.champion_date == target_date)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_recent_champions(self, days: int = 7) -> list[DailyChampion]:
+        """최근 N일 챔피언 목록"""
+        result = await self.session.execute(
+            select(DailyChampion)
+            .order_by(DailyChampion.champion_date.desc())
+            .limit(days)
+        )
+        return list(result.scalars().all())
+
+    async def get_yesterday_champion(self) -> Optional[DailyChampion]:
+        """어제의 챔피언 조회"""
+        from datetime import timedelta
+        yesterday = date.today() - timedelta(days=1)
+        return await self.get_champion_by_date(yesterday)
