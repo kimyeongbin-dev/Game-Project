@@ -15,7 +15,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from routers.quoridor import router as quoridor_router
+from routers.users import router as users_router
+from routers.ranking import router as ranking_router
 from database import init_db, close_db
+from scheduler import setup_scheduler, shutdown_scheduler
 
 
 @asynccontextmanager
@@ -25,7 +28,19 @@ async def lifespan(app: FastAPI):
     print("Initializing database...")
     await init_db()
     print("Database initialized successfully")
+
+    # 스케줄러 시작
+    print("Starting scheduler...")
+    setup_scheduler()
+    print("Scheduler started")
+
     yield
+
+    # 종료: 스케줄러 정리
+    print("Shutting down scheduler...")
+    shutdown_scheduler()
+    print("Scheduler stopped")
+
     # 종료: 데이터베이스 연결 정리
     print("Closing database connections...")
     await close_db()
@@ -63,11 +78,8 @@ async def health_check():
 
 # Routers
 app.include_router(quoridor_router)
-
-# TODO: Phase 1 구현 예정
-# - /api/v1/users: 유저 CRUD
-# - /api/v1/games: 게임 정보 조회
-# - /api/v1/scores: 점수 기록 및 조회
+app.include_router(users_router)
+app.include_router(ranking_router)
 
 
 if __name__ == "__main__":
