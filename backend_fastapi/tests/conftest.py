@@ -18,7 +18,7 @@ sys.path.insert(0, str(project_root.parent))
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 
 from database.config import Base
-from database.repository import GameSessionRepository
+from database.repository import GameSessionRepository, UserRepository, RankingRepository
 
 
 # 테스트용 PostgreSQL 데이터베이스 (환경변수에서 읽음)
@@ -63,8 +63,20 @@ async def async_session(async_engine) -> AsyncGenerator[AsyncSession, None]:
 
 @pytest_asyncio.fixture(scope="function")
 async def repository(async_session) -> GameSessionRepository:
-    """테스트용 리포지토리"""
+    """테스트용 게임 세션 리포지토리"""
     return GameSessionRepository(async_session)
+
+
+@pytest_asyncio.fixture(scope="function")
+async def user_repository(async_session) -> UserRepository:
+    """테스트용 유저 리포지토리"""
+    return UserRepository(async_session)
+
+
+@pytest_asyncio.fixture(scope="function")
+async def ranking_repository(async_session) -> RankingRepository:
+    """테스트용 랭킹 리포지토리"""
+    return RankingRepository(async_session)
 
 
 @pytest.fixture
