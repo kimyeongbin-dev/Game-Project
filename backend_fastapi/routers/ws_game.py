@@ -271,6 +271,7 @@ async def handle_join_queue(websocket: WebSocket, user):
 
     position = matchmaking_queue.join(user.id, user.nickname, user.score)
     connection_manager.set_in_queue(user.id, True)
+    logger.info(f"[대기열 참가] {user.nickname} (위치: {position})")
 
     await websocket.send_json({
         "type": "queue_joined",
@@ -290,6 +291,7 @@ async def handle_leave_queue(websocket: WebSocket, user):
     """매칭 큐 나가기"""
     if matchmaking_queue.leave(user.id):
         connection_manager.set_in_queue(user.id, False)
+        logger.info(f"[대기열 나가기] {user.nickname}")
         await websocket.send_json({
             "type": "queue_left",
             "message": "매칭 큐에서 나왔습니다"
@@ -312,6 +314,7 @@ async def handle_create_room(websocket: WebSocket, user, turn_time_limit: Option
             turn_time_limit=turn_time_limit
         )
         connection_manager.join_room(user.id, room.room_code)
+        logger.info(f"[방 생성] {user.nickname} (코드: {room.room_code})")
 
         await websocket.send_json({
             "type": "room_created",
@@ -337,6 +340,7 @@ async def handle_join_room(websocket: WebSocket, user, room_code: str):
             score=user.score
         )
         connection_manager.join_room(user.id, room.room_code)
+        logger.info(f"[방 참가] {user.nickname} -> {room.room_code} (호스트: {room.host.nickname})")
 
         # 참가자에게 알림
         await websocket.send_json({
@@ -365,6 +369,7 @@ async def handle_leave_room(user):
     if not room:
         return
 
+    logger.info(f"[방 나가기] {user.nickname} <- {room.room_code}")
     room_code = room.room_code
     is_host = room.host.user_id == user.id
     other_player = room.guest if is_host else room.host
@@ -404,6 +409,7 @@ async def handle_ready(websocket: WebSocket, user):
         return
 
     room = room_manager.set_ready(user.id, True)
+    logger.info(f"[준비 완료] {user.nickname} (방: {room.room_code})")
 
     # 상대방에게 알림
     other_player = room.guest if room.host.user_id == user.id else room.host
@@ -482,6 +488,8 @@ async def handle_move(websocket: WebSocket, user, row: int, col: int):
         await send_error(websocket, "invalid_move", message)
         return
 
+    logger.info(f"[말 이동] {user.nickname} -> ({row}, {col}) (게임: {game_id[:8]})")
+
     # 게임 상태 전송
     await broadcast_game_state(game_id, updated_game, {
         "type": "move",
@@ -522,6 +530,8 @@ async def handle_wall(websocket: WebSocket, user, row: int, col: int, orientatio
         await send_error(websocket, "invalid_wall", message)
         return
 
+    logger.info(f"[벽 설치] {user.nickname} -> ({row}, {col}, {orientation}) (게임: {game_id[:8]})")
+
     # 게임 상태 전송
     await broadcast_game_state(game_id, updated_game, {
         "type": "wall",
@@ -548,6 +558,7 @@ async def handle_surrender(websocket: WebSocket, user):
 
     player_num = get_player_number(game_id, user.id)
     winner = 2 if player_num == 1 else 1
+    logger.info(f"[항복] {user.nickname} (게임: {game_id[:8]})")
 
     # 게임 종료 처리
     game.winner = winner

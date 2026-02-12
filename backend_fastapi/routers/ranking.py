@@ -3,8 +3,11 @@ Ranking Router
 랭킹 관련 API
 """
 
+import logging
 from typing import Optional
 from fastapi import APIRouter, Header, HTTPException, status, Query, Request
+
+logger = logging.getLogger(__name__)
 
 from database import get_db_session, is_db_available
 from database.repository import UserRepository, RankingRepository

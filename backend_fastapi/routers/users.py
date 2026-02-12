@@ -3,9 +3,12 @@ User Router
 유저 등록/로그인 API
 """
 
+import logging
 from typing import Optional
 from fastapi import APIRouter, Header, HTTPException, status, Request
 from fastapi.responses import JSONResponse
+
+logger = logging.getLogger(__name__)
 
 from database import get_db_session, is_db_available
 from database.repository import UserRepository, RankingRepository, GameSessionRepository
@@ -110,6 +113,7 @@ async def register_user(request: Request, body: RegisterRequest):
                 message=error,
                 error="registration_failed"
             )
+        logger.info(f"[회원가입] {user.nickname} (메모리 모드)")
         return RegisterResponse(
             success=True,
             user_id=user.id,
@@ -137,6 +141,7 @@ async def register_user(request: Request, body: RegisterRequest):
                 error="registration_failed"
             )
 
+        logger.info(f"[회원가입] {user.nickname}")
         return RegisterResponse(
             success=True,
             user_id=user.id,
@@ -164,6 +169,7 @@ async def login_user(request: Request, body: LoginRequest):
                 message=error,
                 error="login_failed"
             )
+        logger.info(f"[로그인] {user.nickname} (메모리 모드)")
         return LoginResponse(
             success=True,
             user_id=user.id,
@@ -195,6 +201,7 @@ async def login_user(request: Request, body: LoginRequest):
                 error="login_failed"
             )
 
+        logger.info(f"[로그인] {user.nickname}")
         return LoginResponse(
             success=True,
             user_id=user.id,

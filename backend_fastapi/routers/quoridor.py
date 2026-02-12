@@ -3,8 +3,11 @@ Quoridor API Router
 쿼리도 게임 REST API 엔드포인트
 """
 
+import logging
 from typing import Optional
 from fastapi import APIRouter, HTTPException, status, Query, Request, Header
+
+logger = logging.getLogger(__name__)
 
 from middleware.rate_limiter import limiter
 from routers.users import get_current_user
@@ -84,6 +87,7 @@ async def create_game(
         is_ranked=is_ranked,
         player1_user_id=user.id
     )
+    logger.info(f"[게임 생성] {user.nickname} (모드: {body.game_mode}, 게임: {game.game_id[:8]})")
 
     return CreateGameResponse(
         game_id=game.game_id,
@@ -291,6 +295,7 @@ async def abandon_game(request: Request, game_id: str):
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"error": "game_not_found", "message": "Game not found"}
         )
+    logger.info(f"[게임 포기] 게임: {game_id[:8]}")
     return None
 
 
