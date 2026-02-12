@@ -24,7 +24,7 @@ class TestPathfinding:
         start = Position(8, 4)
         goal_row = 0
 
-        exists = Pathfinder.path_exists(start, goal_row, wall_manager)
+        exists = Pathfinder.has_path_to_goal(start, goal_row, wall_manager)
 
         assert exists is True
 
@@ -47,7 +47,7 @@ class TestPathfinding:
         start = Position(8, 4)
         goal_row = 0
 
-        exists = Pathfinder.path_exists(start, goal_row, wall_manager)
+        exists = Pathfinder.has_path_to_goal(start, goal_row, wall_manager)
 
         assert exists is True
 
@@ -105,7 +105,7 @@ class TestWallSafety:
         temp_manager.add_wall(Wall(7, 0, Orientation.HORIZONTAL))
 
         # 실제로 경로가 있는지 확인
-        path_exists = Pathfinder.path_exists(player1_pos, 0, temp_manager)
+        path_exists = Pathfinder.has_path_to_goal(player1_pos, 0, temp_manager)
 
         # 경로가 없으면 안전하지 않음
         if not path_exists:
@@ -136,6 +136,6 @@ class TestEdgeCases:
         start = Position(8, 0)
         goal_row = 0
 
-        exists = Pathfinder.path_exists(start, goal_row, wall_manager)
+        exists = Pathfinder.has_path_to_goal(start, goal_row, wall_manager)
 
         assert exists is True

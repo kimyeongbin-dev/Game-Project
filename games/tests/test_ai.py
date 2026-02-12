@@ -125,8 +125,8 @@ class TestAIStrategy:
         game = GameState()
 
         # Player 2를 골 라인 바로 앞에 배치
-        game.player2._position = Position(7, 4)
-        game._current_turn = 2  # AI 턴으로 설정
+        game.player2.position = Position(7, 4)
+        game.current_turn = 2  # AI 턴으로 설정
 
         action = ai.get_move(game)
 
@@ -149,7 +149,7 @@ class TestAIEdgeCases:
         ai = SimpleAI()
         game = GameState()
         game.move_pawn(7, 4)
-        game.player2._walls_remaining = 0
+        game.player2.walls_remaining = 0
 
         action = ai.get_move(game)
 

@@ -1,4 +1,4 @@
-/// 쿼리도 게임 상태 모델
+// 쿼리도 게임 상태 모델
 
 class Position {
   final int row;

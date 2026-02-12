@@ -45,7 +45,6 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
   int _replayStep = -1; // -1 = 초기 상태
   int _totalMoves = 0;
   GameState? _replayGameState; // 리플레이 중 표시할 게임 상태
-  List<MoveRecord> _replayMoves = [];
 
   @override
   void initState() {
@@ -408,7 +407,6 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
       final movesResponse = await _apiService.getReplayMoves(_gameState!.gameId);
       setState(() {
         _isReplayMode = true;
-        _replayMoves = movesResponse.moves;
         _totalMoves = movesResponse.totalMoves;
         _replayStep = _totalMoves - 1; // 마지막 수에서 시작
         _replayGameState = _gameState; // 현재 상태 저장
@@ -430,7 +428,6 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
     setState(() {
       _isReplayMode = false;
       _replayStep = -1;
-      _replayMoves = [];
       _replayGameState = null;
       _message = '';
     });
@@ -765,7 +762,7 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               decoration: BoxDecoration(
-                color: colorScheme.tertiary.withOpacity(0.2),
+                color: colorScheme.tertiary.withValues(alpha: 0.2),
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Text(
@@ -909,7 +906,7 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
                     if (_gameMode == 'vs_ai') ...[
                       const SizedBox(height: 16),
                       DropdownButtonFormField<String>(
-                        value: _difficulty,
+                        initialValue: _difficulty,
                         decoration: InputDecoration(
                           labelText: 'AI 난이도',
                           prefixIcon: const Icon(Icons.psychology_outlined),

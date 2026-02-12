@@ -168,7 +168,7 @@ class _UnifiedBoardWidgetState extends State<UnifiedBoardWidget>
                   ),
                   boxShadow: [
                     BoxShadow(
-                      color: Colors.black.withOpacity(0.1),
+                      color: Colors.black.withValues(alpha: 0.1),
                       blurRadius: 10,
                       offset: const Offset(0, 4),
                     ),
@@ -247,7 +247,6 @@ class _UnifiedBoardWidgetState extends State<UnifiedBoardWidget>
   }
 
   Widget _buildCell(BuildContext context, int row, int col) {
-    final colorScheme = Theme.of(context).colorScheme;
     final position = Position(row: row, col: col);
 
     final isPlayer1 = gameState.player1.position == position;
@@ -291,7 +290,7 @@ class _UnifiedBoardWidgetState extends State<UnifiedBoardWidget>
           boxShadow: isValidMove && isCurrentPlayerTurn
               ? [
                   BoxShadow(
-                    color: Colors.green.withOpacity(0.3),
+                    color: Colors.green.withValues(alpha: 0.3),
                     blurRadius: 6,
                     spreadRadius: 1,
                   ),
@@ -359,7 +358,7 @@ class _UnifiedBoardWidgetState extends State<UnifiedBoardWidget>
           color: Colors.green.shade600,
           boxShadow: [
             BoxShadow(
-              color: Colors.green.withOpacity(0.4),
+              color: Colors.green.withValues(alpha: 0.4),
               blurRadius: 4,
             ),
           ],
@@ -587,7 +586,7 @@ class _PlayerTokenState extends State<_PlayerToken>
               color: widget.color,
               boxShadow: [
                 BoxShadow(
-                  color: widget.color.withOpacity(0.4),
+                  color: widget.color.withValues(alpha: 0.4),
                   blurRadius: widget.isCurrentTurn ? 6 : 3,
                   spreadRadius: widget.isCurrentTurn ? 1 : 0,
                 ),

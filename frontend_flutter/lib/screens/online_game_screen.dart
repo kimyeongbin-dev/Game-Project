@@ -483,7 +483,7 @@ class _OnlineGameScreenState extends State<OnlineGameScreen> {
           // 보드
           UnifiedBoardWidget(
             gameState: _gameState!,
-            validMoves: [], // 온라인에서는 서버에서 검증
+            validMoves: const [], // 온라인에서는 서버에서 검증
             wallMode: _wallMode,
             wallOrientation: _wallOrientation,
             onCellTap: _canPlay && !_wallMode ? _movePawn : null,

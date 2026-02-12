@@ -29,7 +29,7 @@ class _LeaderboardScreenState extends State<LeaderboardScreen>
     // RankingService 초기화
     final authService = context.read<AuthService>();
     _rankingService = RankingService(
-      baseUrl: authService.getServerUrl() + '/api/v1/ranking',
+      baseUrl: '${authService.getServerUrl()}/api/v1/ranking',
     );
     _rankingService.setAuthToken(authService.token);
 
@@ -390,7 +390,7 @@ class _LeaderboardScreenState extends State<LeaderboardScreen>
           '${entry.wins}승 ${entry.losses}패 (${entry.winRate.toStringAsFixed(1)}%)',
         ),
         trailing: Text(
-          '${entry.score.toStringAsFixed(0)}',
+          entry.score.toStringAsFixed(0),
           style: const TextStyle(
             fontSize: 18,
             fontWeight: FontWeight.bold,

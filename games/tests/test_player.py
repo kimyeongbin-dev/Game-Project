@@ -114,7 +114,7 @@ class TestPlayerWalls:
     def test_use_wall_when_empty(self):
         """벽 없을 때 사용 시도"""
         player = Player.create_player1("Test")
-        player._walls_remaining = 0
+        player.walls_remaining = 0
 
         result = player.use_wall()
 
