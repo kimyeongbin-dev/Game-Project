@@ -69,9 +69,7 @@ jobs:
           DB_ENABLED: true
           TESTING: true
         run: |
-          pytest --tb=long -v --junitxml=test-results.xml 2>&1 | tee pytest-output.log || true
-          echo "=== Test Summary ==="
-          tail -100 pytest-output.log
+          pytest --tb=long -v --junitxml=test-results.xml
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
@@ -107,19 +105,18 @@ jobs:
 
       - name: Analyze code
         working-directory: frontend_flutter
-        run: flutter analyze --no-fatal-infos || true
+        run: flutter analyze --no-fatal-infos
 
       - name: Run Flutter tests
         working-directory: frontend_flutter
-        run: |
-          flutter test --reporter=expanded 2>&1 | tee test-results.txt || echo "Tests completed with issues"
+        run: flutter test --reporter=expanded
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
-        if: always()
+        if: failure()
         with:
-          name: frontend-test-results
-          path: frontend_flutter/test-results.txt
+          name: frontend-test-logs
+          path: frontend_flutter/.dart_tool/
           retention-days: 7
 
   # ===================================================
@@ -142,8 +139,7 @@ jobs:
         run: pip install pytest pytest-asyncio
 
       - name: Run game engine tests
-        run: |
-          pytest games/ --tb=short -v || echo "No game engine tests found"
+        run: pytest games/ --tb=short -v
 
   # ===================================================
   # Job 4: Auto-Merge to Develop (모든 테스트 통과 후)
