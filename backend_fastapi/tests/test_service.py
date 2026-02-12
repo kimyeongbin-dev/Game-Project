@@ -34,7 +34,7 @@ class TestGameCreation:
 
     async def test_create_vs_ai_game(self, service, mock_db_unavailable):
         """AI 대전 게임 생성"""
-        game = await service.create_game(
+        game, is_ranked, user_id = await service.create_game(
             player1_name="TestPlayer",
             ai_difficulty="normal",
             game_mode="vs_ai"
@@ -46,21 +46,22 @@ class TestGameCreation:
         assert game.game_mode.value == "vs_ai"
         assert game.game_id in service._games
 
-    async def test_create_local_2p_game(self, service, mock_db_unavailable):
-        """로컬 2인 게임 생성"""
-        game = await service.create_game(
+    async def test_create_friend_match_game(self, service, mock_db_unavailable):
+        """친구대전 게임 생성"""
+        game, is_ranked, user_id = await service.create_game(
             player1_name="Player1",
             player2_name="Player2",
-            game_mode="local_2p"
+            game_mode="friend_match"
         )
 
         assert game.player1.name == "Player1"
+        # friend_match 모드에서 player2_name이 "Player 2"가 아니면 그대로 사용
         assert game.player2.name == "Player2"
-        assert game.game_mode.value == "local_2p"
+        assert game.game_mode.value == "friend_match"
 
     async def test_ai_instance_created(self, service, mock_db_unavailable):
         """AI 인스턴스 생성 확인"""
-        game = await service.create_game(game_mode="vs_ai")
+        game, _, _ = await service.create_game(game_mode="vs_ai")
 
         assert game.game_id in service._ai_instances
         assert game.game_id in service._ai_difficulties
@@ -72,7 +73,7 @@ class TestGameRetrieval:
 
     async def test_get_existing_game(self, service, mock_db_unavailable):
         """존재하는 게임 조회"""
-        game = await service.create_game()
+        game, _, _ = await service.create_game()
         game_id = game.game_id
 
         retrieved = await service.get_game(game_id)
@@ -93,7 +94,7 @@ class TestPawnMovement:
 
     async def test_valid_move(self, service, mock_db_unavailable):
         """유효한 이동"""
-        game = await service.create_game()
+        game, _, _ = await service.create_game()
         game_id = game.game_id
 
         success, message, updated_game = await service.move_pawn(game_id, 7, 4)
@@ -104,7 +105,7 @@ class TestPawnMovement:
 
     async def test_invalid_move(self, service, mock_db_unavailable):
         """무효한 이동"""
-        game = await service.create_game()
+        game, _, _ = await service.create_game()
         game_id = game.game_id
 
         success, message, updated_game = await service.move_pawn(game_id, 5, 5)
@@ -126,7 +127,7 @@ class TestWallPlacement:
 
     async def test_valid_wall(self, service, mock_db_unavailable):
         """유효한 벽 설치"""
-        game = await service.create_game()
+        game, _, _ = await service.create_game()
         game_id = game.game_id
 
         success, message, updated_game = await service.place_wall(
@@ -139,7 +140,7 @@ class TestWallPlacement:
 
     async def test_invalid_wall_orientation(self, service, mock_db_unavailable):
         """잘못된 벽 방향"""
-        game = await service.create_game()
+        game, _, _ = await service.create_game()
         game_id = game.game_id
 
         success, message, updated_game = await service.place_wall(
@@ -155,7 +156,7 @@ class TestAIMove:
 
     async def test_ai_move_on_ai_turn(self, service, mock_db_unavailable):
         """AI 턴에 AI 이동"""
-        game = await service.create_game(game_mode="vs_ai")
+        game, _, _ = await service.create_game(game_mode="vs_ai")
         game_id = game.game_id
 
         # Player 1 이동
@@ -170,7 +171,7 @@ class TestAIMove:
 
     async def test_ai_move_not_ai_turn(self, service, mock_db_unavailable):
         """Player 턴에 AI 이동 시도"""
-        game = await service.create_game(game_mode="vs_ai")
+        game, _, _ = await service.create_game(game_mode="vs_ai")
         game_id = game.game_id
 
         # Player 1 턴에 AI 이동 시도
@@ -186,7 +187,7 @@ class TestValidMoves:
 
     async def test_get_valid_moves(self, service, mock_db_unavailable):
         """유효 이동 목록"""
-        game = await service.create_game()
+        game, _, _ = await service.create_game()
         game_id = game.game_id
 
         result = await service.get_valid_moves(game_id)
@@ -204,7 +205,7 @@ class TestGameDeletion:
 
     async def test_abandon_game(self, service, mock_db_unavailable):
         """게임 포기"""
-        game = await service.create_game()
+        game, _, _ = await service.create_game()
         game_id = game.game_id
 
         result = await service.abandon_game(game_id)
@@ -214,7 +215,7 @@ class TestGameDeletion:
 
     async def test_delete_game(self, service, mock_db_unavailable):
         """게임 삭제"""
-        game = await service.create_game()
+        game, _, _ = await service.create_game()
         game_id = game.game_id
 
         result = await service.delete_game(game_id)
@@ -242,7 +243,7 @@ class TestCacheManagement:
 
     async def test_access_time_updated(self, service, mock_db_unavailable):
         """액세스 시간 업데이트"""
-        game = await service.create_game()
+        game, _, _ = await service.create_game()
         game_id = game.game_id
 
         assert game_id in service._last_accessed

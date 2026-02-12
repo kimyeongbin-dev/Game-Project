@@ -156,7 +156,7 @@ class TestWallPlacementValidation:
 
     def test_no_walls_remaining(self):
         """벽 없으면 설치 불가"""
-        self.player1._walls_remaining = 0
+        self.player1.walls_remaining = 0
 
         wall = Wall(4, 4, Orientation.HORIZONTAL)
 

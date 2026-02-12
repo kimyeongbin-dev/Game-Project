@@ -36,11 +36,11 @@ class TestGameStateCreation:
         assert game.player1.name == "Alice"
         assert game.player2.name == "Bob"
 
-    def test_create_local_2p_game(self):
-        """로컬 2인 모드 게임 생성"""
-        game = GameState(game_mode="local_2p")
+    def test_create_friend_match_game(self):
+        """친구 대전 모드 게임 생성"""
+        game = GameState(game_mode="friend_match")
 
-        assert game.game_mode == GameMode.LOCAL_2P
+        assert game.game_mode == GameMode.FRIEND_MATCH
 
     def test_initial_player_positions(self):
         """초기 플레이어 위치"""
@@ -125,7 +125,7 @@ class TestWallPlacement:
     def test_wall_placement_no_walls_remaining(self):
         """벽 없을 때 설치 불가"""
         game = GameState()
-        game.player1._walls_remaining = 0
+        game.player1.walls_remaining = 0
 
         success, message = game.place_wall(4, 4, "horizontal")
 
@@ -147,8 +147,10 @@ class TestWinCondition:
     def test_player1_wins(self):
         """Player 1 승리"""
         game = GameState()
+        # Player 2를 옆으로 이동하여 충돌 방지
+        game.player2.position = Position(0, 3)
         # Player 1을 골 라인 바로 앞에 배치
-        game.player1._position = Position(1, 4)
+        game.player1.position = Position(1, 4)
 
         success, message = game.move_pawn(0, 4)
 
@@ -160,11 +162,12 @@ class TestWinCondition:
     def test_player2_wins(self):
         """Player 2 승리"""
         game = GameState()
-        # Player 1 이동 후 Player 2 턴
-        game.move_pawn(7, 4)
+        # Player 1을 옆으로 이동하여 충돌 방지
+        game.player1.position = Position(8, 3)
 
         # Player 2를 골 라인 바로 앞에 배치
-        game.player2._position = Position(7, 4)
+        game.player2.position = Position(7, 4)
+        game.current_turn = 2  # Player 2 턴으로 설정
 
         success, message = game.move_pawn(8, 4)
 
@@ -219,14 +222,16 @@ class TestGameCopy:
     def test_deep_copy(self):
         """깊은 복사"""
         original = GameState()
-        original.move_pawn(7, 4)
+        original.move_pawn(7, 4)  # Player 1 이동, 턴 -> Player 2
 
         copied = original.copy()
 
-        # 복사본 수정이 원본에 영향 없어야 함
-        copied.move_pawn(6, 4)
+        # 복사본 수정 (Player 2가 아래로 이동)
+        copied.move_pawn(1, 4)
 
-        assert original.player1.position.row == 7
-        assert copied.player1.position.row == 6
+        # 복사본 수정이 원본에 영향 없어야 함
+        assert original.player2.position.row == 0  # 원본은 그대로
+        assert copied.player2.position.row == 1    # 복사본만 변경됨
+        assert copied.player1.position.row == 7    # Player 1은 이동 안함
         assert original.current_turn == 2
         assert copied.current_turn == 1  # 복사본은 턴 전환됨
