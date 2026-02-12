@@ -49,8 +49,9 @@ if not DATABASE_URL:
 # DB 활성화 여부 (환경 변수로 비활성화 가능)
 DB_ENABLED = os.getenv("DB_ENABLED", "true").lower() == "true"
 
-# SQL 쿼리 로깅 (개발 환경에서만)
-LOG_SQL_QUERIES = os.getenv("LOG_SQL_QUERIES", "false").lower() == "true"
+# SQL 쿼리 로깅 (LOG_LEVEL=DEBUG일 때만 활성화)
+_log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_SQL_QUERIES = _log_level == "DEBUG"
 
 # =============================================
 # 데이터베이스 엔진 설정
@@ -71,9 +72,13 @@ def _create_engine():
     """엔진 생성"""
     global engine, async_session_factory
     if engine is None:
+        # LOG_LEVEL=DEBUG일 때만 SQL 쿼리 로깅
+        log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+        echo_sql = log_level == "DEBUG"
+
         engine = create_async_engine(
             DATABASE_URL,
-            echo=LOG_SQL_QUERIES,  # 환경 변수로 SQL 쿼리 로깅 제어
+            echo=echo_sql,  # DEBUG 모드에서만 SQL 로깅
             pool_pre_ping=True,  # 연결 유효성 검사
             pool_size=5,
             max_overflow=10

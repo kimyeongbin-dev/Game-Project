@@ -39,17 +39,41 @@ from websocket import matchmaking_queue
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 APP_ENV = get_app_env()
 
-# 로깅 포맷 설정 (개발 환경에서는 더 상세하게)
+# ==============================================
+# 로깅 설정 (모드별)
+# ==============================================
+# LOG_LEVEL 옵션:
+#   DEBUG   - 모든 로그 (SQL 쿼리 포함, 디버깅용)
+#   INFO    - 핵심 기능만 (개발용, 기본값)
+#   WARNING - 경고/에러만 (배포용)
+# ==============================================
+
 if APP_ENV == "development":
     log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 else:
-    # 프로덕션에서는 민감 정보 최소화
     log_format = "%(asctime)s - %(levelname)s - %(message)s"
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
     format=log_format
 )
+
+# 로그 레벨에 따른 세부 설정
+if LOG_LEVEL == "DEBUG":
+    # 디버깅 모드: SQL 쿼리 포함 모든 로그
+    logging.getLogger("sqlalchemy.engine").setLevel(logging.INFO)
+    logging.getLogger("sqlalchemy.pool").setLevel(logging.INFO)
+    logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+else:
+    # 개발/배포 모드: 핵심 로그만 (SQL 완전 숨김)
+    logging.getLogger("sqlalchemy").setLevel(logging.ERROR)
+    logging.getLogger("sqlalchemy.engine").setLevel(logging.ERROR)
+    logging.getLogger("sqlalchemy.pool").setLevel(logging.ERROR)
+    logging.getLogger("sqlalchemy.engine.Engine").setLevel(logging.ERROR)
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+    logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
+    logging.getLogger("websockets").setLevel(logging.WARNING)
+    logging.getLogger("apscheduler").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
