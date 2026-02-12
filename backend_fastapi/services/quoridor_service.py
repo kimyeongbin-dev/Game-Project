@@ -290,9 +290,11 @@ class QuoridorService:
             return False, "Game not found", None
 
         current_player = game.current_turn
+        player_name = game.player1.name if current_player == 1 else game.player2.name
         success, message = game.move_pawn(row, col)
 
         if success:
+            logger.info(f"[말 이동] {player_name} -> ({row}, {col}) (게임: {game_id[:8]})")
             # 액션 기록
             action = {
                 "type": "move",
@@ -323,9 +325,12 @@ class QuoridorService:
             return False, "Game not found", None
 
         current_player = game.current_turn
+        player_name = game.player1.name if current_player == 1 else game.player2.name
+        walls_before = game.current_player.walls_remaining
         success, message = game.place_wall(row, col, orientation)
 
         if success:
+            logger.info(f"[벽 설치] {player_name} -> ({row}, {col}, {orientation}) 남은벽: {walls_before - 1} (게임: {game_id[:8]})")
             # 액션 기록
             action = {
                 "type": "wall",
@@ -377,6 +382,12 @@ class QuoridorService:
             )
 
         if success:
+            ai_difficulty = self._ai_difficulties.get(game_id, "normal")
+            if action.action_type.value == "move":
+                logger.info(f"[AI 이동] ({action.row}, {action.col}) 난이도: {ai_difficulty} (게임: {game_id[:8]})")
+            else:
+                logger.info(f"[AI 벽설치] ({action.row}, {action.col}, {action.orientation.value if action.orientation else 'h'}) 난이도: {ai_difficulty} (게임: {game_id[:8]})")
+
             # 액션에 플레이어 정보 추가
             action_with_player = {
                 **action_info,
