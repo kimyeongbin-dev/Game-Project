@@ -25,9 +25,15 @@ class GameStatus(Enum):
 
 
 class GameMode(Enum):
-    """게임 모드"""
-    VS_AI = "vs_ai"
-    LOCAL_2P = "local_2p"
+    """
+    게임 모드
+    - VS_AI: AI 대전 (일반 대전)
+    - RANKED: 랭킹전 (온라인 2P 대전)
+    - FRIEND_MATCH: 친구대전 (방 코드 기반)
+    """
+    VS_AI = "vs_ai"              # AI 대전 (일반 대전)
+    RANKED = "ranked"            # 랭킹전 (온라인 2P 대전)
+    FRIEND_MATCH = "friend_match"  # 친구대전 (방 코드 기반)
 
 
 class ActionType(Enum):

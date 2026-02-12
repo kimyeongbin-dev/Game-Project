@@ -6,6 +6,8 @@ Ranking Schemas
 from typing import Optional
 from pydantic import BaseModel, Field
 
+from schemas.users import ResetTimeInfo
+
 
 class LeaderboardEntry(BaseModel):
     """리더보드 항목"""
@@ -22,7 +24,8 @@ class LeaderboardResponse(BaseModel):
     """리더보드 응답"""
     entries: list[LeaderboardEntry]
     total_players: int
-    last_reset: Optional[str] = None  # 마지막 리셋 시간
+    yesterday_champion: Optional["DailyChampionEntry"] = None  # 전날 챔피언 정보
+    reset_info: Optional[ResetTimeInfo] = None  # 다음 리셋 시간 정보
 
 
 class MyRankResponse(BaseModel):

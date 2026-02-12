@@ -25,10 +25,15 @@ class GameStatus(enum.Enum):
 
 
 class GameMode(enum.Enum):
-    """게임 모드"""
-    VS_AI = "vs_ai"
-    LOCAL_2P = "local_2p"
-    ONLINE_2P = "online_2p"  # 온라인 2P 대전
+    """
+    게임 모드
+    - VS_AI: AI 대전 (일반 대전) - 로그인 필요, 랭킹 미반영
+    - RANKED: 랭킹전 (온라인 2P 대전) - 로그인 필요, 랭킹 반영
+    - FRIEND_MATCH: 친구대전 (방 코드 기반) - 로그인 필요, 랭킹 미반영
+    """
+    VS_AI = "vs_ai"              # AI 대전 (일반 대전)
+    RANKED = "ranked"            # 랭킹전 (온라인 2P 대전)
+    FRIEND_MATCH = "friend_match"  # 친구대전 (방 코드 기반)
 
 
 # ===== 유저 및 랭킹 관련 모델 =====
@@ -37,7 +42,7 @@ class User(Base):
     """
     User 테이블
     - 닉네임 + 비밀번호 기반 등록
-    - 세션 토큰으로 인증
+    - 세션 토큰으로 인증 (만료 시간 포함)
     """
     __tablename__ = "users"
 
@@ -45,6 +50,7 @@ class User(Base):
     nickname = Column(String(20), unique=True, nullable=False, index=True)
     password_hash = Column(String(128), nullable=False)  # bcrypt 해시
     session_token = Column(String(64), unique=True, nullable=False, index=True)
+    token_expires_at = Column(DateTime, nullable=True, index=True)  # 토큰 만료 시간
 
     # 랭킹 정보
     score = Column(Float, default=0, nullable=False)  # 총 점수 (턴 보너스 포함)
@@ -59,6 +65,12 @@ class User(Base):
 
     # 타임스탬프
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    def is_token_valid(self) -> bool:
+        """토큰이 유효한지 확인 (만료되지 않았는지)"""
+        if self.token_expires_at is None:
+            return True  # 만료 시간이 없으면 유효
+        return datetime.utcnow() < self.token_expires_at
 
     def __repr__(self):
         return f"<User(id={self.id}, nickname={self.nickname}, score={self.score})>"

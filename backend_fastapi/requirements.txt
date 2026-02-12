@@ -32,6 +32,10 @@ h11==0.16.0
 httptools==0.7.1
 websockets==16.0
 
+# Rate Limiting
+slowapi==0.1.9
+limits==3.13.0
+
 # Utils
 python-dotenv==1.2.1
 python-multipart==0.0.22

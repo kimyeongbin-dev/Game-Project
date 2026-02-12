@@ -3,7 +3,8 @@ Game Session Repository
 게임 세션 데이터베이스 CRUD 작업
 """
 
-from datetime import datetime, date
+import os
+from datetime import datetime, date, timedelta
 from typing import Optional
 import secrets
 import re
@@ -15,6 +16,9 @@ from .models import (
     GameSession, GameStatus, GameMode, GameMove, ActionType,
     User, DailyChampion, MatchQueue, MatchQueueStatus, GameRoom, RoomStatus
 )
+
+# 세션 토큰 만료 시간 (환경 변수에서 로드, 기본 24시간)
+SESSION_EXPIRE_HOURS = int(os.getenv("SESSION_EXPIRE_HOURS", "24"))
 
 
 class GameSessionRepository:
@@ -30,7 +34,9 @@ class GameSessionRepository:
         player2_name: str,
         game_mode: str,
         ai_difficulty: Optional[str],
-        game_state: dict
+        game_state: dict,
+        is_ranked: bool = False,
+        player1_user_id: Optional[int] = None
     ) -> GameSession:
         """새 게임 세션 생성"""
         game_session = GameSession(
@@ -43,7 +49,9 @@ class GameSessionRepository:
             game_history=[],
             status=GameStatus.IN_PROGRESS,
             current_turn=1,
-            turn_count=0
+            turn_count=0,
+            is_ranked=is_ranked,
+            player1_user_id=player1_user_id
         )
         self.session.add(game_session)
         await self.session.commit()
@@ -158,6 +166,22 @@ class GameSessionRepository:
         if not game_session:
             return None
         return game_session.game_history
+
+    async def get_user_games(self, user_id: int, limit: int = 100) -> list[GameSession]:
+        """유저의 게임 목록 조회 (player1 또는 player2로 참여한 게임)"""
+        result = await self.session.execute(
+            select(GameSession)
+            .where(
+                GameSession.is_deleted == False,
+                or_(
+                    GameSession.player1_user_id == user_id,
+                    GameSession.player2_user_id == user_id
+                )
+            )
+            .order_by(GameSession.created_at.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
 
     # ===== GameMove 관련 메서드 (리플레이 시스템) =====
 
@@ -280,9 +304,15 @@ class UserRepository:
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    def _generate_token(self) -> str:
-        """64자 세션 토큰 생성"""
-        return secrets.token_hex(32)
+    def _generate_token(self) -> tuple[str, datetime]:
+        """64자 세션 토큰 생성 + 만료 시간 반환"""
+        token = secrets.token_hex(32)
+        expires_at = datetime.utcnow() + timedelta(hours=SESSION_EXPIRE_HOURS)
+        return token, expires_at
+
+    def _refresh_token_expiry(self) -> datetime:
+        """토큰 만료 시간 갱신 (현재 시간 + SESSION_EXPIRE_HOURS)"""
+        return datetime.utcnow() + timedelta(hours=SESSION_EXPIRE_HOURS)
 
     def _hash_password(self, password: str) -> str:
         """비밀번호 해시"""
@@ -331,11 +361,15 @@ class UserRepository:
         if existing:
             return None, "이미 사용 중인 닉네임입니다"
 
+        # 토큰 생성 (만료 시간 포함)
+        token, expires_at = self._generate_token()
+
         # 유저 생성
         user = User(
             nickname=nickname,
             password_hash=self._hash_password(password),
-            session_token=self._generate_token(),
+            session_token=token,
+            token_expires_at=expires_at,
             score=0,
             wins=0,
             losses=0,
@@ -362,11 +396,17 @@ class UserRepository:
         return result.scalar_one_or_none()
 
     async def get_by_token(self, token: str) -> Optional[User]:
-        """세션 토큰으로 유저 조회"""
+        """세션 토큰으로 유저 조회 (만료된 토큰은 None 반환)"""
         result = await self.session.execute(
             select(User).where(User.session_token == token)
         )
-        return result.scalar_one_or_none()
+        user = result.scalar_one_or_none()
+
+        # 토큰이 만료되었는지 확인
+        if user and not user.is_token_valid():
+            return None
+
+        return user
 
     async def login(self, nickname: str, password: str) -> tuple[Optional[User], str]:
         """로그인 (비밀번호 검증 + 새 토큰 발급)"""
@@ -378,8 +418,10 @@ class UserRepository:
         if not self._verify_password(password, user.password_hash):
             return None, "닉네임 또는 비밀번호가 올바르지 않습니다"
 
-        # 새 토큰 발급 및 온라인 상태 업데이트
-        user.session_token = self._generate_token()
+        # 새 토큰 발급 (만료 시간 포함) 및 온라인 상태 업데이트
+        token, expires_at = self._generate_token()
+        user.session_token = token
+        user.token_expires_at = expires_at
         user.is_online = True
         user.last_active_at = datetime.utcnow()
         await self.session.commit()
@@ -398,13 +440,15 @@ class UserRepository:
         return True
 
     async def update_heartbeat(self, user_id: int) -> bool:
-        """접속 상태 갱신 (heartbeat)"""
+        """접속 상태 갱신 (heartbeat) + 토큰 만료 시간 갱신"""
         user = await self.get_by_id(user_id)
         if not user:
             return False
 
         user.is_online = True
         user.last_active_at = datetime.utcnow()
+        # heartbeat 시 토큰 만료 시간도 갱신 (세션 연장)
+        user.token_expires_at = self._refresh_token_expiry()
         await self.session.commit()
         return True
 

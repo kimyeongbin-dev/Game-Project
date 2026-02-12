@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quoridor WebSocket Test</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            max-width: 500px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+        }
+        h1 { text-align: center; color: #00d9ff; font-size: 1.5em; }
+        .section {
+            background: #16213e;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 15px;
+        }
+        .section h3 { margin: 0 0 10px 0; color: #00d9ff; font-size: 1em; }
+        input, button, select {
+            width: 100%;
+            padding: 12px;
+            margin: 5px 0;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+        }
+        input { background: #0f3460; color: #fff; }
+        button {
+            background: #00d9ff;
+            color: #1a1a2e;
+            font-weight: bold;
+            cursor: pointer;
+            transition: 0.2s;
+        }
+        button:hover { background: #00b8d4; }
+        button:disabled { background: #555; color: #888; cursor: not-allowed; }
+        .btn-danger { background: #e94560; color: #fff; }
+        .btn-danger:hover { background: #c73e54; }
+        .btn-success { background: #4ecca3; }
+        .btn-warning { background: #ffc107; color: #1a1a2e; }
+        #status {
+            padding: 10px;
+            border-radius: 8px;
+            text-align: center;
+            font-weight: bold;
+            margin-bottom: 15px;
+        }
+        .status-disconnected { background: #e94560; }
+        .status-connected { background: #4ecca3; color: #1a1a2e; }
+        .status-queued { background: #ffc107; color: #1a1a2e; }
+        .status-matched { background: #00d9ff; color: #1a1a2e; }
+        .status-playing { background: #9b59b6; }
+        #log {
+            background: #0a0a15;
+            padding: 10px;
+            border-radius: 8px;
+            height: 200px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        .log-send { color: #4ecca3; }
+        .log-receive { color: #00d9ff; }
+        .log-error { color: #e94560; }
+        .log-info { color: #ffc107; }
+        .game-info {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            text-align: center;
+        }
+        .game-info div {
+            background: #0f3460;
+            padding: 10px;
+            border-radius: 8px;
+        }
+        .game-info .label { font-size: 12px; color: #888; }
+        .game-info .value { font-size: 18px; font-weight: bold; }
+        .your-turn { animation: pulse 1s infinite; }
+        @keyframes pulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(0,217,255,0.5); }
+            50% { box-shadow: 0 0 0 10px rgba(0,217,255,0); }
+        }
+        .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        .move-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 5px;
+            max-width: 150px;
+            margin: 10px auto;
+        }
+        .move-grid button { padding: 15px; font-size: 20px; }
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body>
+    <h1>🎮 Quoridor 매칭 테스트</h1>
+
+    <div id="status" class="status-disconnected">연결 안됨</div>
+
+    <!-- 연결 섹션 -->
+    <div id="connect-section" class="section">
+        <h3>🔌 서버 연결</h3>
+        <input type="text" id="server" placeholder="서버 주소" value="192.168.0.16:8000">
+        <input type="text" id="token" placeholder="세션 토큰 입력">
+        <button id="btn-connect" onclick="connect()">연결</button>
+    </div>
+
+    <!-- 매칭 섹션 -->
+    <div id="match-section" class="section hidden">
+        <h3>⚔️ 매칭</h3>
+        <div class="controls">
+            <button id="btn-queue" onclick="joinQueue()">랭킹전 매칭</button>
+            <button id="btn-leave-queue" onclick="leaveQueue()" class="btn-danger hidden">매칭 취소</button>
+        </div>
+        <div style="margin-top: 10px;">
+            <input type="text" id="room-code" placeholder="방 코드 (친구대전)">
+            <div class="controls">
+                <button onclick="createRoom()">방 만들기</button>
+                <button onclick="joinRoom()" class="btn-warning">방 참가</button>
+            </div>
+        </div>
+        <button onclick="disconnect()" class="btn-danger" style="margin-top: 15px;">연결 끊기</button>
+    </div>
+
+    <!-- 대기실 섹션 -->
+    <div id="room-section" class="section hidden">
+        <h3>🏠 대기실</h3>
+        <div class="game-info">
+            <div><div class="label">방 코드</div><div class="value" id="display-room-code">-</div></div>
+            <div><div class="label">상태</div><div class="value" id="display-room-status">대기중</div></div>
+        </div>
+        <button id="btn-ready" onclick="ready()" class="btn-success" style="margin-top: 15px;">준비 완료</button>
+        <button onclick="leaveRoom()" class="btn-danger" style="margin-top: 10px;">방 나가기</button>
+    </div>
+
+    <!-- 게임 섹션 -->
+    <div id="game-section" class="section hidden">
+        <h3>🎯 게임 진행중</h3>
+        <div class="game-info">
+            <div><div class="label">나</div><div class="value" id="my-name">-</div></div>
+            <div><div class="label">상대</div><div class="value" id="opponent-name">-</div></div>
+            <div><div class="label">현재 턴</div><div class="value" id="current-turn">-</div></div>
+            <div><div class="label">내 벽</div><div class="value" id="my-walls">10</div></div>
+        </div>
+
+        <div id="turn-indicator" style="text-align: center; margin: 15px 0; font-size: 1.2em; font-weight: bold;">
+            -
+        </div>
+
+        <div style="margin-top: 15px;">
+            <h4 style="margin: 0 0 10px 0;">이동 (row, col)</h4>
+            <div style="display: flex; gap: 10px;">
+                <input type="number" id="move-row" placeholder="row" min="0" max="8" style="width: 80px;">
+                <input type="number" id="move-col" placeholder="col" min="0" max="8" style="width: 80px;">
+                <button onclick="move()" style="flex: 1;">이동</button>
+            </div>
+        </div>
+
+        <div style="margin-top: 15px;">
+            <h4 style="margin: 0 0 10px 0;">벽 설치 (row, col, 방향)</h4>
+            <div style="display: flex; gap: 10px;">
+                <input type="number" id="wall-row" placeholder="row" min="0" max="7" style="width: 60px;">
+                <input type="number" id="wall-col" placeholder="col" min="0" max="7" style="width: 60px;">
+                <select id="wall-orient" style="width: 80px;">
+                    <option value="horizontal">가로</option>
+                    <option value="vertical">세로</option>
+                </select>
+                <button onclick="placeWall()" class="btn-warning" style="flex: 1;">설치</button>
+            </div>
+        </div>
+
+        <button onclick="surrender()" class="btn-danger" style="margin-top: 20px;">항복</button>
+    </div>
+
+    <!-- 로그 -->
+    <div class="section">
+        <h3>📜 로그</h3>
+        <div id="log"></div>
+        <button onclick="clearLog()" style="margin-top: 10px; background: #555;">로그 지우기</button>
+    </div>
+
+    <script>
+        let ws = null;
+        let myPlayer = 0;
+        let gameId = null;
+        let currentState = 'disconnected'; // disconnected, connected, queued, room, playing
+
+        function log(msg, type = 'info') {
+            const logEl = document.getElementById('log');
+            const time = new Date().toLocaleTimeString();
+            const className = `log-${type}`;
+            logEl.innerHTML += `<span class="${className}">[${time}] ${msg}</span>\n`;
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        function clearLog() {
+            document.getElementById('log').innerHTML = '';
+        }
+
+        function updateStatus(text, className) {
+            const el = document.getElementById('status');
+            el.textContent = text;
+            el.className = className;
+        }
+
+        function showSection(section) {
+            ['connect-section', 'match-section', 'room-section', 'game-section'].forEach(id => {
+                document.getElementById(id).classList.add('hidden');
+            });
+            document.getElementById(section).classList.remove('hidden');
+        }
+
+        function connect() {
+            const server = document.getElementById('server').value;
+            const token = document.getElementById('token').value;
+
+            if (!token) {
+                alert('토큰을 입력하세요');
+                return;
+            }
+
+            const url = `ws://${server}/ws/game?token=${token}`;
+            log(`연결 시도: ${server}`, 'info');
+
+            ws = new WebSocket(url);
+
+            ws.onopen = () => {
+                log('WebSocket 연결됨', 'info');
+            };
+
+            ws.onmessage = (e) => {
+                const data = JSON.parse(e.data);
+                log(`수신: ${JSON.stringify(data)}`, 'receive');
+                handleMessage(data);
+            };
+
+            ws.onerror = (e) => {
+                log(`에러 발생`, 'error');
+            };
+
+            ws.onclose = (e) => {
+                log(`연결 종료 (code: ${e.code})`, 'error');
+                updateStatus('연결 안됨', 'status-disconnected');
+                showSection('connect-section');
+                currentState = 'disconnected';
+            };
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.close();
+            }
+        }
+
+        function send(data) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify(data));
+                log(`전송: ${JSON.stringify(data)}`, 'send');
+            }
+        }
+
+        function handleMessage(data) {
+            switch (data.type) {
+                case 'connected':
+                    updateStatus(`연결됨: ${data.nickname}`, 'status-connected');
+                    showSection('match-section');
+                    currentState = 'connected';
+                    break;
+
+                case 'queue_joined':
+                    updateStatus('매칭 대기중...', 'status-queued');
+                    document.getElementById('btn-queue').classList.add('hidden');
+                    document.getElementById('btn-leave-queue').classList.remove('hidden');
+                    currentState = 'queued';
+                    break;
+
+                case 'queue_left':
+                    updateStatus('연결됨', 'status-connected');
+                    document.getElementById('btn-queue').classList.remove('hidden');
+                    document.getElementById('btn-leave-queue').classList.add('hidden');
+                    currentState = 'connected';
+                    break;
+
+                case 'queue_status':
+                    log(`대기열: ${data.position}번째 / 총 ${data.waiting_count}명`, 'info');
+                    break;
+
+                case 'matched':
+                    updateStatus(`매칭됨! vs ${data.opponent_nickname}`, 'status-matched');
+                    myPlayer = data.you_are_player;
+                    gameId = data.game_id;
+                    break;
+
+                case 'room_created':
+                    document.getElementById('display-room-code').textContent = data.room_code;
+                    document.getElementById('room-code').value = data.room_code;
+                    showSection('room-section');
+                    currentState = 'room';
+                    break;
+
+                case 'room_joined':
+                    document.getElementById('display-room-code').textContent = data.room_code;
+                    showSection('room-section');
+                    currentState = 'room';
+                    break;
+
+                case 'player_joined':
+                    document.getElementById('display-room-status').textContent = '상대 입장!';
+                    log(`${data.player_nickname} 입장`, 'info');
+                    break;
+
+                case 'player_ready':
+                    log(`${data.player_nickname} 준비완료`, 'info');
+                    break;
+
+                case 'player_left':
+                    document.getElementById('display-room-status').textContent = '상대 퇴장';
+                    if (data.room_closed) {
+                        showSection('match-section');
+                        currentState = 'connected';
+                    }
+                    break;
+
+                case 'room_left':
+                    showSection('match-section');
+                    currentState = 'connected';
+                    break;
+
+                case 'game_start':
+                    gameId = data.game_id;
+                    myPlayer = data.you_are_player;
+                    updateStatus('게임중!', 'status-playing');
+                    showSection('game-section');
+                    currentState = 'playing';
+
+                    if (myPlayer === 1) {
+                        document.getElementById('my-name').textContent = data.player1_nickname;
+                        document.getElementById('opponent-name').textContent = data.player2_nickname;
+                    } else {
+                        document.getElementById('my-name').textContent = data.player2_nickname;
+                        document.getElementById('opponent-name').textContent = data.player1_nickname;
+                    }
+                    updateGameState(data.game_state);
+                    break;
+
+                case 'game_state':
+                    updateGameState(data.game_state);
+                    if (data.your_turn) {
+                        document.getElementById('turn-indicator').textContent = '🎯 내 턴!';
+                        document.getElementById('turn-indicator').classList.add('your-turn');
+                    } else {
+                        document.getElementById('turn-indicator').textContent = '⏳ 상대 턴...';
+                        document.getElementById('turn-indicator').classList.remove('your-turn');
+                    }
+                    break;
+
+                case 'game_end':
+                    const result = data.you_win ? '🎉 승리!' : '😢 패배';
+                    alert(`게임 종료!\n${result}\n사유: ${data.reason}`);
+                    showSection('match-section');
+                    document.getElementById('btn-queue').classList.remove('hidden');
+                    document.getElementById('btn-leave-queue').classList.add('hidden');
+                    updateStatus('연결됨', 'status-connected');
+                    currentState = 'connected';
+                    break;
+
+                case 'error':
+                    log(`에러: [${data.code}] ${data.message}`, 'error');
+                    alert(`에러: ${data.message}`);
+                    break;
+            }
+        }
+
+        function updateGameState(state) {
+            document.getElementById('current-turn').textContent = `Player ${state.current_turn}`;
+            const walls = myPlayer === 1 ? state.player1_walls : state.player2_walls;
+            document.getElementById('my-walls').textContent = walls;
+
+            // 현재 위치 표시
+            const myPos = myPlayer === 1 ? state.player1_pos : state.player2_pos;
+            log(`내 위치: (${myPos[0]}, ${myPos[1]})`, 'info');
+        }
+
+        function joinQueue() { send({type: 'join_queue'}); }
+        function leaveQueue() { send({type: 'leave_queue'}); }
+        function createRoom() { send({type: 'create_room', turn_time_limit: 30}); }
+        function joinRoom() {
+            const code = document.getElementById('room-code').value.toUpperCase();
+            if (code) send({type: 'join_room', room_code: code});
+        }
+        function leaveRoom() { send({type: 'leave_room'}); }
+        function ready() { send({type: 'ready'}); }
+        function surrender() {
+            if (confirm('정말 항복하시겠습니까?')) {
+                send({type: 'surrender'});
+            }
+        }
+
+        function move() {
+            const row = parseInt(document.getElementById('move-row').value);
+            const col = parseInt(document.getElementById('move-col').value);
+            if (!isNaN(row) && !isNaN(col)) {
+                send({type: 'move', row, col});
+            }
+        }
+
+        function placeWall() {
+            const row = parseInt(document.getElementById('wall-row').value);
+            const col = parseInt(document.getElementById('wall-col').value);
+            const orientation = document.getElementById('wall-orient').value;
+            if (!isNaN(row) && !isNaN(col)) {
+                send({type: 'wall', row, col, orientation});
+            }
+        }
+    </script>
+</body>
+</html>
