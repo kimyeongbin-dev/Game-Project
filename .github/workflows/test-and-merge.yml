@@ -98,9 +98,12 @@ jobs:
           channel: ${{ env.FLUTTER_CHANNEL }}
           cache: true
 
-      - name: Get dependencies
+      - name: Clean and get dependencies
         working-directory: frontend_flutter
-        run: flutter pub get
+        run: |
+          flutter clean
+          flutter pub get
+          flutter pub deps
 
       - name: Analyze code
         working-directory: frontend_flutter
@@ -109,14 +112,14 @@ jobs:
       - name: Run Flutter tests
         working-directory: frontend_flutter
         run: |
-          flutter test --reporter=json > test-results.json 2>&1 || echo "No tests found or tests failed"
+          flutter test --reporter=expanded 2>&1 | tee test-results.txt || echo "Tests completed with issues"
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: frontend-test-results
-          path: frontend_flutter/test-results.json
+          path: frontend_flutter/test-results.txt
           retention-days: 7
 
   # ===================================================

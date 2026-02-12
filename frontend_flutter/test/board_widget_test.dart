@@ -1,5 +1,5 @@
-/// 쿼리도 보드 위젯 테스트
-/// 실제 셀 클릭, 이동, 상태 변경 테스트
+// 쿼리도 보드 위젯 테스트
+// 실제 셀 클릭, 이동, 상태 변경 테스트
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
