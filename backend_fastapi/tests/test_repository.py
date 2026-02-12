@@ -59,8 +59,11 @@ class TestGameSessionCreate:
         assert game.ai_difficulty is None
 
     @pytest.mark.asyncio
-    async def test_create_ranked_game(self, repository, sample_game_state):
+    async def test_create_ranked_game(self, repository, user_repository, sample_game_state):
         """랭킹전 게임 생성"""
+        # 먼저 유저 생성 (FK 제약조건)
+        user, _ = await user_repository.create("RankedPlayer", "password123")
+
         game_id = str(uuid.uuid4())
         game = await repository.create(
             game_id=game_id,
@@ -70,13 +73,13 @@ class TestGameSessionCreate:
             ai_difficulty=None,
             game_state=sample_game_state,
             is_ranked=True,
-            player1_user_id=1
+            player1_user_id=user.id
         )
 
         assert game is not None
         assert game.game_mode.value == "ranked"
         assert game.is_ranked is True
-        assert game.player1_user_id == 1
+        assert game.player1_user_id == user.id
 
 
 @pytest.mark.requires_db
@@ -475,8 +478,8 @@ class TestUserCreate:
     @pytest.mark.asyncio
     async def test_create_user_duplicate_nickname(self, user_repository):
         """닉네임 중복"""
-        await user_repository.create("DuplicateUser", "password123")
-        user, error = await user_repository.create("DuplicateUser", "password456")
+        await user_repository.create("DupUser", "password123")  # 7자 (12자 이하)
+        user, error = await user_repository.create("DupUser", "password456")
 
         assert user is None
         assert "이미 사용 중인 닉네임" in error
