@@ -19,7 +19,7 @@ concurrency:
 
 env:
   PYTHON_VERSION: '3.11'
-  FLUTTER_VERSION: 'stable'  # 항상 최신 stable 사용 (Dart SDK >=3.4.0 필요)
+  FLUTTER_CHANNEL: 'stable'  # stable 채널 사용 (최신 안정 버전)
 
 jobs:
   # ===================================================
@@ -95,7 +95,7 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: ${{ env.FLUTTER_CHANNEL }}
           cache: true
 
       - name: Get dependencies
