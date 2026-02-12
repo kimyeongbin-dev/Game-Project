@@ -6,7 +6,7 @@ FastAPI 엔드포인트 통합 테스트
 import pytest
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock, MagicMock
 
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
@@ -18,8 +18,18 @@ from main import app
 
 @pytest.fixture
 def client():
-    """테스트 클라이언트"""
-    with patch('services.quoridor_service.is_db_available', return_value=False):
+    """테스트 클라이언트 - lifespan 의존성을 모두 mock"""
+    with patch('main.init_db', new_callable=AsyncMock) as mock_init_db, \
+         patch('main.close_db', new_callable=AsyncMock) as mock_close_db, \
+         patch('main.is_db_available', return_value=False), \
+         patch('main.setup_scheduler') as mock_setup_scheduler, \
+         patch('main.shutdown_scheduler') as mock_shutdown_scheduler, \
+         patch('main.matchmaking_queue') as mock_queue, \
+         patch('services.quoridor_service.is_db_available', return_value=False):
+        # matchmaking_queue의 start/stop을 AsyncMock으로 설정
+        mock_queue.start = AsyncMock()
+        mock_queue.stop = AsyncMock()
+
         with TestClient(app) as c:
             yield c
 
