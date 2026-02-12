@@ -12,8 +12,11 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
+/lib/
 lib64/
+
+# Allow Flutter lib folder
+!frontend_flutter/lib/
 parts/
 sdist/
 var/
