@@ -222,3 +222,60 @@ if (gameStateData != null) {
 ### 디버깅 팁
 - Flutter: `debugPrint('[WebSocket] received: ${message.type}')` 추가
 - Server: `logger.info(f"[WS] {msg_type}: {user.nickname}")` 추가
+
+## 테스트 규칙
+
+자세한 테스트 가이드는 `backend_fastapi/TESTING.md` 참조.
+
+### 테스트 실행
+```bash
+# 백엔드 테스트
+cd backend_fastapi && pytest -v
+
+# WebSocket 테스트만
+pytest tests/test_websocket/ -v
+
+# DB 테스트 제외 (DB 없이 실행)
+pytest -v -m "not requires_db"
+
+# 게임 엔진 테스트
+pytest ../games/ -v
+```
+
+### 테스트 명명 규칙
+```
+test_<action>_<context>_<expected_result>
+```
+예: `test_move_pawn_invalid_position`, `test_join_queue_already_in_queue`
+
+### 새 기능 추가 시
+1. 기능 구현 전에 테스트 케이스 설계
+2. 관련 테스트 파일에 테스트 추가
+3. `pytest -v` 전체 통과 확인 후 PR
+
+### 기존 코드 수정 시
+1. 기존 테스트 먼저 실행
+2. API/함수 시그니처 변경 시 테스트도 수정
+3. 버그 수정 시 해당 버그를 잡는 회귀 테스트 추가
+
+### WebSocket 테스트 패턴
+```python
+@pytest.mark.asyncio
+async def test_handler(self, connection_manager, mock_websocket, mock_user):
+    from routers.ws_game import handle_xxx
+
+    await connection_manager.connect(mock_websocket, mock_user.id, mock_user.nickname)
+
+    with patch("routers.ws_game.dependency", mock_dependency):
+        await handle_xxx(mock_websocket, user)
+
+    assert any(msg.get("type") == "expected_type" for msg in mock_websocket.sent_messages)
+```
+
+### DB 테스트 마커
+PostgreSQL 필요한 테스트는 `@pytest.mark.requires_db` 사용:
+```python
+@pytest.mark.requires_db
+def test_create_user(self, db_session):
+    # DB 연결 없으면 자동 스킵
+```

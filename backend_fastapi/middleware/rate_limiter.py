@@ -14,11 +14,15 @@ from starlette.responses import JSONResponse
 # 환경 변수에서 Rate Limit 설정 로드
 RATE_LIMIT_PER_MINUTE = os.getenv("RATE_LIMIT_PER_MINUTE", "60")
 
+# 테스트 환경에서는 Rate Limiter 비활성화
+IS_TESTING = os.getenv("TESTING", "false").lower() == "true"
+
 # Limiter 인스턴스 생성
 limiter = Limiter(
     key_func=get_remote_address,
     default_limits=[f"{RATE_LIMIT_PER_MINUTE}/minute"],
     storage_uri="memory://",  # 메모리 기반 (프로덕션에서는 Redis 권장)
+    enabled=not IS_TESTING,  # 테스트 환경에서는 비활성화
 )
 
 
