@@ -93,7 +93,10 @@ class _AuthWrapperState extends State<AuthWrapper> {
   @override
   void initState() {
     super.initState();
-    _tryAutoLogin();
+    // 빌드가 완료된 후에 자동 로그인 시도 (setState 충돌 방지)
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _tryAutoLogin();
+    });
   }
 
   Future<void> _tryAutoLogin() async {
