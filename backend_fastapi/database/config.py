@@ -5,20 +5,56 @@ PostgreSQL 연결 설정 및 세션 관리
 
 import os
 import logging
+from pathlib import Path
 from typing import Optional
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
 
+# .env 파일 로드 (python-dotenv 사용)
+try:
+    from dotenv import load_dotenv
+    # backend_fastapi 디렉토리의 .env 파일 로드
+    env_path = Path(__file__).parent.parent / ".env"
+    load_dotenv(env_path)
+except ImportError:
+    pass  # python-dotenv가 없으면 환경 변수만 사용
+
 logger = logging.getLogger(__name__)
 
-# 환경 변수에서 DB URL 가져오기 (기본값: 로컬 PostgreSQL)
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql+asyncpg://postgres:8755@localhost:5432/quoridor_db"
-)
+# =============================================
+# 환경 변수에서 설정 로드
+# =============================================
+
+# 앱 환경 (development, staging, production)
+APP_ENV = os.getenv("APP_ENV", "development")
+IS_PRODUCTION = APP_ENV == "production"
+
+# 개별 DB 설정
+DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_PORT = os.getenv("DB_PORT", "5432")
+DB_NAME = os.getenv("DB_NAME", "quoridor_db")
+DB_USER = os.getenv("DB_USER", "postgres")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "")
+
+# DATABASE_URL이 설정되어 있으면 우선 사용, 없으면 개별 설정으로 구성
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    if DB_PASSWORD:
+        DATABASE_URL = f"postgresql+asyncpg://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+    else:
+        # 비밀번호가 없는 경우 경고
+        logger.warning("DB_PASSWORD not set. Please configure your .env file.")
+        DATABASE_URL = f"postgresql+asyncpg://{DB_USER}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
 # DB 활성화 여부 (환경 변수로 비활성화 가능)
 DB_ENABLED = os.getenv("DB_ENABLED", "true").lower() == "true"
+
+# SQL 쿼리 로깅 (개발 환경에서만)
+LOG_SQL_QUERIES = os.getenv("LOG_SQL_QUERIES", "false").lower() == "true"
+
+# =============================================
+# 데이터베이스 엔진 설정
+# =============================================
 
 # DB 연결 상태
 _db_available = False
@@ -37,7 +73,7 @@ def _create_engine():
     if engine is None:
         engine = create_async_engine(
             DATABASE_URL,
-            echo=False,  # 개발 시 True로 설정하면 SQL 쿼리 로깅
+            echo=LOG_SQL_QUERIES,  # 환경 변수로 SQL 쿼리 로깅 제어
             pool_pre_ping=True,  # 연결 유효성 검사
             pool_size=5,
             max_overflow=10
@@ -59,6 +95,16 @@ def is_db_available() -> bool:
 def get_session_factory():
     """세션 팩토리 반환 (import 시점 문제 해결용)"""
     return async_session_factory
+
+
+def get_app_env() -> str:
+    """현재 앱 환경 반환"""
+    return APP_ENV
+
+
+def is_production() -> bool:
+    """프로덕션 환경인지 확인"""
+    return IS_PRODUCTION
 
 
 async def get_db_session() -> Optional[AsyncSession]:
@@ -88,10 +134,14 @@ async def init_db():
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         _db_available = True
-        logger.info("Database connection established successfully")
+        logger.info(f"Database connection established successfully (ENV: {APP_ENV})")
     except Exception as e:
         _db_available = False
-        logger.warning(f"Database connection failed: {e}")
+        # 프로덕션에서는 에러 상세 정보 숨김
+        if IS_PRODUCTION:
+            logger.warning("Database connection failed. Server will run in memory-only mode.")
+        else:
+            logger.warning(f"Database connection failed: {e}")
         logger.info("Server will run in memory-only mode (game data will not persist)")
 
 

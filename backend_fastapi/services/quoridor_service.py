@@ -110,7 +110,9 @@ class QuoridorService:
         game: GameState,
         action: Optional[dict] = None,
         is_new: bool = False,
-        ai_difficulty: Optional[str] = None
+        ai_difficulty: Optional[str] = None,
+        is_ranked: bool = False,
+        player1_user_id: Optional[int] = None
     ) -> None:
         """게임 상태를 DB에 저장 (단일 트랜잭션)"""
         if not is_db_available():
@@ -132,7 +134,9 @@ class QuoridorService:
                         player2_name=game.player2.name,
                         game_mode=game.game_mode.value,
                         ai_difficulty=ai_difficulty,
-                        game_state=game.to_dict()
+                        game_state=game.to_dict(),
+                        is_ranked=is_ranked,
+                        player1_user_id=player1_user_id
                     )
                     # 초기 상태를 step -1로 저장 (리플레이 시작점)
                     await repo.add_move(
@@ -207,15 +211,32 @@ class QuoridorService:
         player1_name: str = "Player 1",
         player2_name: str = "Player 2",
         ai_difficulty: str = "normal",
-        game_mode: str = "vs_ai"
-    ) -> GameState:
-        """새 게임 생성"""
+        game_mode: str = "vs_ai",
+        is_ranked: bool = False,
+        player1_user_id: Optional[int] = None
+    ) -> tuple[GameState, bool, Optional[int]]:
+        """
+        새 게임 생성
+
+        게임 모드:
+        - vs_ai: AI 대전 (일반 대전) - player2는 AI
+        - ranked: 랭킹전 (온라인 2P 대전) - player2는 매칭 대기
+        - friend_match: 친구대전 (방 코드 기반) - player2는 방 입장 대기
+        """
         # 캐시 정리 수행 (새 게임 생성 시)
         self._cleanup_stale_games()
         self._enforce_cache_limit()
 
-        # 로컬 2인 모드일 경우 player2_name 사용, AI 모드는 "AI"
-        p2_name = player2_name if game_mode == "local_2p" else "AI"
+        # 게임 모드에 따른 player2 이름 설정
+        if game_mode == "vs_ai":
+            p2_name = "AI"
+        elif game_mode == "ranked":
+            p2_name = "매칭 대기 중..."
+        elif game_mode == "friend_match":
+            p2_name = player2_name if player2_name != "Player 2" else "입장 대기 중..."
+        else:
+            p2_name = player2_name
+
         game = GameState(
             player1_name=player1_name,
             player2_name=p2_name,
@@ -230,9 +251,15 @@ class QuoridorService:
             self._ai_difficulties[game.game_id] = ai_difficulty
 
         # DB에 저장
-        await self._save_to_db(game, is_new=True, ai_difficulty=ai_difficulty)
+        await self._save_to_db(
+            game,
+            is_new=True,
+            ai_difficulty=ai_difficulty,
+            is_ranked=is_ranked,
+            player1_user_id=player1_user_id
+        )
 
-        return game
+        return game, is_ranked, player1_user_id
 
     async def get_game(self, game_id: str) -> Optional[GameState]:
         """게임 조회 (메모리 -> DB 순으로 조회)"""
