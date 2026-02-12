@@ -27,9 +27,53 @@ pytest
 ```bash
 cd frontend_flutter
 flutter pub get
-flutter run -d chrome    # Web
+flutter run -d chrome    # Web (개발 모드, Hot Reload)
 flutter run -d windows   # Windows desktop
+
+# 로컬 테스트 서버 모드 (release 빌드, 모바일 기기 테스트용)
+flutter run -d web-server --web-port=3000 --release
 ```
+
+### 로컬 개발 테스트 환경
+로컬 서버 + Docker DB + Flutter로 테스트할 때:
+
+**1. Docker PostgreSQL (DB만 사용)**
+```bash
+docker compose up db -d
+```
+
+**2. 백엔드 서버 (로컬)**
+```bash
+cd backend_fastapi
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
+
+**3. 프론트엔드 (로컬 web-server)**
+```bash
+cd frontend_flutter
+flutter run -d web-server --web-port=3000 --release
+```
+
+**접속:**
+- 노트북: `http://localhost:3000`
+- 모바일: `http://{노트북IP}:3000` (예: `http://192.168.0.16:3000`)
+
+**동작 방식:**
+- `flutter run -d web-server`: Flutter 개발 서버가 포트 3000에서 웹 앱 제공
+- `--release`: 최적화된 빌드로 모바일에서도 빠른 로딩
+- `--host 0.0.0.0`: 외부 네트워크에서 접속 가능
+
+**실시간 동기화:**
+- 코드 수정 시 Hot Reload 지원 (`r` 키 또는 저장)
+- `--release` 모드는 Hot Reload 미지원 (다시 빌드 필요)
+- 개발 중 빠른 테스트는 `flutter run -d chrome` 권장 (Hot Reload 지원)
+
+**vs Docker 정적 배포:**
+| 항목 | `flutter run -d web-server` | Docker + static files |
+|------|-----------------------------|-----------------------|
+| 코드 수정 | Hot Reload (release 제외) | 매번 빌드 필요 |
+| 용도 | 로컬 개발/테스트 | 배포/프로덕션 |
+| 속도 | 빠름 | 초기 빌드 느림 |
 
 ### Database
 - PostgreSQL required for persistence, but server gracefully degrades to memory-only mode
@@ -100,3 +144,81 @@ logger.info(f"[대기열 참가] {user.nickname} (위치: {position})")
 - game_id는 처음 8자리만 표시 (`game_id[:8]`)
 - SQLAlchemy 및 연결 로그는 INFO에서 표시하지 않음
 - WebSocket 연결/해제는 이미 로깅됨
+
+## WebSocket 통신 규칙 (Client ↔ Server)
+
+### 메시지 형식
+서버와 클라이언트 모두 동일한 JSON 형식을 사용합니다:
+```json
+{"type": "message_type", "key1": "value1", "key2": "value2"}
+```
+
+### 메시지 타입 매핑 (반드시 일치해야 함)
+
+| 기능 | 클라이언트 → 서버 | 서버 → 클라이언트 |
+|------|-------------------|-------------------|
+| 큐 참가 | `join_queue` | `queue_joined`, `queue_status` |
+| 큐 나가기 | `leave_queue` | `queue_left` |
+| 매칭 완료 | - | `match_found` |
+| 방 생성 | `create_room` | `room_created` |
+| 방 참가 | `join_room` | `room_joined` |
+| 방 나가기 | `leave_room` | `room_left`, `player_left` |
+| 준비 완료 | `ready` | `player_ready` |
+| 게임 시작 | - | `game_start` |
+| 말 이동 | `move` | `game_state` |
+| 벽 설치 | `wall` | `game_state` |
+| 항복 | `surrender` | `game_end` |
+| 게임 종료 | - | `game_end` |
+| 에러 | - | `error` |
+
+### 중요: 중첩 데이터 파싱
+
+서버가 `game_state` 메시지를 보낼 때 중첩 구조를 사용합니다:
+```json
+{
+  "type": "game_state",
+  "game_state": { /* 실제 게임 상태 데이터 */ },
+  "last_action": { "type": "move", "row": 5, "col": 4 },
+  "current_turn": 2,
+  "your_turn": false
+}
+```
+
+**클라이언트에서 파싱 시:**
+```dart
+// ❌ 잘못된 방법
+onGameStateUpdate?.call(message.data);  // 전체 메시지 전달
+
+// ✅ 올바른 방법
+final gameStateData = message.data['game_state'] as Map<String, dynamic>?;
+if (gameStateData != null) {
+  onGameStateUpdate?.call(gameStateData);  // 중첩된 game_state만 전달
+}
+```
+
+### game_end 메시지 구조
+```json
+{
+  "type": "game_end",
+  "winner": 1,
+  "reason": "goal_reached",
+  "final_state": { "turn_count": 25, ... },
+  "score_change": 3.5,
+  "new_rank": 15
+}
+```
+- `turn_count`는 `final_state` 내부에 있음
+
+### 수정 시 체크리스트
+새 메시지 타입 추가 또는 수정 시:
+1. **서버 (`ws_game.py`)**: `handle_message()` 함수에 핸들러 추가
+2. **클라이언트 (`websocket_service.dart`)**:
+   - `WsMessageType` 클래스에 상수 추가
+   - `_handleMessage()` 함수에 case 추가
+   - 필요시 전송 메서드 추가 (예: `movePawn()`)
+3. **양쪽 타입명 일치 확인**: 서버와 클라이언트가 동일한 문자열 사용
+4. **중첩 데이터 확인**: 서버가 중첩 구조로 보내면 클라이언트에서 올바르게 추출
+
+### 디버깅 팁
+- Flutter: `debugPrint('[WebSocket] received: ${message.type}')` 추가
+- Server: `logger.info(f"[WS] {msg_type}: {user.nickname}")` 추가
