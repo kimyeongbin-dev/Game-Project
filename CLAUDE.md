@@ -1,68 +1,132 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+> Claude Code 전용 지침. 상세 문서는 `docs/` 참조.
 
-## Project Overview
+---
 
-A multi-platform game application featuring Quoridor (board game) with AI opponent. Built with Flutter frontend and FastAPI backend, supporting PostgreSQL with fallback to memory-only mode.
+## 프로젝트 개요
 
-## Development Commands
+Quoridor 보드게임 플랫폼. Flutter 프론트엔드 + FastAPI 백엔드 + PostgreSQL.
 
-### Backend (FastAPI)
-```bash
-# Activate conda environment first (required for all commands)
-E:/Conda/Scripts/activate && conda activate GameProject
+**3계층 구조:**
+- `games/` - 순수 Python 게임 엔진
+- `backend_fastapi/` - FastAPI REST API + WebSocket
+- `frontend_flutter/` - Flutter 멀티플랫폼 UI
 
-# Install dependencies
-pip install -r backend_fastapi/requirements.txt
+---
 
-# Run server (from backend_fastapi directory)
-cd backend_fastapi && uvicorn main:app --reload
+## 빠른 명령어
 
-# Run tests
-pytest
+| 작업 | 명령어 |
+|------|--------|
+| **Conda 활성화** | `E:/Conda/Scripts/activate && conda activate GameProject` |
+| **백엔드 실행** | `cd backend_fastapi && uvicorn main:app --reload` |
+| **프론트엔드 실행** | `cd frontend_flutter && flutter run -d chrome` |
+| **DB 실행 (Docker)** | `docker compose up db -d` |
+| **테스트 (백엔드)** | `cd backend_fastapi && pytest -v` |
+| **테스트 (게임엔진)** | `pytest games/ -v` |
+| **테스트 (Flutter)** | `cd frontend_flutter && flutter test` |
+
+**상세:** [docs/setup/environment.md](docs/setup/environment.md)
+
+---
+
+## 문서 참조
+
+| 주제 | 문서 |
+|------|------|
+| 환경 설정 | [docs/setup/environment.md](docs/setup/environment.md) |
+| 테스트 가이드 | [docs/development/testing.md](docs/development/testing.md) |
+| 로깅 규칙 | [docs/development/logging.md](docs/development/logging.md) |
+| REST API | [docs/api/rest_api.md](docs/api/rest_api.md) |
+| WebSocket | [docs/api/websocket.md](docs/api/websocket.md) |
+| 전체 아키텍처 | [docs/architecture/overview.md](docs/architecture/overview.md) |
+
+---
+
+## 커밋 메시지 규칙
+
+### 자동 추천 트리거
+- Plan 모드 작업 완료 시
+- 큰 기능 구현 완료 시
+- 복잡한 버그 해결 후
+
+### 형식
+```
+<Type>: <Subject>
+
+- <변경사항 1>
+- <변경사항 2>
 ```
 
-### Frontend (Flutter)
-```bash
-cd frontend_flutter
-flutter pub get
-flutter run -d chrome    # Web
-flutter run -d windows   # Windows desktop
+**Type:** `Fix`, `Feat`, `Refactor`, `Test`, `Docs`, `Chore`
+
+### 워크플로우
+1. Claude가 코드 변경
+2. Claude가 커밋 메시지 추천 (자동)
+3. **사용자가 직접 코드 점검 및 수정**
+4. **사용자가 직접 `git commit` 실행**
+
+---
+
+## DevLog 자동 생성 규칙
+
+### 트리거 조건
+- Plan 모드 작업 완료 시
+- PR 생성 직전
+- 복잡한 버그 해결 후
+- 사용자 요청 시 ("오늘 작업 정리해줘")
+
+### 생성 위치
+`C:\Users\Administrator\Desktop\DevLogs\{YYYY-MM}\Code_Change_{YYYY-MM-DD}.md`
+
+### DevLogs 폴더 구조
+```
+DevLogs/
+├── Templates/
+│   ├── Code_Change_Sheet.md    # 일일 변경 기록 템플릿
+│   └── Blog_Template.md        # 블로그 포스팅 템플릿
+├── Sources/
+│   └── Project_Architecture.md # NotebookLM 소스
+└── {YYYY-MM}/
+    └── Code_Change_{YYYY-MM-DD}.md  # 일일 기록
 ```
 
-### Database
-- PostgreSQL required for persistence, but server gracefully degrades to memory-only mode
-- Set `DB_ENABLED=false` env var to disable DB
-- Default connection: `postgresql+asyncpg://postgres:postgres@localhost:5432/quoridor_db`
+---
 
-## Architecture
+## 핵심 규칙 요약
 
-### Three-Layer Game Structure
-1. **Game Engine** (`games/`): Pure Python game logic, no framework dependencies
-   - `games/game_Quoridor/core/`: Board, Player, Wall, GameState, MoveValidator, Pathfinder
-   - `games/game_Quoridor/ai/`: SimpleAI with difficulty levels
+### 로깅
+```python
+logger.info(f"[기능명] {user.nickname} (부가정보)")
+```
+**상세:** [docs/development/logging.md](docs/development/logging.md)
 
-2. **Backend API** (`backend_fastapi/`): FastAPI REST layer
-   - `services/quoridor_service.py`: Business logic, manages game instances in memory + DB
-   - `routers/quoridor.py`: REST endpoints
-   - `database/`: PostgreSQL via SQLAlchemy async
+### WebSocket 메시지
+| 클라이언트 → 서버 | 서버 → 클라이언트 |
+|-------------------|-------------------|
+| `move`, `wall`, `surrender` | `game_state`, `game_end` |
+| `join_queue`, `leave_queue` | `queue_joined`, `match_found` |
+| `create_room`, `join_room` | `room_created`, `room_joined` |
 
-3. **Frontend** (`frontend_flutter/`): Flutter multi-platform UI
-   - `lib/services/api_service.dart`: Backend communication
-   - `lib/screens/quoridor_screen.dart`: Game screen
-   - `lib/widgets/`: Board rendering components
+**중요:** `game_state` 응답은 중첩 구조 → `message.data['game_state']` 추출 필요
 
-### Key Design Patterns
-- **Game State Serialization**: `GameState.to_dict()` / `GameState.from_dict()` for DB persistence
-- **Graceful Degradation**: Server runs without DB (memory-only), `is_db_available()` checks before DB ops
-- **Service Singleton**: `quoridor_service` instance manages all game state
+**상세:** [docs/api/websocket.md](docs/api/websocket.md)
 
-## Quoridor Game Coordinates
-- Board: 9x9 grid (0-8)
-- Walls: 2-cell length, placed at intersections (0-7 range)
-- Player 1 starts at (8,4), goal row 0
-- Player 2/AI starts at (0,4), goal row 8
+### 테스트
+```bash
+pytest backend_fastapi/ -v      # 백엔드
+pytest games/ -v                # 게임 엔진
+flutter test                    # Flutter
+```
 
-## API Base Path
-`/api/v1/quoridor` - See `docs/quoridor/api_spec.md` for full specification
+**상세:** [docs/development/testing.md](docs/development/testing.md)
+
+---
+
+## 좌표 참조
+
+- **보드:** 9x9 (0-8)
+- **벽:** 교차점 기준 (0-7)
+- **Player 1:** 시작 (8,4), 목표 row 0
+- **Player 2/AI:** 시작 (0,4), 목표 row 8

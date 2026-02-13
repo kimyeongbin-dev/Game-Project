@@ -1,0 +1,73 @@
+# ===================================================
+# Sync Develop to Test Workflow
+# ===================================================
+# Trigger: develop 브랜치에 변경 발생 시
+# Action: dev-test 브랜치로 즉시 역동기화
+# Purpose: 테스트 환경이 항상 최신 develop 상태를 반영하도록 유지
+# ===================================================
+
+name: Sync Develop to dev-test
+
+on:
+  push:
+    branches:
+      - develop
+
+# 동시 실행 방지
+concurrency:
+  group: sync-develop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sync-to-test:
+    name: Sync develop -> dev-test
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Sync to dev-test
+        run: |
+          echo "🔄 Starting sync: develop -> dev-test"
+
+          # dev-test 브랜치 체크아웃
+          git fetch origin dev-test || echo "dev-test branch not found, will create"
+
+          if git rev-parse --verify origin/dev-test > /dev/null 2>&1; then
+            git checkout dev-test
+            git reset --hard origin/develop
+
+            echo "📥 Synced dev-test with latest develop changes"
+          else
+            # dev-test 브랜치가 없으면 생성
+            git checkout -b dev-test
+            echo "🆕 Created dev-test branch from develop"
+          fi
+
+          # 원격으로 push (force로 완전 동기화)
+          git push origin dev-test --force
+
+          echo "✅ Sync completed successfully"
+
+      - name: Sync summary
+        run: |
+          echo "====================================="
+          echo "📊 Sync Summary"
+          echo "====================================="
+          echo "Source: develop"
+          echo "Target: dev-test"
+          echo "Commit: ${{ github.sha }}"
+          echo "Triggered by: ${{ github.actor }}"
+          echo "====================================="

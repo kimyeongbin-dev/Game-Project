@@ -1,0 +1,192 @@
+# ===================================================
+# Test and Auto-Merge Workflow
+# ===================================================
+# Trigger: develop/test 브랜치에 push 시
+# Action: 테스트 실행 후 성공 시 develop 브랜치로 자동 병합
+# ===================================================
+
+name: Test and Auto-Merge to Develop
+
+on:
+  push:
+    branches:
+      - dev-test
+
+# 동시 실행 방지 - 같은 브랜치에서 여러 워크플로우가 동시 실행되지 않도록
+concurrency:
+  group: test-and-merge-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: '3.11'
+  FLUTTER_CHANNEL: 'stable'  # stable 채널 사용 (최신 안정 버전)
+
+jobs:
+  # ===================================================
+  # Job 1: Backend Tests (FastAPI + PostgreSQL)
+  # ===================================================
+  backend-tests:
+    name: Backend Tests (Python/FastAPI)
+    runs-on: ubuntu-latest
+
+    # PostgreSQL 서비스 컨테이너
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: quoridor_test_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+          cache-dependency-path: 'backend_fastapi/requirements.txt'
+
+      - name: Install dependencies
+        working-directory: backend_fastapi
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run pytest
+        working-directory: backend_fastapi
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/quoridor_test_db
+          DB_ENABLED: true
+          TESTING: true
+        run: |
+          pytest --tb=long -v --junitxml=test-results.xml
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backend-test-results
+          path: backend_fastapi/test-results.xml
+          retention-days: 7
+
+  # ===================================================
+  # Job 2: Frontend Tests (Flutter)
+  # ===================================================
+  frontend-tests:
+    name: Frontend Tests (Flutter)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: ${{ env.FLUTTER_CHANNEL }}
+          cache: true
+
+      - name: Clean and get dependencies
+        working-directory: frontend_flutter
+        run: |
+          flutter clean
+          flutter pub get
+          flutter pub deps
+
+      - name: Analyze code
+        working-directory: frontend_flutter
+        run: flutter analyze --no-fatal-infos
+
+      - name: Run Flutter tests
+        working-directory: frontend_flutter
+        run: flutter test --reporter=expanded
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: frontend-test-logs
+          path: frontend_flutter/.dart_tool/
+          retention-days: 7
+
+  # ===================================================
+  # Job 3: Game Engine Tests (Pure Python)
+  # ===================================================
+  game-engine-tests:
+    name: Game Engine Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install pytest
+        run: pip install pytest pytest-asyncio
+
+      - name: Run game engine tests
+        run: pytest games/ --tb=short -v
+
+  # ===================================================
+  # Job 4: Auto-Merge to Develop (모든 테스트 통과 후)
+  # ===================================================
+  auto-merge:
+    name: Auto-Merge to Develop
+    runs-on: ubuntu-latest
+    needs: [backend-tests, frontend-tests, game-engine-tests]
+    # 모든 테스트 job이 성공해야 실행
+    if: success()
+
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Merge to develop
+        run: |
+          # develop 브랜치로 체크아웃
+          git fetch origin develop
+          git checkout develop
+
+          # dev-test 브랜치 병합
+          git merge origin/dev-test --no-ff -m "Auto-merge: dev-test -> develop (Tests passed)
+
+          Automated merge after successful tests.
+
+          Workflow: ${{ github.workflow }}
+          Run ID: ${{ github.run_id }}
+          Commit: ${{ github.sha }}"
+
+          # 원격으로 push
+          git push origin develop
+
+      - name: Merge success notification
+        run: |
+          echo "✅ Successfully merged dev-test into develop"
+          echo "📋 Commit: ${{ github.sha }}"
+          echo "🔗 Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

@@ -1,0 +1,66 @@
+# Docker Compose for Game Project
+# FastAPI + PostgreSQL + Flutter 개발 환경
+
+services:
+  # PostgreSQL 데이터베이스
+  db:
+    image: postgres:16-alpine
+    container_name: quoridor-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-quoridor_db}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-8755}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-quoridor_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - game-network
+
+  # FastAPI 백엔드
+  backend:
+    build:
+      context: .
+      dockerfile: backend_fastapi/Dockerfile
+    container_name: quoridor-backend
+    restart: unless-stopped
+    environment:
+      # 데이터베이스 설정
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-8755}@db:5432/${POSTGRES_DB:-quoridor_db}
+      DB_ENABLED: "true"
+      # Python 경로 설정 (games 패키지 접근용)
+      PYTHONPATH: /workspace
+      # 개발 환경 설정
+      PYTHONDONTWRITEBYTECODE: 1
+      PYTHONUNBUFFERED: 1
+    ports:
+      # 모든 인터페이스에서 접속 가능 (Flutter 에뮬레이터 포함)
+      - "8000:8000"
+    volumes:
+      # Hot Reload: 로컬 코드 수정 시 즉시 반영
+      - ./backend_fastapi:/workspace/backend_fastapi
+      - ./games:/workspace/games
+    working_dir: /workspace/backend_fastapi
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - game-network
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  game-network:
+    driver: bridge
+    # Flutter 에뮬레이터에서 접속할 수 있도록 외부 네트워크 접근 허용
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

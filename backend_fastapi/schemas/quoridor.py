@@ -38,7 +38,7 @@ class GameStateSchema(BaseModel):
     """게임 상태 스키마"""
     game_id: str
     status: Literal['in_progress', 'player1_win', 'player2_win', 'abandoned']
-    game_mode: Literal["vs_ai", "local_2p"] = Field(default="vs_ai")
+    game_mode: Literal["vs_ai", "ranked", "friend_match"] = Field(default="vs_ai")
     current_turn: int = Field(..., ge=1, le=2)
     turn_count: int = Field(..., ge=0)
     players: PlayersSchema
@@ -51,11 +51,17 @@ class GameStateSchema(BaseModel):
 # Request Schemas
 
 class CreateGameRequest(BaseModel):
-    """게임 생성 요청"""
-    player_name: str = Field(default="Player 1", max_length=50)
-    player2_name: str = Field(default="Player 2", max_length=50)
-    ai_difficulty: Literal["easy", "normal", "hard"] = Field(default="normal")
-    game_mode: Literal["vs_ai", "local_2p"] = Field(default="vs_ai")
+    """
+    게임 생성 요청
+    - vs_ai: AI 대전 (일반 대전) - 혼자서 AI와 대전
+    - ranked: 랭킹전 (온라인 2P 대전) - 랭킹에 반영되는 온라인 대전
+    - friend_match: 친구대전 (방 코드 기반) - 방 코드로 친구와 대전
+
+    모든 게임 모드는 로그인이 필요합니다.
+    """
+    ai_difficulty: Literal["easy", "normal", "hard"] = Field(default="normal", description="AI 난이도 (vs_ai 모드에서만 사용)")
+    game_mode: Literal["vs_ai", "ranked", "friend_match"] = Field(default="vs_ai", description="게임 모드")
+    room_code: Optional[str] = Field(default=None, max_length=6, description="방 코드 (friend_match 모드에서만 사용)")
 
 
 class MoveRequest(BaseModel):
@@ -79,6 +85,8 @@ class CreateGameResponse(BaseModel):
     status: str
     game_mode: str
     current_turn: int
+    is_ranked: bool = False
+    player_user_id: Optional[int] = None
     message: str
 
 
@@ -128,7 +136,7 @@ class SessionInfoSchema(BaseModel):
     game_id: str
     player1_name: str
     player2_name: str
-    game_mode: Literal["vs_ai", "local_2p"]
+    game_mode: Literal["vs_ai", "ranked", "friend_match"]
     current_turn: int
     turn_count: int
     created_at: str
