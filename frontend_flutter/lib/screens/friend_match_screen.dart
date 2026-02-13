@@ -47,7 +47,15 @@ class _FriendMatchScreenState extends State<FriendMatchScreen> {
       return;
     }
 
-    _wsService.onMatchFound = _onMatchFound;
+    // 매칭 완료 UI와 실제 게임 시작(화면 전환)을 분리
+    _wsService.onMatchFound = (match) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('매칭 완료: ${match.opponentNickname}')),
+        );
+      }
+    };
+    _wsService.onGameStart = _onMatchFound;
     _wsService.onError = _onError;
     _wsService.addListener(_onStateChanged);
 

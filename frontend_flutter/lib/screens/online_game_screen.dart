@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/game_state.dart';
 import '../services/auth_service.dart';
+
+/// 입력 모드 (불리언 플래그 대신 상태 머신)
+enum OnlineInputMode { moving, placingWall }
 import '../services/websocket_service.dart';
 import '../widgets/unified_board_widget.dart';
 
@@ -23,7 +26,7 @@ class _OnlineGameScreenState extends State<OnlineGameScreen> {
   GameState? _gameState;
   bool _isLoading = false;
   String _message = '';
-  bool _wallMode = false;
+  OnlineInputMode _inputMode = OnlineInputMode.moving;
   String _wallOrientation = 'horizontal';
   GameEndInfo? _gameEndInfo;
   bool _opponentDisconnected = false;
@@ -126,7 +129,7 @@ class _OnlineGameScreenState extends State<OnlineGameScreen> {
   bool get _canPlay => _isMyTurn && !_isLoading && _gameEndInfo == null;
 
   void _movePawn(int row, int col) {
-    if (!_canPlay) return;
+    if (!_canPlay || _inputMode != OnlineInputMode.moving) return;
 
     debugPrint('[OnlineGame] 말 이동 요청: ($row, $col)');
     setState(() {
@@ -138,7 +141,7 @@ class _OnlineGameScreenState extends State<OnlineGameScreen> {
   }
 
   void _placeWall(int row, int col, String orientation) {
-    if (!_canPlay) return;
+    if (!_canPlay || _inputMode != OnlineInputMode.placingWall) return;
 
     debugPrint('[OnlineGame] 벽 설치 요청: ($row, $col, $orientation)');
     setState(() {
@@ -481,18 +484,21 @@ class _OnlineGameScreenState extends State<OnlineGameScreen> {
           const SizedBox(height: 12),
 
           // 보드
-          UnifiedBoardWidget(
-            gameState: _gameState!,
-            validMoves: const [], // 온라인에서는 서버에서 검증
-            wallMode: _wallMode,
-            wallOrientation: _wallOrientation,
-            onCellTap: _canPlay && !_wallMode ? _movePawn : null,
-            onWallTap: _canPlay && _wallMode ? _placeWall : null,
-            enableRotation: false,
-            isReplayMode: false,
-            // 내 플레이어 번호에 따라 보드 회전
-            rotateBoard: widget.matchInfo.playerNumber == 2,
-          ),
+      UnifiedBoardWidget(
+        gameState: _gameState!,
+        validMoves: const [], // 온라인에서는 서버에서 검증
+        wallMode: _inputMode == OnlineInputMode.placingWall,
+        wallOrientation: _wallOrientation,
+        onCellTap:
+            _canPlay && _inputMode == OnlineInputMode.moving ? _movePawn : null,
+        onWallTap: _canPlay && _inputMode == OnlineInputMode.placingWall
+            ? _placeWall
+            : null,
+        enableRotation: false,
+        isReplayMode: false,
+        // 내 플레이어 번호에 따라 보드 회전
+        rotateBoard: widget.matchInfo.playerNumber == 2,
+      ),
         ],
       ),
     );

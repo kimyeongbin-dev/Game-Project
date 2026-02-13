@@ -1,0 +1,32 @@
+# MISSION: Quoridor Refactoring & Critical Bug Fixes
+Act as a Senior Architect. Refactor the project enforcing strict type safety and domain-driven design.
+
+## 1. ARCHITECTURAL STANDARDS
+1.  **Schema Synchronization (Type Safety)**
+    * **Backend**: Use `Pydantic Discriminated Unions` with `Literal["tag"]`.
+    * **Frontend**: Use Dart `Sealed Classes` with `fromJson` factory switching on the `type` field.
+    * **Rule**: Variable names and JSON keys MUST match 1:1.
+2.  **State Management (State Machine)**
+    * **Prohibit**: Boolean flags (`isWallMode`, `isMoveMode`, `isMyTurn`).
+    * **Enforce**: `enum InputMode { locked, moving, placingWall }`.
+    * Use `Enum` for all bounded contexts (Status, Orientation, Difficulty).
+3.  **Project Structure (Domain-Driven)**
+    * Group files by **Feature** (e.g., `games/quoridor`, `auth`), not technical layer.
+    * **Symmetry**: Ensure backend `routers/game/quoridor.py` matches frontend `screens/quoridor/`.
+
+## 2. CRITICAL BUG FIXES (Execute Immediately)
+Refactor code to solve these specific issues:
+1.  **Logic (Player 2 Lock)**: Fix `currentTurn == 1` hardcoding. Compare `currentTurn` vs injected `myPlayerId`.
+2.  **Stability (Null Safety)**: Apply `?? []` for lists. Handle missing fields explicitly to prevent crashes.
+3.  **Maintainability (No Magic Strings)**: Replace hardcoded strings (e.g., 'abandoned', 'move') with `Enum` comparisons.
+4.  **Security (Auth Header)**: Inject `AuthService` token into `QuoridorApiService`. Auto-append `Authorization` header.
+5.  **Config (Hardcoded URL)**: Replace `localhost`/IPs with a centralized `AppConfig` class.
+6.  **Concurrency (Race Condition)**: Decouple `MatchedResponse` (UI Notification) from `GameStartResponse` (Navigation).
+7.  **Data Integrity**: In `MatchInfo`, enforce `you_are_player` presence. Fix Player 2's opponent nickname mapping.
+8.  **Type Mismatch**: Unify Server `Literal["move"]` and Client `String` constants into proper `Enums`.
+
+## 3. DELIVERABLES
+1.  **Directory Tree**: Optimized file structure showing Backend/Frontend symmetry.
+2.  **Refactored Code**:
+    * **Backend**: Revised Pydantic Models (Schemas).
+    * **Frontend**: Sealed Classes (Models), Service Layer (with Auth injection), State Machine implementation.

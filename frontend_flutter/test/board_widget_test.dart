@@ -427,7 +427,7 @@ GameState _createInitialGameState() {
   return const GameState(
     gameId: 'test-game-001',
     status: 'in_progress',
-    gameMode: 'local_2p',
+    gameMode: 'vs_ai',
     currentTurn: 1,
     turnCount: 0,
     player1: Player(
@@ -460,7 +460,7 @@ GameState _createGameStateAfterMove({
   return GameState(
     gameId: 'test-game-001',
     status: 'in_progress',
-    gameMode: 'local_2p',
+    gameMode: 'vs_ai',
     currentTurn: currentTurn,
     turnCount: turnCount,
     player1: Player(
@@ -486,7 +486,7 @@ GameState _createWinState({required int winner}) {
   return GameState(
     gameId: 'test-game-001',
     status: winner == 1 ? 'player1_win' : 'player2_win',
-    gameMode: 'local_2p',
+    gameMode: 'vs_ai',
     currentTurn: winner,
     turnCount: 15,
     player1: Player(

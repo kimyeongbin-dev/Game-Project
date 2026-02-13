@@ -1,7 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import '../models/game_state.dart';
 import '../services/api_service.dart';
+import '../services/auth_service.dart';
 import '../widgets/unified_board_widget.dart';
+
+/// 입력 모드 (불리언 플래그 대신 상태 머신)
+enum InputMode { moving, placingWall }
 
 /// 쿼리도 게임 화면
 class QuoridorScreen extends StatefulWidget {
@@ -17,7 +22,7 @@ class QuoridorScreen extends StatefulWidget {
 }
 
 class _QuoridorScreenState extends State<QuoridorScreen> {
-  final QuoridorApiService _apiService = QuoridorApiService();
+  late final QuoridorApiService _apiService;
 
   GameState? _gameState;
   ValidMoves? _validMoves;
@@ -25,13 +30,12 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
   String? _errorMessage;
   String _message = '';
 
-  bool _wallMode = false;
+  InputMode _inputMode = InputMode.moving;
   String _wallOrientation = 'horizontal';
 
   String _playerName = 'Player';
   String _player2Name = 'Player 2';
   String _difficulty = 'normal';
-  late String _gameMode; // 'vs_ai' or 'local_2p'
 
   // 활성 세션 목록 (게임 복구용)
   List<SessionInfo> _activeSessions = [];
@@ -49,7 +53,8 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
   @override
   void initState() {
     super.initState();
-    _gameMode = widget.initialMode;
+    final authService = context.read<AuthService?>();
+    _apiService = QuoridorApiService(authService: authService);
     _loadActiveSessions();
   }
 
@@ -93,7 +98,7 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
         setState(() {
           _gameState = gameState;
           _message = '게임이 복구되었습니다!';
-          _wallMode = false;
+          _inputMode = InputMode.moving;
         });
         await _loadValidMoves();
       } else {
@@ -115,7 +120,7 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
   }
 
   Future<void> _createNewGame() async {
-    debugPrint('[Quoridor] 새 게임 생성: 모드=$_gameMode, 난이도=$_difficulty');
+    debugPrint('[Quoridor] 새 게임 생성: 모드=vs_ai, 난이도=$_difficulty');
     setState(() {
       _isLoading = true;
       _errorMessage = null;
@@ -126,7 +131,7 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
         playerName: _playerName,
         player2Name: _player2Name,
         aiDifficulty: _difficulty,
-        gameMode: _gameMode,
+        gameMode: 'vs_ai',
       );
       final gameId = response['game_id'] as String;
       debugPrint('[Quoridor] 게임 생성됨: $gameId');
@@ -134,10 +139,8 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
 
       setState(() {
         _gameState = gameState;
-        _message = _gameMode == 'local_2p'
-            ? '로컬 2인 게임이 시작되었습니다!'
-            : '게임이 시작되었습니다!';
-        _wallMode = false;
+        _message = '게임이 시작되었습니다!';
+        _inputMode = InputMode.moving;
       });
 
       await _loadValidMoves();
@@ -235,7 +238,7 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
         setState(() {
           _gameState = response.gameState;
           _message = response.message;
-          _wallMode = false;
+          _inputMode = InputMode.moving;
           _validMoves = null;
         });
 
@@ -314,7 +317,7 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
       _validMoves = null;
       _message = '';
       _errorMessage = null;
-      _wallMode = false;
+      _inputMode = InputMode.moving;
     });
     _loadActiveSessions();
   }
@@ -558,9 +561,10 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
   }
 
   void _toggleWallMode() {
-    debugPrint('[Quoridor] 모드 변경: ${_wallMode ? "벽→이동" : "이동→벽"}');
+    final next = _inputMode == InputMode.moving ? InputMode.placingWall : InputMode.moving;
+    debugPrint('[Quoridor] 모드 변경: ${_inputMode == InputMode.moving ? "이동→벽" : "벽→이동"}');
     setState(() {
-      _wallMode = !_wallMode;
+      _inputMode = next;
     });
   }
 
@@ -692,12 +696,12 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
             UnifiedBoardWidget(
               gameState: displayState,
               validMoves: _isReplayMode ? [] : (_validMoves?.pawnMoves ?? []),
-              wallMode: _isReplayMode ? false : _wallMode,
+              wallMode: _isReplayMode ? false : _inputMode == InputMode.placingWall,
               wallOrientation: _wallOrientation,
-              onCellTap: _isReplayMode || !displayState.isPlayerTurn || _wallMode
+              onCellTap: _isReplayMode || !displayState.isPlayerTurn || _inputMode == InputMode.placingWall
                   ? null
                   : _movePawn,
-              onWallTap: _isReplayMode || !displayState.isPlayerTurn || !_wallMode
+              onWallTap: _isReplayMode || !displayState.isPlayerTurn || _inputMode != InputMode.placingWall
                   ? null
                   : _placeWall,
               enableRotation: _enableRotation,
@@ -847,32 +851,9 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
                 padding: const EdgeInsets.all(20),
                 child: Column(
                   children: [
-                    // 게임 모드 선택
-                    SegmentedButton<String>(
-                      segments: const [
-                        ButtonSegment(
-                          value: 'vs_ai',
-                          icon: Icon(Icons.smart_toy_outlined),
-                          label: Text('AI 대전'),
-                        ),
-                        ButtonSegment(
-                          value: 'local_2p',
-                          icon: Icon(Icons.people_outline),
-                          label: Text('로컬 2인'),
-                        ),
-                      ],
-                      selected: {_gameMode},
-                      onSelectionChanged: (Set<String> selection) {
-                        debugPrint('[Quoridor] 게임 모드 변경: ${selection.first}');
-                        setState(() {
-                          _gameMode = selection.first;
-                        });
-                      },
-                    ),
-                    const SizedBox(height: 20),
                     TextField(
                       decoration: InputDecoration(
-                        labelText: _gameMode == 'local_2p' ? 'Player 1 이름' : '플레이어 이름',
+                        labelText: '플레이어 이름',
                         hintText: 'Player',
                         prefixIcon: const Icon(Icons.person_outline),
                         border: OutlineInputBorder(
@@ -884,26 +865,7 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
                       onChanged: (value) =>
                           _playerName = value.isEmpty ? 'Player' : value,
                     ),
-                    // 로컬 2인 모드일 때 Player 2 이름 입력
-                    if (_gameMode == 'local_2p') ...[
-                      const SizedBox(height: 16),
-                      TextField(
-                        decoration: InputDecoration(
-                          labelText: 'Player 2 이름',
-                          hintText: 'Player 2',
-                          prefixIcon: const Icon(Icons.person_outline),
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          filled: true,
-                          fillColor: colorScheme.surface,
-                        ),
-                        onChanged: (value) =>
-                            _player2Name = value.isEmpty ? 'Player 2' : value,
-                      ),
-                    ],
-                    // AI 모드일 때만 난이도 선택
-                    if (_gameMode == 'vs_ai') ...[
+                    // AI 난이도 선택
                       const SizedBox(height: 16),
                       DropdownButtonFormField<String>(
                         initialValue: _difficulty,
@@ -1071,7 +1033,7 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
             FilledButton.tonal(
               onPressed: hasWalls ? _toggleWallMode : null,
               style: FilledButton.styleFrom(
-                backgroundColor: _wallMode
+                backgroundColor: _inputMode == InputMode.placingWall
                     ? colorScheme.secondaryContainer
                     : colorScheme.primaryContainer,
               ),
@@ -1079,15 +1041,15 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(
-                    _wallMode ? Icons.directions_walk : Icons.fence,
+                    _inputMode == InputMode.placingWall ? Icons.directions_walk : Icons.fence,
                     size: 18,
                   ),
                   const SizedBox(width: 8),
-                  Text(_wallMode ? '이동 모드' : '벽 모드'),
+                  Text(_inputMode == InputMode.placingWall ? '이동 모드' : '벽 모드'),
                 ],
               ),
             ),
-            if (_wallMode) ...[
+            if (_inputMode == InputMode.placingWall) ...[
               const SizedBox(width: 16),
               SegmentedButton<String>(
                 segments: const [

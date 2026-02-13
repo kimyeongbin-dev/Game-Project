@@ -1,16 +1,33 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../models/game_state.dart';
+import 'auth_service.dart';
 
 /// 쿼리도 API 서비스
 class QuoridorApiService {
   final String baseUrl;
   final http.Client _client;
+  final AuthService? _authService;
 
   QuoridorApiService({
-    this.baseUrl = 'http://localhost:8000/api/v1/quoridor',
+    String? baseUrl,
     http.Client? client,
-  }) : _client = client ?? http.Client();
+    AuthService? authService,
+  })  : baseUrl = baseUrl ?? 'http://${AuthService.serverHost}/api/v1/quoridor',
+        _client = client ?? http.Client(),
+        _authService = authService;
+
+  Map<String, String> _buildHeaders({bool json = false}) {
+    final headers = <String, String>{};
+    if (json) {
+      headers['Content-Type'] = 'application/json';
+    }
+    final token = _authService?.token;
+    if (token != null && token.isNotEmpty) {
+      headers['Authorization'] = 'Bearer $token';
+    }
+    return headers;
+  }
 
   /// 새 게임 생성
   Future<Map<String, dynamic>> createGame({
@@ -21,7 +38,7 @@ class QuoridorApiService {
   }) async {
     final response = await _client.post(
       Uri.parse('$baseUrl/games'),
-      headers: {'Content-Type': 'application/json'},
+      headers: _buildHeaders(json: true),
       body: jsonEncode({
         'player_name': playerName,
         'player2_name': player2Name,
@@ -40,6 +57,7 @@ class QuoridorApiService {
   Future<GameState> getGame(String gameId) async {
     final response = await _client.get(
       Uri.parse('$baseUrl/games/$gameId'),
+      headers: _buildHeaders(),
     );
 
     if (response.statusCode == 200) {
@@ -54,7 +72,7 @@ class QuoridorApiService {
   Future<ActionResponse> movePawn(String gameId, int row, int col) async {
     final response = await _client.post(
       Uri.parse('$baseUrl/games/$gameId/move'),
-      headers: {'Content-Type': 'application/json'},
+      headers: _buildHeaders(json: true),
       body: jsonEncode({'row': row, 'col': col}),
     );
 
@@ -75,7 +93,7 @@ class QuoridorApiService {
   ) async {
     final response = await _client.post(
       Uri.parse('$baseUrl/games/$gameId/wall'),
-      headers: {'Content-Type': 'application/json'},
+      headers: _buildHeaders(json: true),
       body: jsonEncode({
         'row': row,
         'col': col,
@@ -95,6 +113,7 @@ class QuoridorApiService {
   Future<AIActionResponse> aiMove(String gameId) async {
     final response = await _client.post(
       Uri.parse('$baseUrl/games/$gameId/ai-move'),
+      headers: _buildHeaders(),
     );
 
     if (response.statusCode == 200) {
@@ -109,6 +128,7 @@ class QuoridorApiService {
   Future<ValidMoves> getValidMoves(String gameId) async {
     final response = await _client.get(
       Uri.parse('$baseUrl/games/$gameId/valid-moves'),
+      headers: _buildHeaders(),
     );
 
     if (response.statusCode == 200) {
@@ -123,6 +143,7 @@ class QuoridorApiService {
   Future<ActiveSessionsResponse> getActiveSessions({int limit = 50}) async {
     final response = await _client.get(
       Uri.parse('$baseUrl/sessions?limit=$limit'),
+      headers: _buildHeaders(),
     );
 
     if (response.statusCode == 200) {
@@ -137,6 +158,7 @@ class QuoridorApiService {
   Future<GameState> recoverGame(String gameId) async {
     final response = await _client.post(
       Uri.parse('$baseUrl/games/$gameId/recover'),
+      headers: _buildHeaders(),
     );
 
     if (response.statusCode == 200) {
@@ -151,6 +173,7 @@ class QuoridorApiService {
   Future<GameHistoryResponse> getGameHistory(String gameId) async {
     final response = await _client.get(
       Uri.parse('$baseUrl/games/$gameId/history'),
+      headers: _buildHeaders(),
     );
 
     if (response.statusCode == 200) {
@@ -184,6 +207,7 @@ class QuoridorApiService {
   Future<bool> abandonGame(String gameId) async {
     final response = await _client.post(
       Uri.parse('$baseUrl/games/$gameId/abandon'),
+      headers: _buildHeaders(),
     );
 
     return response.statusCode == 204;
@@ -193,6 +217,7 @@ class QuoridorApiService {
   Future<bool> deleteGame(String gameId) async {
     final response = await _client.delete(
       Uri.parse('$baseUrl/games/$gameId'),
+      headers: _buildHeaders(),
     );
 
     return response.statusCode == 204;

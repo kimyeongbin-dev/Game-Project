@@ -126,16 +126,8 @@ class _MainMenuScreenState extends State<MainMenuScreen> {
               title: '로컬 2인',
               description: '한 기기에서 친구와 함께',
               color: Colors.orange,
-              onTap: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) => const QuoridorScreen(
-                      initialMode: 'local_2p',
-                    ),
-                  ),
-                );
-              },
+              enabled: false,
+              onTap: () {},
             ),
             const SizedBox(height: 12),
 

@@ -341,9 +341,10 @@ class _UnifiedBoardWidgetState extends State<UnifiedBoardWidget>
       return AnimatedBuilder(
         animation: _rotationAnimation,
         builder: (context, _) {
+          final label = gameState.isVsAI ? 'AI' : 'P2';
           return _PlayerToken(
             color: Colors.red,
-            label: gameState.isLocal2P ? 'P2' : 'AI',
+            label: label,
             isCurrentTurn: gameState.currentTurn == 2 && !gameState.isFinished,
             counterRotation: _currentRotation,
           );

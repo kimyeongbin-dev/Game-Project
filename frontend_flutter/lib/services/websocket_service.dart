@@ -94,7 +94,10 @@ class MatchInfo {
 
   factory MatchInfo.fromJson(Map<String, dynamic> json) {
     // 서버에서 보내는 형식: you_are_player, player1_nickname, player2_nickname
-    final playerNum = json['you_are_player'] as int? ?? json['player_number'] as int? ?? 1;
+    final playerNum = json['you_are_player'] as int? ?? json['player_number'] as int?;
+    if (playerNum == null) {
+      throw ArgumentError('you_are_player (또는 player_number) 필드는 MatchInfo에 필수입니다.');
+    }
 
     // 상대방 닉네임 결정
     String opponentNick;
@@ -176,7 +179,8 @@ class WebSocketService extends ChangeNotifier {
   final List<void Function(WsMessage)> _messageListeners = [];
   void Function(Map<String, dynamic>)? onGameStateUpdate;
   void Function(GameEndInfo)? onGameEnd;
-  void Function(MatchInfo)? onMatchFound;
+  void Function(MatchInfo)? onMatchFound; // 매칭 완료 알림 (UI용)
+  void Function(MatchInfo)? onGameStart;  // 실제 게임 시작 (화면 전환용)
   void Function(String)? onError;
   void Function()? onOpponentDisconnected;
   void Function()? onOpponentReconnected;
@@ -300,7 +304,7 @@ class WebSocketService extends ChangeNotifier {
   /// 폰 이동
   void movePawn(int row, int col) {
     send(WsMessage(
-      type: 'move',  // 서버가 기대하는 타입
+      type: WsMessageType.move,  // 서버가 기대하는 타입
       data: {
         'row': row,
         'col': col,
@@ -311,7 +315,7 @@ class WebSocketService extends ChangeNotifier {
   /// 벽 설치
   void placeWall(int row, int col, String orientation) {
     send(WsMessage(
-      type: 'wall',  // 서버가 기대하는 타입
+      type: WsMessageType.wall,  // 서버가 기대하는 타입
       data: {
         'row': row,
         'col': col,
@@ -358,7 +362,9 @@ class WebSocketService extends ChangeNotifier {
         case WsMessageType.matchFound:
           _currentMatch = MatchInfo.fromJson(message.data);
           _matchingState = MatchingState.matched;
-          onMatchFound?.call(_currentMatch!);
+          if (_currentMatch != null) {
+            onMatchFound?.call(_currentMatch!);
+          }
           break;
 
         case WsMessageType.roomCreated:
@@ -378,7 +384,9 @@ class WebSocketService extends ChangeNotifier {
         case WsMessageType.gameStart:
           _currentMatch = MatchInfo.fromJson(message.data);
           _matchingState = MatchingState.inGame;
-          onMatchFound?.call(_currentMatch!);
+          if (_currentMatch != null) {
+            onGameStart?.call(_currentMatch!);
+          }
           // game_state가 포함되어 있으면 게임 상태도 업데이트
           if (message.data['game_state'] != null) {
             onGameStateUpdate?.call(message.data['game_state'] as Map<String, dynamic>);

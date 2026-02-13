@@ -79,6 +79,7 @@ class Player {
 class GameState {
   final String gameId;
   final String status;
+  /// 서버 game_mode 값 (vs_ai, ranked, friend_match)
   final String gameMode;
   final int currentTurn;
   final int turnCount;
@@ -105,6 +106,7 @@ class GameState {
 
   factory GameState.fromJson(Map<String, dynamic> json) {
     final players = json['players'] as Map<String, dynamic>;
+    final wallsJson = json['walls'] as List<dynamic>? ?? const [];
     return GameState(
       gameId: json['game_id'] as String,
       status: json['status'] as String,
@@ -113,7 +115,7 @@ class GameState {
       turnCount: json['turn_count'] as int,
       player1: Player.fromJson(players['player1'] as Map<String, dynamic>),
       player2: Player.fromJson(players['player2'] as Map<String, dynamic>),
-      walls: (json['walls'] as List<dynamic>)
+      walls: wallsJson
           .map((w) => Wall.fromJson(w as Map<String, dynamic>))
           .toList(),
       winner: json['winner'] as int?,
@@ -127,12 +129,13 @@ class GameState {
   bool get isPlayer1Win => status == 'player1_win' || (status == 'finished' && winner == 1);
   bool get isPlayer2Win => status == 'player2_win' || (status == 'finished' && winner == 2);
   bool get isVsAI => gameMode == 'vs_ai';
-  bool get isLocal2P => gameMode == 'local_2p';
+  bool get isRanked => gameMode == 'ranked';
+  bool get isFriendMatch => gameMode == 'friend_match';
 
-  /// 현재 플레이어가 조작 가능한지 여부
-  /// VS AI 모드: Player 1만 조작 가능
-  /// Local 2P 모드: 현재 턴인 플레이어가 조작 가능
-  bool get isPlayerTurn => isLocal2P || currentTurn == 1;
+  /// 현재 로컬 기기에서 조작 가능한지 여부
+  /// - vs_ai: Player 1만 조작 가능
+  /// - ranked/friend_match: 온라인 모드는 별도 로직에서 제어
+  bool get isPlayerTurn => isVsAI && currentTurn == 1;
 
   Player get currentPlayer => currentTurn == 1 ? player1 : player2;
 }
@@ -149,14 +152,16 @@ class ValidMoves {
   });
 
   factory ValidMoves.fromJson(Map<String, dynamic> json) {
+    final pawnMovesJson = json['valid_pawn_moves'] as List<dynamic>? ?? const [];
+    final wallPlacementsJson = json['valid_wall_placements'] as List<dynamic>? ?? const [];
     return ValidMoves(
-      pawnMoves: (json['valid_pawn_moves'] as List<dynamic>)
+      pawnMoves: pawnMovesJson
           .map((p) => Position.fromJson(p as Map<String, dynamic>))
           .toList(),
-      wallPlacements: (json['valid_wall_placements'] as List<dynamic>)
+      wallPlacements: wallPlacementsJson
           .map((w) => Wall.fromJson(w as Map<String, dynamic>))
           .toList(),
-      wallsRemaining: json['walls_remaining'] as int,
+      wallsRemaining: json['walls_remaining'] as int? ?? 0,
     );
   }
 }
