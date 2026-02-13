@@ -5,9 +5,12 @@ DB 없이 테스트용 인메모리 저장소
 
 import secrets
 import bcrypt
+import logging
 from datetime import datetime, timedelta, date
 from typing import Optional, Dict, List
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 
 # 세션 만료 시간 (시간)
@@ -137,7 +140,7 @@ class InMemoryUserStore:
         ))
 
         self._initialized = True
-        print(f"[InMemoryStore] {len(test_users)} test users initialized")
+        logger.info(f"[메모리 초기화] 테스트 유저 {len(test_users)}명")
 
     def create_user(self, nickname: str, password: str) -> tuple[Optional[MemoryUser], str]:
         """유저 생성"""

@@ -16,8 +16,6 @@ logger = logging.getLogger(__name__)
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from games.__init__ import *
-
 # 게임 로직 임포트
 from games import GameState, Wall
 from games.game_Quoridor.core.board import Position
