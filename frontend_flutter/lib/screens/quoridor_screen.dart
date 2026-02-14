@@ -862,35 +862,33 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
                         filled: true,
                         fillColor: colorScheme.surface,
                       ),
-                      onChanged: (value) =>
-                          _playerName = value.isEmpty ? 'Player' : value,
+                      onChanged: (value) => _playerName = value.isEmpty ? 'Player' : value,
                     ),
                     // AI 난이도 선택
-                      const SizedBox(height: 16),
-                      DropdownButtonFormField<String>(
-                        initialValue: _difficulty,
-                        decoration: InputDecoration(
-                          labelText: 'AI 난이도',
-                          prefixIcon: const Icon(Icons.psychology_outlined),
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          filled: true,
-                          fillColor: colorScheme.surface,
+                    const SizedBox(height: 16),
+                    DropdownButtonFormField<String>(
+                      initialValue: _difficulty,
+                      decoration: InputDecoration(
+                        labelText: 'AI 난이도',
+                        prefixIcon: const Icon(Icons.psychology_outlined),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
                         ),
-                        items: const [
-                          DropdownMenuItem(value: 'easy', child: Text('쉬움')),
-                          DropdownMenuItem(value: 'normal', child: Text('보통')),
-                          DropdownMenuItem(value: 'hard', child: Text('어려움')),
-                        ],
-                        onChanged: (value) {
-                          if (value != null) {
-                            debugPrint('[Quoridor] AI 난이도 변경: $value');
-                            setState(() => _difficulty = value);
-                          }
-                        },
+                        filled: true,
+                        fillColor: colorScheme.surface,
                       ),
-                    ],
+                      items: const [
+                        DropdownMenuItem(value: 'easy', child: Text('쉬움')),
+                        DropdownMenuItem(value: 'normal', child: Text('보통')),
+                        DropdownMenuItem(value: 'hard', child: Text('어려움')),
+                      ],
+                      onChanged: (value) {
+                        if (value != null) {
+                          debugPrint('[Quoridor] AI 난이도 변경: $value');
+                          setState(() => _difficulty = value);
+                        }
+                      },
+                    ),
                   ],
                 ),
               ),
@@ -947,7 +945,7 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
         ),
       ),
     );
-  }
+}
 
   Widget _buildActiveSessionsList(ColorScheme colorScheme) {
     return Column(
