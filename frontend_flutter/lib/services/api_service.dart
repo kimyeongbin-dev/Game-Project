@@ -31,7 +31,7 @@ class QuoridorApiService {
 
   /// 새 게임 생성
   Future<Map<String, dynamic>> createGame({
-    String playerName = 'Player',
+    String player1Name = 'Player 1',
     String player2Name = 'Player 2',
     String aiDifficulty = 'normal',
     String gameMode = 'vs_ai',
@@ -40,7 +40,7 @@ class QuoridorApiService {
       Uri.parse('$baseUrl/games'),
       headers: _buildHeaders(json: true),
       body: jsonEncode({
-        'player_name': playerName,
+        'player1_name': player1Name,
         'player2_name': player2Name,
         'ai_difficulty': aiDifficulty,
         'game_mode': gameMode,

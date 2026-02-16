@@ -6,7 +6,18 @@ import '../services/auth_service.dart';
 import '../widgets/unified_board_widget.dart';
 
 /// 입력 모드 (불리언 플래그 대신 상태 머신)
-enum InputMode { moving, placingWall }
+sealed class InputMode {
+  const InputMode();
+}
+
+class MovingMode extends InputMode {
+  const MovingMode();
+}
+
+class PlacingWallMode extends InputMode {
+  final String orientation; // 'horizontal' 또는 'vertical'
+  const PlacingWallMode({this.orientation = 'horizontal'});
+}
 
 /// 쿼리도 게임 화면
 class QuoridorScreen extends StatefulWidget {
@@ -30,10 +41,9 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
   String? _errorMessage;
   String _message = '';
 
-  InputMode _inputMode = InputMode.moving;
-  String _wallOrientation = 'horizontal';
-
-  String _playerName = 'Player';
+  InputMode _inputMode = const MovingMode(); // Sealed Class 초기화
+  
+  String _player1Name = 'Player 1';
   String _player2Name = 'Player 2';
   String _difficulty = 'normal';
 
@@ -66,22 +76,15 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
 
   /// 서버에서 진행 중인 게임 세션 목록 로드
   Future<void> _loadActiveSessions() async {
-    setState(() {
-      _isLoadingSessions = true;
-    });
-
+    setState(() => _isLoadingSessions = true);
     try {
       final response = await _apiService.getActiveSessions(limit: 10);
-      setState(() {
-        _activeSessions = response.sessions;
-      });
+      setState(() => _activeSessions = response.sessions);
     } catch (e) {
       // 세션 로드 실패해도 게임 진행에는 문제 없음
       debugPrint('Failed to load active sessions: $e');
     } finally {
-      setState(() {
-        _isLoadingSessions = false;
-      });
+      setState(() => _isLoadingSessions = false);
     }
   }
 
@@ -98,24 +101,19 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
         setState(() {
           _gameState = gameState;
           _message = '게임이 복구되었습니다!';
-          _inputMode = InputMode.moving;
+          _inputMode = const MovingMode(); // [변경] 초기화
         });
         await _loadValidMoves();
       } else {
-        setState(() {
-          _errorMessage = '게임을 복구할 수 없습니다.';
-        });
+        setState(() => _errorMessage = '게임을 복구할 수 없습니다.');
+
         // 세션 목록 갱신
         await _loadActiveSessions();
       }
     } catch (e) {
-      setState(() {
-        _errorMessage = e.toString();
-      });
+      setState(() => _errorMessage = e.toString());
     } finally {
-      setState(() {
-        _isLoading = false;
-      });
+      setState(() => _isLoading = false);
     }
   }
 
@@ -128,7 +126,7 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
 
     try {
       final response = await _apiService.createGame(
-        playerName: _playerName,
+        player1Name: _player1Name,
         player2Name: _player2Name,
         aiDifficulty: _difficulty,
         gameMode: 'vs_ai',
@@ -140,32 +138,24 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
       setState(() {
         _gameState = gameState;
         _message = '게임이 시작되었습니다!';
-        _inputMode = InputMode.moving;
+        _inputMode = const MovingMode();
       });
 
       await _loadValidMoves();
     } catch (e) {
-      setState(() {
-        _errorMessage = e.toString();
-      });
+      setState(() => _errorMessage = e.toString());
     } finally {
-      setState(() {
-        _isLoading = false;
-      });
+      setState(() => _isLoading = false);
     }
   }
 
   Future<void> _loadValidMoves() async {
     if (_gameState == null || _gameState!.isFinished) return;
-    // VS AI 모드에서는 Player 1 턴에만 로드
-    // Local 2P 모드에서는 항상 로드
     if (_gameState!.isVsAI && _gameState!.currentTurn != 1) return;
 
     try {
       final validMoves = await _apiService.getValidMoves(_gameState!.gameId);
-      setState(() {
-        _validMoves = validMoves;
-      });
+      setState(() => _validMoves = validMoves);
     } catch (e) {
       // 에러 무시
     }
@@ -173,7 +163,8 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
 
   Future<void> _movePawn(int row, int col) async {
     if (_gameState == null) return;
-
+    if (_inputMode is! MovingMode) return;
+    
     debugPrint('[Quoridor] 말 이동 요청: ($row, $col)');
     setState(() {
       _isLoading = true;
@@ -198,32 +189,30 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
         if (_gameState!.isVsAI) {
           await _handleAITurn();
         } else {
-          // Local 2P 모드: 다음 플레이어의 유효 이동 로드
           await _loadValidMoves();
         }
       } else {
-        setState(() {
-          _message = response.message;
-        });
+        setState(() => _message = response.message);
       }
     } catch (e) {
-      setState(() {
-        _errorMessage = e.toString();
-      });
+      setState(() => _errorMessage = e.toString());
     } finally {
-      setState(() {
-        _isLoading = false;
-      });
+      setState(() => _isLoading = false);
     }
   }
 
   Future<void> _placeWall(int row, int col, String orientation) async {
     if (_gameState == null) return;
 
-    debugPrint('[Quoridor] 벽 설치 요청: ($row, $col, $orientation)');
-    setState(() {
-      _isLoading = true;
-    });
+    // 스마트 캐스팅을 위해 로컬 변수 사용
+    final currentMode = _inputMode;
+    if (currentMode is! PlacingWallMode) return;
+
+    // 인자로 넘어온 orientation 대신 현재 상태의 orientation을 사용 (UI 일치 보장)
+    final targetOrientation = currentMode.orientation;
+
+    debugPrint('[Quoridor] 벽 설치 요청: ($row, $col, $targetOrientation)');
+    setState(() => _isLoading = true);
 
     try {
       final response = await _apiService.placeWall(
@@ -238,7 +227,7 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
         setState(() {
           _gameState = response.gameState;
           _message = response.message;
-          _inputMode = InputMode.moving;
+          _inputMode = const MovingMode();
           _validMoves = null;
         });
 
@@ -246,22 +235,15 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
         if (_gameState!.isVsAI) {
           await _handleAITurn();
         } else {
-          // Local 2P 모드: 다음 플레이어의 유효 이동 로드
           await _loadValidMoves();
         }
       } else {
-        setState(() {
-          _message = response.message;
-        });
+        setState(() => _message = response.message);
       }
     } catch (e) {
-      setState(() {
-        _errorMessage = e.toString();
-      });
+      setState(() => _errorMessage = e.toString());
     } finally {
-      setState(() {
-        _isLoading = false;
-      });
+      setState(() => _isLoading = false);
     }
   }
 
@@ -317,7 +299,7 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
       _validMoves = null;
       _message = '';
       _errorMessage = null;
-      _inputMode = InputMode.moving;
+      _inputMode = const MovingMode();
     });
     _loadActiveSessions();
   }
@@ -560,18 +542,27 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
     }
   }
 
+  // 모드 토글 메서드
   void _toggleWallMode() {
-    final next = _inputMode == InputMode.moving ? InputMode.placingWall : InputMode.moving;
-    debugPrint('[Quoridor] 모드 변경: ${_inputMode == InputMode.moving ? "이동→벽" : "벽→이동"}');
+    final isWallMode = _inputMode is PlacingWallMode;
+    debugPrint('[Quoridor] 모드 변경: ${isWallMode ? "벽→이동" : "이동→벽"}');
+    
     setState(() {
-      _inputMode = next;
+      if (isWallMode) {
+        _inputMode = const MovingMode();
+      } else {
+        // 벽 모드 진입 시 기본값은 수평
+        _inputMode = const PlacingWallMode(orientation: 'horizontal');
+      }
     });
   }
 
-  void _setWallOrientation(String orientation) {
+  // 벽 방향 설정 메서드
+ void _setWallOrientation(String orientation) {
     debugPrint('[Quoridor] 벽 방향 변경: $orientation');
     setState(() {
-      _wallOrientation = orientation;
+      // 방향만 바꿔서 새 상태 주입
+      _inputMode = PlacingWallMode(orientation: orientation);
     });
   }
 
@@ -639,6 +630,9 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
         ? _replayGameState!
         : _gameState!;
 
+    final currentMode = _inputMode;
+    final isWallMode = currentMode is PlacingWallMode;
+    
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
       child: Column(
@@ -693,20 +687,29 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
               child: CircularProgressIndicator(),
             )
           else
+            // UnifiedBoardWidget 파라미터 업데이트
             UnifiedBoardWidget(
               gameState: displayState,
               validMoves: _isReplayMode ? [] : (_validMoves?.pawnMoves ?? []),
-              wallMode: _isReplayMode ? false : _inputMode == InputMode.placingWall,
-              wallOrientation: _wallOrientation,
-              onCellTap: _isReplayMode || !displayState.isPlayerTurn || _inputMode == InputMode.placingWall
+              
+              // Sealed Class 체크로 변경
+              wallMode: _isReplayMode ? false : isWallMode,
+              
+              // 현재 상태가 WallMode면 그 안의 orientation 사용, 아니면 기본값
+              wallOrientation: isWallMode ? (currentMode as PlacingWallMode).orientation : 'horizontal',
+              
+              onCellTap: _isReplayMode || !displayState.isPlayerTurn || isWallMode
                   ? null
                   : _movePawn,
-              onWallTap: _isReplayMode || !displayState.isPlayerTurn || _inputMode != InputMode.placingWall
+                  
+              onWallTap: _isReplayMode || !displayState.isPlayerTurn || !isWallMode
                   ? null
-                  : _placeWall,
+                  : (row, col, _) => _placeWall(row, col, (currentMode as PlacingWallMode).orientation),
+                  
               enableRotation: _enableRotation,
               isReplayMode: _isReplayMode,
             ),
+
           if (_errorMessage != null)
             Padding(
               padding: const EdgeInsets.all(16),
@@ -854,7 +857,7 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
                     TextField(
                       decoration: InputDecoration(
                         labelText: '플레이어 이름',
-                        hintText: 'Player',
+                        hintText: 'Player 1',
                         prefixIcon: const Icon(Icons.person_outline),
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(12),
@@ -862,7 +865,8 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
                         filled: true,
                         fillColor: colorScheme.surface,
                       ),
-                      onChanged: (value) => _playerName = value.isEmpty ? 'Player' : value,
+                      onChanged: (value) =>
+                          _player1Name = value.isEmpty ? 'Player' : value,
                     ),
                     // AI 난이도 선택
                     const SizedBox(height: 16),
@@ -945,7 +949,7 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
         ),
       ),
     );
-}
+  }
 
   Widget _buildActiveSessionsList(ColorScheme colorScheme) {
     return Column(
@@ -1013,10 +1017,15 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
     );
   }
 
+  // 컨트롤 UI 업데이트
   Widget _buildM3Controls() {
     final hasWalls = _gameState!.player1.wallsRemaining > 0;
     final colorScheme = Theme.of(context).colorScheme;
 
+    // 편의 변수
+    final currentMode = _inputMode;
+    final isWallMode = currentMode is PlacingWallMode;
+    
     return Card(
       elevation: 0,
       color: colorScheme.surfaceContainerLow,
@@ -1031,7 +1040,7 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
             FilledButton.tonal(
               onPressed: hasWalls ? _toggleWallMode : null,
               style: FilledButton.styleFrom(
-                backgroundColor: _inputMode == InputMode.placingWall
+                backgroundColor: _inputMode == PlacingWallMode
                     ? colorScheme.secondaryContainer
                     : colorScheme.primaryContainer,
               ),
@@ -1039,15 +1048,15 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(
-                    _inputMode == InputMode.placingWall ? Icons.directions_walk : Icons.fence,
+                    _inputMode == PlacingWallMode ? Icons.directions_walk : Icons.fence,
                     size: 18,
                   ),
                   const SizedBox(width: 8),
-                  Text(_inputMode == InputMode.placingWall ? '이동 모드' : '벽 모드'),
+                  Text(_inputMode == PlacingWallMode ? '이동 모드' : '벽 모드'),
                 ],
               ),
             ),
-            if (_inputMode == InputMode.placingWall) ...[
+            if (_inputMode == PlacingWallMode) ...[
               const SizedBox(width: 16),
               SegmentedButton<String>(
                 segments: const [
@@ -1062,7 +1071,7 @@ class _QuoridorScreenState extends State<QuoridorScreen> {
                     label: Text('수직'),
                   ),
                 ],
-                selected: {_wallOrientation},
+                selected: {(currentMode as PlacingWallMode).orientation},
                 onSelectionChanged: (Set<String> selection) {
                   _setWallOrientation(selection.first);
                 },

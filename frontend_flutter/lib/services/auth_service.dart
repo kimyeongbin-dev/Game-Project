@@ -181,8 +181,8 @@ class AuthService extends ChangeNotifier {
         _client = client ?? http.Client();
 
   // 서버 IP 설정 (같은 네트워크에서 테스트 시 노트북 IP로 변경)
-  static const String serverHost = '192.168.0.16:8000';  // 네트워크 테스트용
-  // static const String serverHost = 'localhost:8000';  // 로컬 테스트용
+  // static const String serverHost = '192.168.0.16:8000';  // 네트워크 테스트용
+  static const String serverHost = 'localhost:8000';  // 로컬 테스트용
 
   static String _getDefaultBaseUrl() {
     return 'http://$serverHost/api/v1/users';

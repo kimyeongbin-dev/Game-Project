@@ -164,6 +164,7 @@ async def login_user(request: Request, body: LoginRequest):
     if not is_db_available():
         user, error = memory_store.login(body.nickname, body.password)
         if not user:
+            logger.warning(f"[로그인 실패] 닉네임: {body.nickname}, 사유: {error} (메모리 모드)")
             return LoginResponse(
                 success=False,
                 message=error,
@@ -185,6 +186,8 @@ async def login_user(request: Request, body: LoginRequest):
 
     async for session in get_db_session():
         if session is None:
+            
+            logger.error(f"[로그인 실패] DB 세션을 가져올 수 없음. 닉네임: {body.nickname}")
             return LoginResponse(
                 success=False,
                 message="Database session not available",
@@ -195,6 +198,7 @@ async def login_user(request: Request, body: LoginRequest):
         user, error = await repo.login(body.nickname, body.password)
 
         if not user:
+            logger.warning(f"[로그인 실패] 닉네임: {body.nickname}, 사유: {error}")
             return LoginResponse(
                 success=False,
                 message=error,
