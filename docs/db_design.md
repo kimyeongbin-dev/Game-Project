@@ -1,5 +1,20 @@
 # Database Schema Design
 
+> ⚠️ **폐기된 문서 — 실제 스키마와 일치하지 않습니다**
+>
+> 이 문서는 `users` / `games` / `scores` 3개 테이블을 서술하지만, 실제 스키마는
+> `users` / `daily_champions` / `match_queue` / `game_rooms` / `game_sessions` /
+> `game_moves` 6개입니다. 참조하지 마세요.
+>
+> **데이터 모델의 정본은 두 곳뿐입니다:**
+> - 현재 상태 — [`../server/app/db/models.py`](../server/app/db/models.py)
+> - 변경 계획 — [`api/platform.md`](api/platform.md) §5 데이터 모델 영향
+>
+> 제3의 장소에 다시 기술하지 않습니다. 같은 사실을 여러 곳에 두면 반드시
+> 한쪽이 낡습니다 — 이 문서가 그 예입니다.
+>
+> 아래 내용은 이력 참고용으로만 남겨 둡니다.
+
 ## Overview
 
 Game Project용 SQLite 데이터베이스 스키마 설계서입니다.

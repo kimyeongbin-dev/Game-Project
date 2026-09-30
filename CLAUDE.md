@@ -152,7 +152,9 @@ games/ ┘
 | `client/lib/**` | 디렉토리 골격 + 허브 placeholder만 존재 |
 | 나머지 5종 게임 | 미착수 |
 
-**다음 단계:** 통합 플랫폼 및 게임별 API 설계서 작성 → 설계서 기반 리팩토링·구현. 구조 변경이나 대규모 코드 작성 전에는 플랜을 먼저 세운다.
+**API 계약:** [`docs/api/platform.md`](docs/api/platform.md) (인증·병합·프로필·MMR), [`docs/api/games/maze.md`](docs/api/games/maze.md) (1인칭 미로 WS·Fog of War). 각 문서 말미에 미결 사항이 정리돼 있다.
+
+**남은 작업과 TODO:** [`docs/ROADMAP.md`](docs/ROADMAP.md). 구조 변경이나 대규모 코드 작성 전에는 플랜을 먼저 세운다.
 
 ## 설정과 의존 서비스
 

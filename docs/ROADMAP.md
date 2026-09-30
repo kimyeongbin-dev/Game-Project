@@ -1,0 +1,131 @@
+# 로드맵
+
+> 이 문서는 **실행 순서**를 다룬다. 무엇을 만들 것인가(설계)는
+> [`PLATFORM_ARCHITECTURE.md`](../PLATFORM_ARCHITECTURE.md)가 정본이다.
+>
+> `CLAUDE.md`에 넣지 않는다 — 그 파일은 매 세션 자동 로드되므로 항상 필요한
+> 것만 둔다. 이 문서는 작업 계획이 필요할 때만 읽는다.
+
+---
+
+## 두 개의 축을 구분한다
+
+이름이 겹치기 쉬우므로 축마다 다른 표기를 쓴다.
+
+| 축 | 표기 | 정의 위치 | 의미 |
+| :--- | :--- | :--- | :--- |
+| **출시** | `Phase 1/2/3` | `PLATFORM_ARCHITECTURE.md` §1.2 | Android → iOS 통합 → 웹 확장 |
+| **인프라** | `M1`~`M4` | 이 문서 | 개발·배포 기반 정비 |
+
+두 축은 독립이다. 현재 위치는 **출시 `Phase 1`(Android) 진행 중 + 인프라 `M2` 완료**다.
+
+> ⚠️ **git log 읽을 때 주의:** 커밋 `f831c0b`·`e189199`의 제목은 각각
+> "Phase 1"·"Phase 2"로 적혀 있다. 이 표기가 굳기 전에 작성된 것이며,
+> 실제로는 **인프라 `M1`·`M2`**를 뜻한다. 출시 `Phase`와 무관하다.
+
+---
+
+## 인프라 마일스톤
+
+### M1 — 버전 전수 고정 ✅ 완료
+
+커밋 `f831c0b`
+
+"자동으로 변경되거나 업그레이드되는 일이 절대 없도록" 모든 버전을 고정했다.
+서버 직접 의존성 `==`, 전이 의존성 `uv.lock`(URL + SHA256), 컨테이너 이미지
+다이제스트, Flutter 패키지 정확 버전, Android SDK 명시, GitHub Actions 커밋 SHA.
+
+가드: [`scripts/check-version-pinning.sh`](../scripts/check-version-pinning.sh) — CI `version-guard` 잡.
+갱신: [`scripts/update-image-digests.sh`](../scripts/update-image-digests.sh).
+
+상세는 [`CLAUDE.md`](../CLAUDE.md)의 "버전 고정" 절.
+
+### M2 — Redis 도입 + 레이트 리미터 배선 ✅ 완료
+
+커밋 `e189199`
+
+- `app/core/config.py` — 환경변수 단일 진입점 (pydantic-settings)
+- `app/db/redis.py` — 연결 계층. PostgreSQL과 동일한 graceful degradation
+- Redis 논리 DB 분리: **0 = 앱 상태, 1 = 테스트, 2 = 레이트 리미터**
+- 리미터를 Redis 저장소로 전환하고 `main.py`에 배선. 커스텀 429 + `Retry-After`
+- `/health`가 `dependencies.database` / `dependencies.redis` / `rate_limit` 보고
+- 테스트 10건으로 배선 고정 (`tests/api/test_rate_limit.py`)
+
+### M3 — WebSocket 상태 Redis 이전 + 1:1:1 확장
+
+**선행 조건:** `docs/api/games/maze.md` 확정. 설계 없이 착수하면 1:1:1 확장 때 다시 뒤집힌다.
+
+현재 `app/ws/`의 상태가 전부 프로세스 내 모듈 전역 dict다
+(`connection_manager._connections`, `matchmaking._queue`, `room_manager._rooms`).
+`PLATFORM_ARCHITECTURE.md` §2.2는 Redis 8이 매치메이킹 큐·실시간 방 상태·
+턴 타이머·Pub/Sub을 전담하도록 규정한다.
+
+작업:
+
+1. 매치메이킹 큐·방 상태를 Redis로 이전
+2. 워커 간 브로드캐스트를 Redis Pub/Sub으로 (WebSocket 객체 자체는 본질적으로
+   프로세스 내에 남는다 — 연결 맵은 그대로 두고 메시지 전달만 Pub/Sub)
+3. **1:1:1 지원** — `app/ws/matchmaking.py:144`의 `len(self._queue) < 2` 하드코딩 제거.
+   3인 턴 순서·승패 판정·3자 MMR 반영 규칙이 필요하다 (설계서에서 확정)
+4. `match_queue`·`game_rooms` **테이블**과 in-process dataclass의 권위 경계 정리.
+   현재 같은 개념이 두 곳에 병존한다 (`app/db/models.py:115,150` vs
+   `app/ws/room_manager.py:37,80`)
+5. `app/ws/ws_game.py` 라우터를 `main.py`에 등록 (지금은 의도적으로 미등록)
+
+**완료 판정:** `server/Dockerfile` prod의 `--workers`를 2 이상으로 올리고
+매칭이 정상 동작해야 한다. 현재 `Dockerfile:120`에서 `1`로 고정되어 있고,
+그 이유가 바로 이 마일스톤이다.
+
+### M4 — 리버스 프록시 + E2E 서비스 흐름 검증
+
+**선행 조건:** M3.
+
+로컬·CI·배포가 **동일한 서비스 흐름**을 타도록 Caddy를 앞단에 둔다. 목적은
+상용에서만 드러나는 버그를 로컬에서 재현 가능하게 만드는 것이다.
+
+작업:
+
+1. Caddy 리버스 프록시 — 로컬·CI·배포가 동일 Caddyfile 사용
+2. WebSocket upgrade가 프록시를 통과하는지 검증
+3. `X-Forwarded-For` 기반 레이트 리미팅 검증 — 프록시 뒤에서 `get_remote_address`가
+   프록시 IP를 보면 **모든 사용자가 하나의 제한을 공유**한다.
+   prod CMD의 `--proxy-headers --forwarded-allow-ips *`가 교정하지만 실측이 필요하다
+4. 다중 워커 환경에서 매칭·리미팅 정확성 E2E 검증
+5. 프로덕션 CORS 오리진 제한 (아래 TODO)
+
+---
+
+## 미해결 TODO
+
+착수 시점이 정해지지 않은 항목. 발견 경위와 판단 근거를 함께 남긴다.
+
+| 항목 | 내용 | 비고 |
+| :--- | :--- | :--- |
+| `utcnow` 일원화 | `app/core/time.py`에 표준 헬퍼가 있으나, 동일한 로컬 헬퍼가 3곳에 중복 정의되어 있다 — `app/db/models.py:20`, `app/games/maze/core/game_state.py:22`, `app/services/quoridor_service.py:24` | 동작에는 문제 없음. 정리는 해당 파일을 손댈 때 함께 |
+| CORS 오리진 제한 | `app/main.py:96`이 `allow_origins=["*"]` | 개발 편의. **프로덕션 배포 전 필수**. M4에서 처리 |
+| WS 라우터 미등록 | `app/ws/ws_game.py`가 `main.py`에 등록되어 있지 않다 | 의도적. 구 Quoridor 프로토콜이며 §4.1 재설계 대기. 동작하는 기능으로 오인되지 않게 하려는 것. 판정 내역은 `app/ws/__init__.py` docstring |
+| 스케줄러 제거 판단 | `app/services/scheduler/`는 일일 리셋 전용이고, 랭킹이 MMR로 단순화되면 쓰이지 않는다 | **지금 지우지 않는다.** M3에서 턴 타임아웃 정리 등 주기 작업이 생길 수 있어 제거 시점을 M3 이후로 미룬다 |
+
+---
+
+## 향후 확장 (애자일)
+
+시스템이 안정된 뒤 재검토한다. 지금 설계에 넣지 않되, **설계가 이 확장을
+막지 않도록** 둔다.
+
+- **데일리 점수·시즌 랭킹** — 랭킹을 MMR 하나로 단순화하면서 일일 리셋 점수판과
+  `daily_champions`를 폐기했다. 가벼운 경쟁 요소가 필요해지면 MMR 기록의
+  시간축을 활용해 다시 얹는다
+- 나머지 5종 게임 API — `docs/api/games/`에 `maze.md`와 동일한 틀로 추가
+
+---
+
+## 관련 문서
+
+| 문서 | 내용 |
+| :--- | :--- |
+| [`PLATFORM_ARCHITECTURE.md`](../PLATFORM_ARCHITECTURE.md) | 단일 기준 문서(SSOT). 기술 스택, 보안 원칙, 게임 6종 명세, 디렉토리 구조 |
+| [`CLAUDE.md`](../CLAUDE.md) | 개발 명령, 계층별 책임, 진행 상태, 버전 고정 정책 |
+| [`api/platform.md`](api/platform.md) | 플랫폼 공통 API — 인증, 계정 병합, 프로필, MMR |
+| [`api/games/maze.md`](api/games/maze.md) | 1인칭 미로 API — WebSocket 프로토콜, Fog of War |
+| [`환경.md`](환경.md) | 개발 환경 구성과 트러블슈팅 |
