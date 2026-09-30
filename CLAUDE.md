@@ -112,13 +112,38 @@ games/ ┘
 | 디렉토리 구조 / Docker 환경 | 완료 |
 | `server/app/games/maze/` | 구 Quoridor 구현이 **명칭 그대로** 이동된 상태. 도메인 리네이밍 미적용 |
 | `server/app/api/quoridor.py`, `schemas/quoridor.py`, `services/quoridor_service.py` | 구 REST API. 1인칭 미로 명세(§4.1)로 재설계 예정 |
-| `server/app/core/`, `server/app/ws/` | 골격만 존재 |
+| `server/app/core/` | 골격 + `time.py`(표준 utcnow) 만 존재 |
+| `server/app/ws/` | 구 Quoridor 2P 구현 이식 완료 (약 1,600줄 + 테스트 1,220줄). **Redis 미적용·1:1 전용이라 재작업 필요.** `main.py` 미등록 |
+| `server/app/middleware/` | `rate_limiter.py` 이식. `main.py` 미등록 |
 | `client/lib/**` | 디렉토리 골격 + 허브 placeholder만 존재 |
 | 나머지 5종 게임 | 미착수 |
 
 **다음 단계:** 통합 플랫폼 및 게임별 API 설계서 작성 → 설계서 기반 리팩토링·구현. 구조 변경이나 대규모 코드 작성 전에는 플랜을 먼저 세운다.
 
+## 폐기된 레거시 경로 — 되살리지 않는다
+
+`backend_fastapi/`, `frontend_flutter/`, `games/` 는 2026-09-30 구조 재편으로 영구 폐기되었다.
+
+```
+backend_fastapi/  →  server/
+frontend_flutter/ →  client/
+games/            →  server/app/games/maze/
+```
+
+`origin/develop` 과 `origin/dev-test` 는 **이 경로들에 파일을 가진 히스토리**다. 잘못 머지하면 구 구조가 되살아난다.
+
+**3중 차단이 걸려 있다:**
+1. **ancestry 차단** — `feature/platform-restructure` 에서 두 원격 브랜치를 `git merge -s ours` 로 머지해 조상으로 편입했다. 따라서 이후 `git merge develop` 은 no-op 이며 구 경로를 되살릴 수 없다.
+2. **커밋 차단** — `.githooks/pre-commit` 이 레거시 경로 추적을 감지하면 커밋을 거부한다. 클론 후 1회 활성화: `git config core.hooksPath .githooks`
+3. **CI 차단** — `version-guard` 잡의 `scripts/check-legacy-paths.sh` 스텝
+
+원격 히스토리에서 코드를 가져와야 할 때는 **머지하지 말고 내용만** 꺼낸다:
+```bash
+git show origin/develop:<구 경로> > <새 구조의 경로>
+```
+
 ## 주의사항
 - `docs/quoridor/`는 재설계 대기 중인 **구 API 문서**다. 새 작업의 근거로 삼지 않는다.
+- `server/app/ws/` 는 구 Quoridor 2P 구현을 이식한 **재작업 기반**이다. 상태가 프로세스 내 dict 이고 Redis 를 쓰지 않아 §2.2 를 만족하지 못한다. 판정 내역은 `server/app/ws/__init__.py` 참조. `main.py` 에 라우터로 등록되어 있지 않다.
 - `client/android/key.properties`와 keystore는 절대 커밋하지 않는다. 릴리스 빌드 시 볼륨 마운트로 주입한다.
 - 배포 빌드에는 `--obfuscate` 옵션을 적용한다 (§3.2).

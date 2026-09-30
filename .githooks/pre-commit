@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# 커밋 전 검사. 활성화: git config core.hooksPath .githooks
+set -euo pipefail
+repo_root="$(git rev-parse --show-toplevel)"
+bash "$repo_root/scripts/check-legacy-paths.sh"

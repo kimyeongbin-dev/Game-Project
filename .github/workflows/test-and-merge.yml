@@ -53,6 +53,12 @@ jobs:
       - name: Check .flutter-version 과 Dockerfile 일치
         # 러너에 아직 flutter 가 없으므로 로컬 SDK 검사는 경고로만
         run: bash scripts/check-flutter-version.sh --warn
+
+      - name: Guard — 폐기된 레거시 경로 부활 차단
+        # backend_fastapi/ frontend_flutter/ games/ 가 되살아나면 머지 사고다.
+        # origin/develop 계열을 잘못 머지했을 때 잡힌다.
+        run: bash scripts/check-legacy-paths.sh
+
   # ===================================================
   # Job 1: Server Tests (FastAPI + 게임 엔진 + PostgreSQL + Redis)
   # ===================================================
