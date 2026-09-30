@@ -41,6 +41,10 @@ dependencies = [
 
     # Scheduler (일일 랭킹 리셋)
     "apscheduler==3.10.4",
+
+    # Rate limiting (app/middleware/rate_limiter.py)
+    # NOTE: 기본 저장소가 in-memory 라 다중 워커에서는 Redis 백엔드 설정이 필요하다
+    "slowapi>=0.1.9",
 ]
 
 [project.optional-dependencies]
