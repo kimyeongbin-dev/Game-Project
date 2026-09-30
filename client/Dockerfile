@@ -22,7 +22,9 @@
 #       `flutter run` (에뮬레이터/실기기, hot reload) 은 반드시 로컬에서 실행한다.
 # =============================================================================
 ARG FLUTTER_VERSION=3.47.5
-ARG BASE_IMAGE=debian:bookworm-slim
+# debian:bookworm-slim — 다이제스트 고정 (태그는 재발행되므로 신뢰하지 않음)
+# 갱신은 scripts/update-image-digests.sh 로만 수행한다.
+ARG BASE_IMAGE=debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
 
 # -----------------------------------------------------------------------------
 # SDK 취득: 버전만 주면 공식 매니페스트에서 아카이브 경로와 sha256 을 스스로 찾아낸다.

@@ -26,7 +26,8 @@ services:
   # 메인 데이터베이스: 유저 계정, 멀티 전적/MMR, 낱말 사전, 퍼즐 편지 메타데이터
   # ---------------------------------------------------------------------------
   db:
-    image: postgres:16-alpine
+    # 다이제스트 고정 — 갱신은 scripts/update-image-digests.sh
+    image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
     container_name: gamemoa-db
     restart: unless-stopped
     environment: *postgres-env
@@ -46,7 +47,8 @@ services:
   # 인메모리 스토어: 매치메이킹 큐, 실시간 방 상태, 턴 타이머, Pub/Sub
   # ---------------------------------------------------------------------------
   redis:
-    image: redis:8-alpine
+    # 다이제스트 고정 — 갱신은 scripts/update-image-digests.sh
+    image: redis:8-alpine@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0
     container_name: gamemoa-redis
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]

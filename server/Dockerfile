@@ -2,6 +2,14 @@
 # 통합 미니게임 플랫폼 - 백엔드 서버 이미지
 # PLATFORM_ARCHITECTURE.md §2.2 (FastAPI / Python 3.13+)
 #
+# 버전 고정 정책 — 자동 변경이 절대 일어나지 않도록
+#   - 베이스 이미지: SHA256 다이제스트로 고정 (태그는 재발행되므로 신뢰하지 않음)
+#   - 직접 의존성 : pyproject.toml 에서 모두 `==` 고정
+#   - 전이 의존성 : uv.lock 에 URL + SHA256 해시까지 고정
+#   - 설치        : `uv sync --frozen` — lock 과 어긋나면 해석하지 않고 실패
+#   - uv 자체     : 아래 UV_VERSION 으로 고정
+#   갱신은 scripts/update-image-digests.sh 와 `uv lock --upgrade` 로만 수행한다.
+#
 # 스테이지 구성
 #   base      : 공통 런타임 (python + venv 경로)
 #   deps      : 런타임 의존성 설치 (프로덕션용)
@@ -15,10 +23,13 @@
 #   docker compose run --rm server-test          # test
 #   docker build --target prod -t gamemoa-server .
 # =============================================================================
-ARG PYTHON_VERSION=3.13
+
+# python:3.13-slim — 다이제스트 고정
+ARG PYTHON_IMAGE=python:3.13-slim@sha256:7c61056e61ac89e852de05f3dc6fa51a6dd2181797bceed46aa725dd7cb2cd3b
+ARG UV_VERSION=0.12.21
 
 # -----------------------------------------------------------------------------
-FROM python:${PYTHON_VERSION}-slim AS base
+FROM ${PYTHON_IMAGE} AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -32,24 +43,32 @@ WORKDIR /srv/gamemoa
 
 # -----------------------------------------------------------------------------
 FROM base AS deps
+ARG UV_VERSION
 
-# C 확장 빌드용 (hiredis, cryptography 등 wheel 미제공 환경 대비)
+# C 확장 빌드용 (wheel 미제공 환경 대비)
 RUN apt-get update \
  && apt-get install -y --no-install-recommends build-essential \
  && rm -rf /var/lib/apt/lists/*
 
-RUN python -m venv "$VIRTUAL_ENV" && pip install --upgrade pip setuptools wheel
+RUN pip install --no-cache-dir "uv==${UV_VERSION}"
 
-# 의존성 레이어 캐싱: 소스 변경이 의존성 재설치를 유발하지 않도록
-# pyproject.toml 만 먼저 복사하고 패키지 스텁으로 설치한다.
-# (실제 소스는 이후 스테이지에서 /srv/gamemoa 로 덮어써지고, PYTHONPATH 로 해석된다)
-COPY pyproject.toml ./
-RUN mkdir -p app && : > app/__init__.py \
- && pip install -e "."
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_LINK_MODE=copy \
+    UV_COMPILE_BYTECODE=0 \
+    UV_NO_PROGRESS=1
+
+# 의존성 레이어 캐싱: 소스 변경이 재설치를 유발하지 않도록
+# pyproject.toml + uv.lock 만 먼저 복사한다.
+# --frozen : lock 을 재해석하지 않는다 (pyproject 와 어긋나면 실패)
+# --no-install-project : 프로젝트 자체는 제외하고 의존성만
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
 
 # -----------------------------------------------------------------------------
 FROM deps AS deps-dev
-RUN pip install -e ".[dev]"
+# dev 는 [project.optional-dependencies] 의 extra 이므로 --extra 로 명시해야 한다
+# (uv sync 기본 동작은 extra 를 설치하지 않는다)
+RUN uv sync --frozen --extra dev --no-install-project
 
 # -----------------------------------------------------------------------------
 FROM base AS dev
@@ -79,7 +98,7 @@ FROM base AS prod
 RUN groupadd --system gamemoa && useradd --system --gid gamemoa --no-create-home gamemoa
 
 COPY --from=deps /opt/venv /opt/venv
-COPY --chown=gamemoa:gamemoa pyproject.toml ./
+COPY --chown=gamemoa:gamemoa pyproject.toml uv.lock ./
 COPY --chown=gamemoa:gamemoa app ./app
 
 USER gamemoa

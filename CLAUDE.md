@@ -49,6 +49,39 @@ dart run build_runner build     # drift / riverpod 코드 생성
 ```
 이유: 컨테이너는 USB 패스스루/GUI를 지원하지 않는다.
 
+## 버전 고정 — 자동 변경은 절대 없다
+
+모든 버전이 고정되어 있고, **`scripts/check-version-pinning.sh` 가 규율 위반을 검사**한다 (CI `version-guard` 잡).
+
+| 대상 | 고정 방식 |
+| :-- | :-- |
+| 서버 직접 의존성 | `server/pyproject.toml` 전부 `==` |
+| 서버 **전이** 의존성 | `server/uv.lock` — URL + SHA256 해시까지. `uv sync --frozen` 으로 설치 |
+| `uv` 자체 | `server/Dockerfile` 의 `ARG UV_VERSION` |
+| 컨테이너 베이스 이미지 | `name:tag@sha256:<digest>` — 태그는 가독성용, 실제로 받는 것은 다이제스트 |
+| Flutter SDK | `.flutter-version` |
+| Flutter 패키지 | `client/pubspec.yaml` 정확 버전 (캐럿 금지) + `pubspec.lock` |
+| Dart SDK 제약 | `client/pubspec.yaml` 의 `sdk: 3.13.4` (정확) |
+| 린트 플러그인 | `client/analysis_options.yaml` 의 `plugins:` 정확 버전 |
+| Android SDK | `compileSdk`/`minSdk`/`targetSdk`/`ndkVersion` 명시 고정 (`flutter.*` 위임 금지) |
+| GitHub Actions | 40자 커밋 SHA (`@v4` 같은 이동 태그 금지) |
+
+**의존성을 바꿀 때:**
+```bash
+# 서버 — pyproject.toml 수정 후 lock 재생성 (컨테이너에서)
+docker run --rm -v "$PWD/server:/w" -w /w   python:3.13-slim@sha256:7c61056e61ac89e852de05f3dc6fa51a6dd2181797bceed46aa725dd7cb2cd3b   sh -c 'pip install -q uv==0.12.21 && uv lock --no-progress'
+docker compose build server-test && docker compose run --rm server-test
+
+# 클라이언트 — pubspec.yaml 을 정확 버전으로 수정 후
+cd client && flutter pub get && flutter analyze && flutter test
+
+# 베이스 이미지 다이제스트 — 업스트림 변경 점검 / 갱신
+bash scripts/update-image-digests.sh          # 점검만
+bash scripts/update-image-digests.sh --write  # 갱신 후 반드시 재빌드+테스트
+```
+
+`flutter pub upgrade` 는 쓰지 않는다 — 정확 고정을 무너뜨린다. 올릴 때는 `pubspec.yaml` 의 숫자를 직접 바꾼다.
+
 ### Flutter 버전 — 단일 기준 `.flutter-version`
 
 로컬·CI·컨테이너가 **동일한 Flutter 바이너리**를 쓴다. 기준은 저장소 루트 `.flutter-version` (현재 3.47.5 / Dart 3.13.4) 하나다.

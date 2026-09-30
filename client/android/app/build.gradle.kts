@@ -7,8 +7,11 @@ plugins {
 
 android {
     namespace = "com.kimyeongbin.gamemoa"
-    compileSdk = flutter.compileSdkVersion
-    ndkVersion = flutter.ndkVersion
+    // Flutter 3.47.5 의 기본값을 명시적으로 고정한다.
+    // flutter.* 위임을 쓰면 Flutter SDK 버전을 올릴 때 조용히 바뀌어
+    // 앱 동작과 스토어 요건에 영향을 준다.
+    compileSdk = 36
+    ndkVersion = "28.2.13676358"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -24,8 +27,9 @@ android {
         applicationId = "com.kimyeongbin.gamemoa"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
-        targetSdk = flutter.targetSdkVersion
+        // Flutter 3.47.5 기본값을 명시 고정 (위 compileSdk 주석 참조)
+        minSdk = 24
+        targetSdk = 36
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }
