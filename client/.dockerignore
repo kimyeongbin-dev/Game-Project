@@ -1,0 +1,31 @@
+# 빌드 컨텍스트: client/
+build/
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+*.iml
+.idea/
+.vscode/
+
+# 플랫폼 로컬 설정 / 산출물
+android/.gradle/
+android/local.properties
+android/key.properties
+android/*.jks
+android/*.keystore
+android/app/debug/
+android/app/profile/
+android/app/release/
+ios/Pods/
+ios/.symlinks/
+ios/Flutter/Generated.xcconfig
+ios/Flutter/flutter_export_environment.sh
+
+# 난독화 심볼
+app.*.symbols
+app.*.map.json
+
+*.log
+coverage/
+test-results.json

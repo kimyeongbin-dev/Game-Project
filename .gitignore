@@ -12,8 +12,9 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+# Python 빌드 산출물 전용 - 루트로 한정하지 않으면 client/lib/ (Flutter 앱 소스)까지 무시됨
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -107,6 +108,12 @@ yarn-error.log*
 *.dump
 
 # ===========================
+# 개인 문서 (git 추적 제외)
+# ===========================
+# 프로젝트 외부로 가져갈 개인용 가이드/메모 보관소
+docs/_private/
+
+# ===========================
 # Claude Code
 # ===========================
 .claude/
@@ -122,64 +129,43 @@ alembic/versions/*.pyc
 # ===========================
 # Flutter / Dart
 # ===========================
-# Common Flutter ignores
-*.dart_tool/
+# NOTE: 앱(라이브러리 아님)이므로 pubspec.lock 과 .metadata 는 추적한다.
+#       재현 가능한 빌드와 flutter migrate 를 위해 필요하다.
 .dart_tool/
-*.flutter-plugins
-*.flutter-plugins-dependencies
+.flutter-plugins
+.flutter-plugins-dependencies
 .packages
 .pub-cache/
 .pub/
-pubspec.lock
 doc/api/
 
-# Flutter build outputs
+# 빌드 산출물
 **/build/
+client/web/.last_build_id
 
-# Platform specific
-frontend_flutter/.dart_tool/
-frontend_flutter/.flutter-plugins
-frontend_flutter/.flutter-plugins-dependencies
-frontend_flutter/build/
-frontend_flutter/*.iml
-frontend_flutter/.metadata
-frontend_flutter/.packages
-frontend_flutter/pubspec.lock
+# 난독화 심볼 (--obfuscate 빌드 산출물, §3.2)
+app.*.symbols
+app.*.map.json
 
-# Android
-frontend_flutter/android/.gradle/
-frontend_flutter/android/local.properties
-frontend_flutter/android/key.properties
-frontend_flutter/android/*.jks
-frontend_flutter/android/*.keystore
+# IntelliJ 모듈 파일
+*.iml
+*.ipr
+*.iws
+
+# Android (로컬 설정 및 서명 키 - 절대 커밋 금지)
+client/android/.gradle/
+client/android/local.properties
+client/android/key.properties
+client/android/*.jks
+client/android/*.keystore
 
 # iOS
-frontend_flutter/ios/Flutter/Generated.xcconfig
-frontend_flutter/ios/Flutter/flutter_export_environment.sh
-frontend_flutter/ios/ServiceDefinitions.json
-frontend_flutter/ios/Pods/
-frontend_flutter/ios/Podfile.lock
-frontend_flutter/ios/.symlinks/
-
-# macOS
-frontend_flutter/macos/Flutter/ephemeral/
-frontend_flutter/macos/Pods/
-frontend_flutter/macos/Podfile.lock
-
-# Windows
-frontend_flutter/windows/flutter/ephemeral/
-frontend_flutter/windows/flutter/generated_plugin_registrant.cc
-frontend_flutter/windows/flutter/generated_plugin_registrant.h
-frontend_flutter/windows/flutter/generated_plugins.cmake
-
-# Linux
-frontend_flutter/linux/flutter/ephemeral/
-frontend_flutter/linux/flutter/generated_plugin_registrant.cc
-frontend_flutter/linux/flutter/generated_plugin_registrant.h
-frontend_flutter/linux/flutter/generated_plugins.cmake
-
-# Web
-frontend_flutter/web/.last_build_id
+client/ios/Flutter/Generated.xcconfig
+client/ios/Flutter/flutter_export_environment.sh
+client/ios/ServiceDefinitions.json
+client/ios/Pods/
+client/ios/Podfile.lock
+client/ios/.symlinks/
 
 # ===========================
 # Build Artifacts

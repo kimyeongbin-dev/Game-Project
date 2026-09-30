@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gamemoa-server"
+version = "0.1.0"
+description = "통합 미니게임 플랫폼 백엔드 - FastAPI REST API + WebSocket 게임 서버"
+requires-python = ">=3.13"
+
+dependencies = [
+    # Web Framework
+    "fastapi==0.128.0",
+    "uvicorn[standard]==0.40.0",
+    "starlette==0.50.0",
+    "websockets==16.0",
+
+    # Database (PostgreSQL)
+    "sqlalchemy==2.0.46",
+    "asyncpg==0.31.0",
+    "greenlet==3.3.1",
+
+    # In-memory / Matchmaking (Redis 8)
+    "redis[hiredis]>=6.0",
+
+    # Validation
+    "pydantic==2.12.5",
+    "pydantic-settings==2.12.0",
+
+    # Authentication (Kakao OIDC / JWT)
+    "python-jose[cryptography]==3.5.0",
+    "passlib[bcrypt]==1.7.4",
+    "bcrypt==5.0.0",
+
+    # HTTP client (카카오 토큰 검증 등)
+    "httpx==0.28.1",
+
+    # Utils
+    "python-dotenv==1.2.1",
+    "python-multipart==0.0.22",
+
+    # Scheduler (일일 랭킹 리셋)
+    "apscheduler==3.10.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.0.2",
+    "pytest-asyncio==1.3.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+# 컨테이너 밖(로컬 conda 등)에서 `pip install -e .` 없이 실행해도 app 패키지가 잡히도록
+pythonpath = ["."]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+filterwarnings = [
+    "ignore::pytest.PytestRemovedIn9Warning",
+]

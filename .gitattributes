@@ -1,0 +1,115 @@
+# =============================================================================
+# 줄바꿈 / 인코딩 정책
+#   - 모든 텍스트 파일은 저장소와 작업 트리 모두 LF
+#   - 인코딩은 UTF-8 (BOM 없음)
+#   - 예외: Windows 배치 스크립트만 CRLF (cmd.exe 가 LF 를 제대로 못 읽음)
+#
+# 이 파일의 eol=lf 는 core.autocrlf 설정보다 우선한다.
+# =============================================================================
+
+# 기본: 텍스트로 감지되는 모든 파일을 LF 로 정규화
+* text=auto eol=lf
+
+# ----------------------------------------------------------------------------
+# Windows 전용 스크립트 — CRLF 필수
+# ----------------------------------------------------------------------------
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# Gradle 래퍼: 셸 스크립트는 LF, 배치는 CRLF
+client/android/gradlew      text eol=lf
+client/android/gradlew.bat  text eol=crlf
+
+# ----------------------------------------------------------------------------
+# 바이너리 — 절대 변환하지 않음
+# ----------------------------------------------------------------------------
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.ico    binary
+*.webp   binary
+*.bmp    binary
+*.svgz   binary
+
+*.ttf    binary
+*.otf    binary
+*.woff   binary
+*.woff2  binary
+*.eot    binary
+
+*.mp3    binary
+*.wav    binary
+*.ogg    binary
+*.m4a    binary
+*.mp4    binary
+
+*.sqlite binary
+*.sqlite3 binary
+*.db     binary
+
+*.zip    binary
+*.gz     binary
+*.tar    binary
+*.7z     binary
+*.jar    binary
+*.aab    binary
+*.apk    binary
+*.ipa    binary
+*.pdf    binary
+
+*.so     binary
+*.dylib  binary
+*.dll    binary
+*.exe    binary
+*.wasm   binary
+*.a      binary
+*.lib    binary
+
+# 서명 키 (커밋 금지 대상이지만 실수 시 손상 방지)
+*.jks      binary
+*.keystore binary
+*.p12      binary
+*.pfx      binary
+
+# ----------------------------------------------------------------------------
+# 명시적 텍스트 (확장자 감지가 애매한 것들)
+# ----------------------------------------------------------------------------
+*.dart   text eol=lf
+*.py     text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.toml   text eol=lf
+*.json   text eol=lf
+*.md     text eol=lf
+*.sql    text eol=lf
+*.frag   text eol=lf
+*.vert   text eol=lf
+*.glsl   text eol=lf
+*.gradle text eol=lf
+*.kts    text eol=lf
+*.kt     text eol=lf
+*.swift  text eol=lf
+*.plist  text eol=lf
+*.xml    text eol=lf
+*.html   text eol=lf
+*.css    text eol=lf
+*.cmake  text eol=lf
+*.cc     text eol=lf
+*.h      text eol=lf
+*.rc     text eol=lf
+Dockerfile        text eol=lf
+.dockerignore     text eol=lf
+.gitignore        text eol=lf
+.gitattributes    text eol=lf
+.env.example      text eol=lf
+pubspec.lock      text eol=lf
+CMakeLists.txt    text eol=lf
+
+# ----------------------------------------------------------------------------
+# GitHub linguist / diff 편의
+# ----------------------------------------------------------------------------
+pubspec.lock    linguist-generated=true
+*.g.dart        linguist-generated=true
+*.freezed.dart  linguist-generated=true

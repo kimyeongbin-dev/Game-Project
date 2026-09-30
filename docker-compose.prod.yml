@@ -1,0 +1,38 @@
+# =============================================================================
+# 게임모아 - 프로덕션 오버레이
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# dev 대비 차이점
+#   - server 이미지가 prod 타겟 (non-root, --reload 없음, 소스를 이미지에 포함)
+#   - 소스 볼륨 마운트 없음 → 컨테이너가 불변(immutable) 산출물
+#   - DB/Redis 포트를 호스트로 노출하지 않음
+#
+# 실제 배포처(Fly.io / AWS ECS)에서는 db/redis 를 관리형 서비스로 대체하고
+# server 이미지만 올린다. 이 파일은 프로덕션 이미지의 로컬 검증용이다.
+# =============================================================================
+services:
+  db:
+    ports: !override []
+
+  redis:
+    ports: !override []
+
+  server:
+    build:
+      context: ./server
+      target: prod
+    volumes: !override []
+    environment:
+      DB_ENABLED: "true"
+    restart: always
+
+  # 개발 전용 서비스는 프로덕션 구성에서 비활성
+  server-test:
+    profiles: [disabled]
+  client-test:
+    profiles: [disabled]
+  client-web:
+    profiles: [disabled]
+  android-builder:
+    profiles: [disabled]

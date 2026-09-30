@@ -1,0 +1,15 @@
+# 빌드 컨텍스트: server/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+*.log
+test-results.xml
+pytest-output.log

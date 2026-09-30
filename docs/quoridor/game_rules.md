@@ -1,5 +1,14 @@
 # 쿼리도(Quoridor) 게임 규칙
 
+> ⚠️ **레거시 문서 — 재설계 대기 중**
+>
+> 구 Quoridor REST API 기준으로 작성된 문서입니다. 플랫폼 재구성(`PLATFORM_ARCHITECTURE.md` §4.1)에 따라
+> 이 게임은 **1인칭 미로 대결**로 전환되며(1:1 / 1:1:1, 시야 제한, WebSocket 기반 서버 권위 판정),
+> API 명세는 새로 작성됩니다. 새 작업의 근거로 삼지 마세요.
+>
+> 문서 내 `backend_fastapi/`, `games/game_Quoridor/` 경로는 각각
+> `server/app/`, `server/app/games/maze/` 로 이동했습니다.
+
 ## 개요
 
 쿼리도는 2~4인용 추상 전략 보드게임입니다. 이 프로젝트에서는 2인 플레이(Player vs AI)를 구현합니다.

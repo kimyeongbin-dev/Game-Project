@@ -1,66 +1,185 @@
-# Docker Compose for Game Project
-# FastAPI + PostgreSQL + Flutter 개발 환경
+# =============================================================================
+# 게임모아 - 로컬 개발 환경
+# PLATFORM_ARCHITECTURE.md §2.2 (FastAPI + PostgreSQL + Redis 8)
+#
+# 기본 서비스 (profile 없음)
+#   docker compose up -d                        db + redis + server
+#
+# profile 서비스
+#   docker compose run --rm server-test         서버/게임엔진 pytest
+#   docker compose run --rm client-test         flutter analyze + test
+#   docker compose run --rm client-web          웹 릴리스 빌드
+#   docker compose --profile release run --rm android-builder
+#
+# 컨테이너에서 불가능한 작업 (로컬 Flutter 필수)
+#   flutter run -d <device>                     에뮬레이터/실기기 + hot reload
+# =============================================================================
+name: gamemoa
+
+x-postgres-env: &postgres-env
+  POSTGRES_DB: ${POSTGRES_DB:-gamemoa}
+  POSTGRES_USER: ${POSTGRES_USER:-postgres}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
 
 services:
-  # PostgreSQL 데이터베이스
+  # ---------------------------------------------------------------------------
+  # 메인 데이터베이스: 유저 계정, 멀티 전적/MMR, 낱말 사전, 퍼즐 편지 메타데이터
+  # ---------------------------------------------------------------------------
   db:
     image: postgres:16-alpine
-    container_name: quoridor-db
+    container_name: gamemoa-db
     restart: unless-stopped
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-quoridor_db}
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-8755}
+    environment: *postgres-env
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-quoridor_db}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-gamemoa}"]
       interval: 5s
       timeout: 5s
-      retries: 5
-    networks:
-      - game-network
+      retries: 10
+    networks: [gamemoa]
 
-  # FastAPI 백엔드
-  backend:
+  # ---------------------------------------------------------------------------
+  # 인메모리 스토어: 매치메이킹 큐, 실시간 방 상태, 턴 타이머, Pub/Sub
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:8-alpine
+    container_name: gamemoa-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [gamemoa]
+
+  # ---------------------------------------------------------------------------
+  # REST API + WebSocket 게임 서버 (개발 모드, hot reload)
+  # ---------------------------------------------------------------------------
+  server:
     build:
-      context: .
-      dockerfile: backend_fastapi/Dockerfile
-    container_name: quoridor-backend
+      context: ./server
+      target: dev
+    container_name: gamemoa-server
     restart: unless-stopped
     environment:
-      # 데이터베이스 설정
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-8755}@db:5432/${POSTGRES_DB:-quoridor_db}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-gamemoa}
+      REDIS_URL: redis://redis:6379/0
       DB_ENABLED: "true"
-      # Python 경로 설정 (games 패키지 접근용)
-      PYTHONPATH: /workspace
-      # 개발 환경 설정
-      PYTHONDONTWRITEBYTECODE: 1
-      PYTHONUNBUFFERED: 1
     ports:
-      # 모든 인터페이스에서 접속 가능 (Flutter 에뮬레이터 포함)
-      - "8000:8000"
+      # 0.0.0.0 바인딩: Android 에뮬레이터(10.0.2.2) 및 실기기에서 접속 가능
+      - "${SERVER_PORT:-8000}:8000"
     volumes:
-      # Hot Reload: 로컬 코드 수정 시 즉시 반영
-      - ./backend_fastapi:/workspace/backend_fastapi
-      - ./games:/workspace/games
-    working_dir: /workspace/backend_fastapi
+      # 소스 볼륨 마운트로 --reload 동작 (의존성은 이미지의 /opt/venv 사용)
+      - ./server:/srv/gamemoa
     depends_on:
       db:
         condition: service_healthy
-    networks:
-      - game-network
+      redis:
+        condition: service_healthy
+    networks: [gamemoa]
+
+  # ---------------------------------------------------------------------------
+  # pytest 실행 전용 (서버 API + 게임 엔진). 개발 DB와 분리된 gamemoa_test 사용
+  # ---------------------------------------------------------------------------
+  server-test:
+    profiles: [test]
+    build:
+      context: ./server
+      target: test
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_TEST_DB:-gamemoa_test}
+      REDIS_URL: redis://redis:6379/1
+      DB_ENABLED: "true"
+      TESTING: "true"
+    volumes:
+      - ./server:/srv/gamemoa
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks: [gamemoa]
+
+  # ---------------------------------------------------------------------------
+  # Flutter 정적 분석 + 단위 테스트 (CI와 동일 환경)
+  #
+  # .dart_tool / build 는 named volume 으로 가려 호스트(Windows) 경로가
+  # 컨테이너(Linux)로 새지 않도록 한다 — package_config.json 이 절대 경로를 담기 때문.
+  # ---------------------------------------------------------------------------
+  client-test:
+    profiles: [client]
+    build:
+      context: ./client
+      target: toolchain
+      args:
+        # 단일 기준은 저장소 루트의 .flutter-version
+        # (Dockerfile ARG 기본값이 미러이며, scripts/check-flutter-version.sh 가 불일치를 잡는다)
+        FLUTTER_VERSION: ${FLUTTER_VERSION:-3.47.5}
+    command: ["sh", "-c", "flutter pub get && flutter analyze && flutter test"]
+    volumes:
+      - ./client:/srv/client
+      - client_dart_tool:/srv/client/.dart_tool
+      - client_build:/srv/client/build
+      - client_pub_cache:/opt/pub-cache
+    networks: [gamemoa]
+
+  # ---------------------------------------------------------------------------
+  # 웹 릴리스 빌드 (산출물: client/build/web → client_build 볼륨)
+  # ---------------------------------------------------------------------------
+  client-web:
+    profiles: [client]
+    build:
+      context: ./client
+      target: toolchain
+      args:
+        FLUTTER_VERSION: ${FLUTTER_VERSION:-3.47.5}
+    command: ["sh", "-c", "flutter pub get && flutter build web --release"]
+    volumes:
+      - ./client:/srv/client
+      - client_dart_tool:/srv/client/.dart_tool
+      - client_build:/srv/client/build
+      - client_pub_cache:/opt/pub-cache
+    networks: [gamemoa]
+
+  # ---------------------------------------------------------------------------
+  # Android 릴리스 빌드 (릴리스 컷 시점에만 사용)
+  #
+  # 이미지에 Android SDK 가 포함되어 수 GB 이며 첫 빌드는 오래 걸린다.
+  # 서명 키는 이미지에 넣지 않고 마운트로 주입한다:
+  #   client/android/key.properties + keystore 파일을 준비한 뒤 실행
+  # ---------------------------------------------------------------------------
+  android-builder:
+    profiles: [release]
+    build:
+      context: ./client
+      target: android
+      args:
+        FLUTTER_VERSION: ${FLUTTER_VERSION:-3.47.5}
+    volumes:
+      - ./client:/srv/client
+      - client_dart_tool:/srv/client/.dart_tool
+      - client_build:/srv/client/build
+      - client_pub_cache:/opt/pub-cache
+      - android_gradle_cache:/root/.gradle
+    networks: [gamemoa]
 
 volumes:
   postgres_data:
-    driver: local
+  redis_data:
+  client_dart_tool:
+  client_build:
+  client_pub_cache:
+  android_gradle_cache:
 
 networks:
-  game-network:
+  gamemoa:
     driver: bridge
-    # Flutter 에뮬레이터에서 접속할 수 있도록 외부 네트워크 접근 허용
-    ipam:
-      config:
-        - subnet: 172.28.0.0/16
