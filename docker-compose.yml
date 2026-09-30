@@ -73,9 +73,15 @@ services:
     container_name: gamemoa-server
     restart: unless-stopped
     environment:
+      ENVIRONMENT: local
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-gamemoa}
-      REDIS_URL: redis://redis:6379/0
       DB_ENABLED: "true"
+      # Redis 논리 DB: 0=앱 상태, 1=테스트, 2=레이트 리미터
+      REDIS_URL: redis://redis:6379/0
+      REDIS_ENABLED: "true"
+      REDIS_LIMITER_DB: "2"
+      RATE_LIMIT_ENABLED: "true"
+      RATE_LIMIT_PER_MINUTE: "${RATE_LIMIT_PER_MINUTE:-60}"
     ports:
       # 0.0.0.0 바인딩: Android 에뮬레이터(10.0.2.2) 및 실기기에서 접속 가능
       - "${SERVER_PORT:-8000}:8000"
@@ -98,9 +104,13 @@ services:
       context: ./server
       target: test
     environment:
+      ENVIRONMENT: ci
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_TEST_DB:-gamemoa_test}
-      REDIS_URL: redis://redis:6379/1
       DB_ENABLED: "true"
+      # 테스트는 논리 DB 1 을 쓴다 (앱 상태 0 과 격리)
+      REDIS_URL: redis://redis:6379/1
+      REDIS_ENABLED: "true"
+      REDIS_LIMITER_DB: "1"
       TESTING: "true"
     volumes:
       - ./server:/srv/gamemoa

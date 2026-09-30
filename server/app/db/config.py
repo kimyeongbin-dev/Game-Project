@@ -3,22 +3,19 @@ Database Configuration
 PostgreSQL 연결 설정 및 세션 관리
 """
 
-import os
 import logging
 from typing import Optional
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
 
+from app.core.config import settings
+
 logger = logging.getLogger(__name__)
 
-# 환경 변수에서 DB URL 가져오기 (기본값: 로컬 PostgreSQL)
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql+asyncpg://postgres:postgres@localhost:5432/gamemoa"
-)
-
-# DB 활성화 여부 (환경 변수로 비활성화 가능)
-DB_ENABLED = os.getenv("DB_ENABLED", "true").lower() == "true"
+# 환경변수는 app/core/config.py 에서만 읽는다 (단일 진입점).
+# 이 이름들은 기존 import 호환을 위해 유지한다.
+DATABASE_URL = settings.database_url
+DB_ENABLED = settings.db_enabled
 
 # DB 연결 상태
 _db_available = False

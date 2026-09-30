@@ -145,13 +145,39 @@ games/ ┘
 | 디렉토리 구조 / Docker 환경 | 완료 |
 | `server/app/games/maze/` | 구 Quoridor 구현이 **명칭 그대로** 이동된 상태. 도메인 리네이밍 미적용 |
 | `server/app/api/quoridor.py`, `schemas/quoridor.py`, `services/quoridor_service.py` | 구 REST API. 1인칭 미로 명세(§4.1)로 재설계 예정 |
-| `server/app/core/` | 골격 + `time.py`(표준 utcnow) 만 존재 |
-| `server/app/ws/` | 구 Quoridor 2P 구현 이식 완료 (약 1,600줄 + 테스트 1,220줄). **Redis 미적용·1:1 전용이라 재작업 필요.** `main.py` 미등록 |
-| `server/app/middleware/` | `rate_limiter.py` 이식. `main.py` 미등록 |
+| `server/app/core/` | `config.py`(환경변수 단일 진입점), `time.py`(표준 utcnow) |
+| Redis | 연결 계층(`app/db/redis.py`) + lifespan 배선 완료. graceful degradation |
+| 레이트 리미터 | **배선 완료** — Redis 저장소, 커스텀 429, `main.py` 등록. 테스트 10건 |
+| `server/app/ws/` | 구 Quoridor 2P 구현 이식 완료 (약 1,600줄 + 테스트 1,220줄). **상태가 프로세스 내 dict 이라 Redis 이전 필요·1:1 전용.** `main.py` 미등록 |
 | `client/lib/**` | 디렉토리 골격 + 허브 placeholder만 존재 |
 | 나머지 5종 게임 | 미착수 |
 
 **다음 단계:** 통합 플랫폼 및 게임별 API 설계서 작성 → 설계서 기반 리팩토링·구현. 구조 변경이나 대규모 코드 작성 전에는 플랜을 먼저 세운다.
+
+## 설정과 의존 서비스
+
+**환경변수는 `app/core/config.py` 한 곳에서만 읽는다.** `os.getenv` 를 코드에 흩뿌리지 않는다 — 기본값이 분산되고 어떤 값이 실제로 쓰이는지 추적할 수 없게 된다.
+
+```python
+from app.core.config import settings
+settings.redis_url, settings.rate_limit_per_minute, ...
+```
+
+Redis 논리 DB 를 용도별로 분리한다: **0 = 앱 상태(큐/방/세션), 1 = 테스트, 2 = 레이트 리미터.** 리미터 카운터가 앱 상태와 같은 DB 를 쓰면 키 스캔·FLUSHDB 가 서로를 건드린다.
+
+DB 와 Redis 모두 **graceful degradation** 이다 — 연결 실패로 기동이 막히지 않는다. Redis 를 쓰는 코드는 반드시 `is_redis_available()` 로 가드한다. 단 **멀티플레이는 Redis 없이 성립하지 않는다** (워커 간 상태 공유 불가).
+
+상태 확인:
+```bash
+curl -s http://localhost:8000/health | python -m json.tool
+# dependencies.database / dependencies.redis / rate_limit 을 함께 보고한다
+```
+
+### 레이트 리미터 주의점
+
+- **핸들러는 반드시 동기 함수(`def`)여야 한다.** `SlowAPIMiddleware` 는 동기 컨텍스트에서 핸들러를 호출하고, 코루틴 함수를 발견하면 **조용히 slowapi 기본 응답으로 대체**한다. `async def` 로 바꾸면 커스텀 429 가 전혀 쓰이지 않는다 — `tests/api/test_rate_limit.py` 가 이 회귀를 잡는다.
+- 저장소가 메모리로 강등되면 워커마다 따로 카운트해 실효 제한이 워커 수만큼 곱해진다. Redis 저장소 여부도 테스트가 검증한다.
+- `get_remote_address` 는 프록시 뒤에서 프록시 IP 를 본다. prod CMD 의 `--proxy-headers --forwarded-allow-ips *` 가 `X-Forwarded-For` 를 반영해 교정한다.
 
 ## 폐기된 레거시 경로 — 되살리지 않는다
 

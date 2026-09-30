@@ -1,0 +1,111 @@
+"""
+Redis 연결 관리.
+
+PLATFORM_ARCHITECTURE.md §2.2 — Redis 8 은 매치메이킹 큐, 실시간 방 상태,
+턴 타이머, Pub/Sub 브로드캐스팅을 전담한다.
+
+PostgreSQL 과 동일한 graceful degradation 원칙을 따른다:
+연결에 실패해도 서버는 기동하고, Redis 를 필요로 하는 기능만 비활성된다.
+단 PostgreSQL 과 달리 **멀티플레이는 Redis 없이는 성립하지 않는다** —
+워커 간 상태 공유가 불가능하기 때문이다. 따라서 솔로/단일 워커 개발은
+계속 가능하지만, 멀티플레이 기능은 `is_redis_available()` 로 가드해야 한다.
+"""
+
+import logging
+from typing import Optional
+
+from redis.asyncio import ConnectionPool, Redis
+
+from app.core.config import settings
+
+logger = logging.getLogger(__name__)
+
+_pool: Optional[ConnectionPool] = None
+_client: Optional[Redis] = None
+_available = False
+
+
+def is_redis_available() -> bool:
+    """Redis 사용 가능 여부.
+
+    Redis 를 필요로 하는 코드는 반드시 이 함수로 먼저 확인한다.
+    """
+    return _available
+
+
+def get_redis() -> Optional[Redis]:
+    """Redis 클라이언트 반환. 사용 불가 시 None.
+
+    None 을 그대로 쓰면 AttributeError 가 나므로 호출부에서 분기해야 한다.
+    """
+    return _client if _available else None
+
+
+async def init_redis() -> None:
+    """Redis 연결 풀 생성 및 헬스 확인 (실패 시 graceful degradation)."""
+    global _pool, _client, _available
+
+    if not settings.redis_enabled:
+        logger.info("Redis disabled by configuration (REDIS_ENABLED=false)")
+        _available = False
+        return
+
+    try:
+        _pool = ConnectionPool.from_url(
+            settings.redis_url,
+            max_connections=settings.redis_max_connections,
+            socket_timeout=settings.redis_socket_timeout,
+            socket_connect_timeout=settings.redis_socket_connect_timeout,
+            health_check_interval=30,
+            decode_responses=True,
+        )
+        _client = Redis(connection_pool=_pool)
+        await _client.ping()
+        _available = True
+        logger.info("Redis connection established successfully")
+    except Exception as exc:
+        _available = False
+        logger.warning("Redis connection failed: %s", exc)
+        logger.info(
+            "Server will run without Redis — multiplayer features are unavailable "
+            "(matchmaking / room state / cross-worker broadcast require Redis)"
+        )
+        await _dispose()
+
+
+async def close_redis() -> None:
+    """Redis 연결 종료."""
+    global _available
+    _available = False
+    await _dispose()
+    logger.info("Redis connections closed")
+
+
+async def _dispose() -> None:
+    global _pool, _client
+    if _client is not None:
+        try:
+            await _client.aclose()
+        except Exception as exc:  # 종료 경로에서 예외로 기동/종료를 막지 않는다
+            logger.debug("Redis client close failed: %s", exc)
+        _client = None
+    if _pool is not None:
+        try:
+            await _pool.aclose()
+        except Exception as exc:
+            logger.debug("Redis pool close failed: %s", exc)
+        _pool = None
+
+
+async def redis_health() -> dict:
+    """헬스 엔드포인트용 Redis 상태."""
+    if not settings.redis_enabled:
+        return {"status": "disabled"}
+    if not _available or _client is None:
+        return {"status": "unavailable"}
+    try:
+        pong = await _client.ping()
+        return {"status": "ok" if pong else "unavailable"}
+    except Exception as exc:
+        logger.warning("Redis health check failed: %s", exc)
+        return {"status": "unavailable", "error": str(exc)}

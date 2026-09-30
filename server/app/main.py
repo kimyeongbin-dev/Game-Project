@@ -1,58 +1,99 @@
 """
-Game Project Backend - FastAPI
-Phase 1: 기본 인프라 및 API 설정
+게임모아 백엔드 — FastAPI 엔트리포인트.
+
+배선 순서와 의존 관계가 로컬·CI·배포에서 동일해야 하므로, 모든 구성은
+여기 한 곳에서 명시적으로 이루어진다. 설정값은 app/core/config.py 가 유일한
+환경변수 진입점이다.
 """
 
+import logging
 from contextlib import asynccontextmanager
-
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.quoridor import router as quoridor_router
-from app.api.users import router as users_router
 from app.api.ranking import router as ranking_router
-from app.db import init_db, close_db
+from app.api.users import router as users_router
+from app.core.config import settings
+from app.db import close_db, init_db, is_db_available
+from app.db.redis import close_redis, init_redis, is_redis_available, redis_health
+from app.middleware.rate_limiter import (
+    RateLimitExceeded,
+    RateLimitMiddleware,
+    limiter,
+    rate_limit_exceeded_handler,
+)
 from app.services.scheduler import setup_scheduler, shutdown_scheduler
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """애플리케이션 생명주기 관리"""
-    # 시작: 데이터베이스 초기화
-    print("Initializing database...")
-    await init_db()
-    print("Database initialized successfully")
+    """애플리케이션 생명주기.
 
-    # 스케줄러 시작
-    print("Starting scheduler...")
+    기동 순서: DB -> Redis -> 스케줄러
+    종료 순서: 역순 (스케줄러가 DB 를 쓰므로 먼저 멈춘다)
+
+    DB 와 Redis 는 모두 graceful degradation 이다 — 연결 실패로 기동이
+    막히지 않는다. 대신 어떤 기능이 비활성인지 로그로 남긴다.
+    """
+    logger.info(
+        "Starting server (environment=%s, testing=%s)",
+        settings.environment,
+        settings.testing,
+    )
+
+    await init_db()
+    await init_redis()
     setup_scheduler()
-    print("Scheduler started")
+
+    logger.info(
+        "Startup complete — db=%s redis=%s rate_limit=%s",
+        "up" if is_db_available() else "down",
+        "up" if is_redis_available() else "down",
+        "on" if limiter.enabled else "off",
+    )
 
     yield
 
-    # 종료: 스케줄러 정리
-    print("Shutting down scheduler...")
     shutdown_scheduler()
-    print("Scheduler stopped")
-
-    # 종료: 데이터베이스 연결 정리
-    print("Closing database connections...")
+    await close_redis()
     await close_db()
-    print("Database connections closed")
+    logger.info("Shutdown complete")
 
 
 app = FastAPI(
-    title="Game Project API",
-    description="게임 허브 백엔드 API - 유저 관리, 게임 정보, 점수 기록",
+    title="게임모아 API",
+    description="통합 미니게임 플랫폼 백엔드 — 인증, 랭킹, 실시간 멀티플레이",
     version="0.1.0",
-    lifespan=lifespan
+    lifespan=lifespan,
 )
 
-# CORS 설정 (개발 환경)
+# ---------------------------------------------------------------------------
+# 레이트 리미팅
+#
+# slowapi 는 `app.state.limiter` 를 규약으로 참조한다. 예외 핸들러와
+# 미들웨어를 함께 등록해야 실제로 429 가 반환된다.
+# 카운터 저장소는 Redis (settings.redis_limiter_url) — 워커가 여러 개여도
+# 제한이 정확하다. §2.2
+# ---------------------------------------------------------------------------
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+app.add_middleware(RateLimitMiddleware)
+
+# ---------------------------------------------------------------------------
+# CORS
+# TODO: 프로덕션에서는 허용 오리진을 명시한다 (현재 개발 편의로 전체 허용)
+# ---------------------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 프로덕션에서는 특정 도메인만 허용
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -61,17 +102,42 @@ app.add_middleware(
 
 @app.get("/")
 async def root():
-    """API 상태 확인"""
-    return {"status": "ok", "message": "Game Project API is running"}
+    """API 상태 확인."""
+    return {"status": "ok", "message": "게임모아 API is running"}
 
 
 @app.get("/health")
 async def health_check():
-    """헬스 체크 엔드포인트"""
-    return {"status": "healthy"}
+    """헬스 체크.
+
+    의존 서비스 상태를 함께 보고한다. 컨테이너 HEALTHCHECK 와 배포 플랫폼의
+    준비성 검사가 이 응답을 쓴다.
+
+    DB/Redis 가 down 이어도 200 을 반환한다 — graceful degradation 설계상
+    서버 자체는 정상이기 때문이다. 의존 서비스 장애는 `dependencies` 로 구분한다.
+    """
+    return {
+        "status": "healthy",
+        "environment": settings.environment,
+        "dependencies": {
+            "database": {"status": "ok" if is_db_available() else "unavailable"},
+            "redis": await redis_health(),
+        },
+        "rate_limit": {
+            "enabled": limiter.enabled,
+            "per_minute": settings.rate_limit_per_minute,
+        },
+    }
 
 
-# Routers
+# ---------------------------------------------------------------------------
+# 라우터
+#
+# NOTE: app/ws/ws_game.py 의 WebSocket 라우터는 아직 등록하지 않는다.
+#       구 Quoridor 2P 프로토콜이며 상태가 프로세스 내 dict 이라
+#       §2.2 를 만족하지 못한다. §4.1 재설계 후 등록한다.
+#       (판정 내역: app/ws/__init__.py)
+# ---------------------------------------------------------------------------
 app.include_router(quoridor_router)
 app.include_router(users_router)
 app.include_router(ranking_router)
@@ -79,4 +145,5 @@ app.include_router(ranking_router)
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
