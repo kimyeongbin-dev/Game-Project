@@ -142,6 +142,11 @@ class MazeGameService:
 
     # ----- 생성·조회 -----
 
+    @staticmethod
+    def seats(mode: str) -> int:
+        """모드 정원 — 배치 테이블이 유일한 출처. 없는 모드면 ValueError"""
+        return get_layout(mode).seats
+
     async def create_game(
         self,
         *,
@@ -156,7 +161,7 @@ class MazeGameService:
         사람 좌석의 activity 를 game:<id> 로 덮어쓴다. 호출자(매치·방)가 그 유저들의
         이전 활동을 쥐고 있는 상태에서 부른다.
         """
-        seats = get_layout(mode).seats
+        seats = self.seats(mode)
         if sorted(p.seat_no for p in players) != list(range(1, seats + 1)):
             raise ValueError(f"mode {mode} needs seats 1..{seats}, got {[p.seat_no for p in players]}")
 
