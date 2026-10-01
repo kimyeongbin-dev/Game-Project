@@ -242,7 +242,6 @@ gamemoa/
     │   ├── core/ *                   # 환경변수, JWT/Kakao OIDC 검증, 보안
     │   ├── db/                       # PostgreSQL (SQLAlchemy 2.0 Async) 설정·모델·리포지토리
     │   ├── api/                      # REST API 라우터
-    │   │   ├── quoridor.py           # (레거시) → maze 명세로 재설계 예정
     │   │   ├── users.py              # 유저 관리 → 카카오 로그인 & 솔로 진행도 병합으로 확장
     │   │   └── ranking.py            # 랭킹 → MMR 로 확장
     │   ├── ws/ *                     # 실시간 멀티플레이 WebSocket 핸들러

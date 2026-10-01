@@ -103,7 +103,7 @@
 | 단계 | 내용 | 위 작업 | 선행 |
 | :--- | :--- | :--- | :--- |
 | 0 ✅ | 워커·Redis 동작 실측 → 게임 상태 모델 결정 → maze.md §8 개정 | (신설) | — |
-| 1 | 구 REST `/api/v1/quoridor/*` 폐기 + 엔진 N인 일반화 (`core/*`, `ai`, `serializers`) | 3 (엔진) | — |
+| 1 ✅ | 구 REST `/api/v1/quoridor/*` 폐기 + 엔진 N인 일반화 (`core/*`, `ai`, `serializers`) | 3 (엔진) | — |
 | 2 | `db/models.py` 정리 — `game_participants`+`seat_no`, `match_queue`·`game_rooms` 폐기, `daily_champions`·스케줄러·`apscheduler` 제거 | 3 (DB) + 4 | 1 |
 | 3 | 큐·방·게임 상태를 Redis로 — 처음부터 `players[]`/`seat_no` 스키마 | 1 | 0, 1 |
 | 4 | 워커 간 전달을 Pub/Sub으로 | 2 | 3 |
@@ -144,7 +144,7 @@
 
 | 항목 | 내용 | 비고 |
 | :--- | :--- | :--- |
-| `utcnow` 일원화 | `app/core/time.py`에 표준 헬퍼가 있으나, 동일한 로컬 헬퍼가 3곳에 중복 정의되어 있다 — `app/db/models.py:20`, `app/games/maze/core/game_state.py:22`, `app/services/quoridor_service.py:24` | 동작에는 문제 없음. 정리는 해당 파일을 손댈 때 함께 |
+| `utcnow` 일원화 | `app/core/time.py`에 표준 헬퍼가 있으나, 동일한 로컬 헬퍼가 `app/db/models.py:17` 1곳에 남아 있다 (`game_state.py`·`quoridor_service.py` 는 M3 1단계에서 정리) | 동작에는 문제 없음. M3 2단계에서 `models.py` 를 다시 쓸 때 함께 |
 | CORS 오리진 제한 | `app/main.py:96`이 `allow_origins=["*"]` | 개발 편의. **프로덕션 배포 전 필수**. M4에서 처리 |
 | WS 라우터 미등록 | `app/ws/ws_game.py`가 `main.py`에 등록되어 있지 않다 | 의도적. 구 Quoridor 프로토콜이며 §4.1 재설계 대기. 동작하는 기능으로 오인되지 않게 하려는 것. 판정 내역은 `app/ws/__init__.py` docstring |
 | 스케줄러 제거 판단 | `app/services/scheduler/`는 일일 리셋 전용이고, 랭킹이 MMR로 단순화되면 쓰이지 않는다 | **결정 완료.** 근거 3개: ① 시계 만료를 ZSET 스위퍼가 처리한다 ② `refresh_tokens` 정리가 주기 작업을 쓰지 않는다 ③ `daily_champions` 폐기로 `daily_reset.py`의 유일한 용도가 소멸한다 → **M3에서 `app/services/scheduler/`와 `apscheduler==3.10.4` 제거**(`uv.lock` 재생성 포함) |

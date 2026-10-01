@@ -822,6 +822,9 @@ Redis와 이중 기록이 되고 정합성 문제가 생긴다. 방 기록이 �
 
 ### `/api/v1/quoridor/*` (14개) — 미로 WS 프로토콜로 대체
 
+> **REST 9개 폐기 완료 (M3 1단계, 커밋 `c36c4f9`).** `app/api/quoridor.py`·`app/schemas/quoridor.py`
+> 와 테스트를 삭제했다. 리플레이·히스토리 5개는 그 전에 폐기 완료(아래).
+
 | 기존 | 대체 |
 | :--- | :--- |
 | `POST /games` | WS `join_queue` / `create_room` ([`games/maze.md`](games/maze.md)) |
