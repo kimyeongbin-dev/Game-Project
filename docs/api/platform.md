@@ -777,12 +777,13 @@ DB 의 역할은 둘이다. ① **시작 시** `status = in_progress` 로 행을
 
 ### `match_queue`, `game_rooms` — 권위 경계 정리
 
-현재 **같은 개념이 두 곳에 병존**한다.
+M3 2단계 전에는 **같은 개념이 두 곳에 병존**했다. 둘 다 정리했다 — 테이블은 2단계에서 폐기,
+in-process 상태는 3단계에서 Redis 로 옮겼다(아래 "Redis 키 스키마").
 
-| 개념 | DB 테이블 | in-process |
-| :--- | :--- | :--- |
-| 매치메이킹 큐 | `match_queue` (`models.py:115`) | `app/ws/matchmaking.py:45` `_user_entries` |
-| 게임 방 | `game_rooms` (`models.py:150`) | `app/ws/room_manager.py:80` `_rooms` (동명 dataclass는 :37) |
+| 개념 | DB 테이블 (폐기) | in-process (폐기) | 현재 |
+| :--- | :--- | :--- | :--- |
+| 매치메이킹 큐 | `match_queue` | `app/ws/matchmaking.py` `_user_entries` | Redis `queue:{game}:{mode}` |
+| 게임 방 | `game_rooms` | `app/ws/room_manager.py` `_rooms` | Redis `room:{code}` |
 
 **M3 이후의 권위 경계:**
 
@@ -808,6 +809,45 @@ Redis와 이중 기록이 되고 정합성 문제가 생긴다. 방 기록이 �
 
 유일한 비용은 소급 데이터가 로그 보존 기간까지만 복구된다는 것이다. `mode`가
 필드이므로 새 모드가 생겨도 값만 늘고 스키마는 그대로다.
+
+### Redis 키 스키마 — 확정 (M3 3단계)
+
+실시간 상태의 권위인 Redis 키다(논리 DB 0). 키 문자열은 `server/app/db/redis_keys.py`
+한 곳에서만 만든다. `{game}` = 게임 식별자(`maze_1p`), `{mode}` = 배치 테이블 키.
+**인원 수가 들어가는 키는 없다** — 4인 모드는 배치 테이블에 행을 추가하는 것으로 끝난다.
+
+| 키 | 타입 | 값 | TTL | 쓰는 쪽 | 읽는 쪽 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `game:{id}:state` | STRING | `GameState.to_dict()` JSON (`schema_version` 포함) | 진행 중 없음 / 종료 후 `game_finished_ttl_sec`(300) | 게임 서비스 — 락 안에서, 락 토큰 펜싱 | 게임 서비스, 재접속 |
+| `game:{id}:meta` | STRING | `{game, mode, is_ranked, room_code, created_at, players:[{seat_no, user_id, nickname, is_ai}]}` — 불변 | state 와 같다 | 게임 서비스(생성 시 1회) | 게임 서비스(유저 → 좌석), WS 핸들러 |
+| `game:{id}:lock` | STRING | 무작위 토큰 | `PX game_lock_ttl_ms`(5000) | 락 헬퍼 | 락 헬퍼, 펜싱 쓰기 |
+| `queue:{game}:{mode}` | ZSET | member=`user_id`, score=입장 시각(epoch ms) | 없음 | 매치메이킹 | 매치메이킹 |
+| `queue:{game}:{mode}:entries` | HASH | `user_id` → `{nickname, mmr}` | 없음 | 매치메이킹 | 매칭 Lua |
+| `match:{id}` | STRING | `{game, mode, ready_deadline_ms, players:[{seat_no, user_id, nickname, mmr, joined_at_ms, ready}]}` | `match_record_ttl_sec`(60) — 안전망 | 매치메이킹 | 매치메이킹 |
+| `match:{id}:lock` | STRING | 토큰 | PX | 락 헬퍼 | 락 헬퍼 |
+| `room:{code}` | STRING | `{code, game, mode, capacity, status, game_id, created_at, players:[{seat_no, user_id, nickname, is_host, is_ready}]}` | `room_ttl_sec`(3600), 변경마다 갱신 | 방 서비스 | 방 서비스 |
+| `room:{code}:lock` | STRING | 토큰 | PX | 락 헬퍼 | 락 헬퍼 |
+| `user:{uid}:activity` | STRING | `queue:{game}:{mode}` \| `match:{id}` \| `room:{code}` \| `game:{id}` | 담는 대상과 같게(게임은 없음) | 전 서비스 — 진입 `SET NX`, 전이·해제 CAS | 전 서비스, 재접속 |
+| `game:{id}:events` | Pub/Sub | — | — | **4단계에서 신설** | |
+| `game:{id}:vision:{seat_no}` | — | 발견 맵 | — | **5단계에서 신설** | |
+| `game:{id}:clocks`, `{game}:deadlines` | — | 시계, 데드라인 ZSET | — | **6단계에서 신설** | |
+
+**설계 근거**
+
+- **state 와 meta 를 나눈다.** 엔진은 유저를 모른다. meta 는 생성 후 바뀌지 않으므로 락 없이 읽어도 된다
+- **거절도 저장한다.** 벽 거절은 `wall_rejections` 를 바꾼다([`games/maze.md`](games/maze.md) §7)
+- **펜싱 쓰기.** state 는 "락 토큰이 아직 내 것일 때만 SET" 하는 Lua 로 쓴다. 락 TTL 을 넘긴 행동이
+  다음 행동의 결과를 덮어쓰지 못한다
+- **활동 키 하나로 배타성을 보장한다.** "동시에 하나의 큐에만"과 큐·방 동시 참가 금지가 `SET NX` 하나로
+  원자적으로 성립한다. 같은 키가 재접속 시 진행 중 게임을 찾는 색인이다. 다른 활동 중이면 그 종류에 맞는
+  §13 코드(`already_in_queue`·`already_in_room`·`already_in_game`)로 거절한다
+- **매칭은 Lua 한 번이다.** 정원(`seats`)이 찼을 때만 `ZPOPMIN seats` 를 한다. 정원은 게임 서비스가
+  배치 테이블에서 넘긴다. Phase 1 은 FIFO 라 주기 루프 없이 입장할 때마다 시도한다
+- **좌석:** 랭크 매칭은 seat_no 를 무작위로 섞는다(먼저 들어왔다고 선수를 가져가지 않는다). 친구 방은
+  방 seat_no(호스트 = 1, 입장 순)가 그대로 게임 seat_no 다
+- **시작 시 DB 를 먼저 쓴다.** `game_sessions` 에 진행 중 행을 만든 뒤 Redis 에 상태를 쓴다. §8 fail-safe 는
+  "DB 에는 진행 중인데 Redis 상태가 없다"를 유실 판정 기준으로 쓴다. Redis 쓰기가 실패하면 그 행을 `void` 한다
+- **테스트는 논리 DB 1** 을 쓰고, 상태 접두어만 지운다. 같은 DB 의 리미터 카운터를 건드리지 않으려고 `FLUSHDB` 를 쓰지 않는다
 
 ---
 
@@ -885,10 +925,12 @@ Fog of War 정책(전체 공개 vs 플레이어 시점 재생)과 함께 재설�
 ### `WEBSOCKET /ws/game` (1개) — 재설계
 
 구 Quoridor 2P 프로토콜이다. 1인칭 미로 프로토콜로 재설계한다
-([`games/maze.md`](games/maze.md)). 기존 `WSMessageType` 25종 어휘는 재사용한다.
+([`games/maze.md`](games/maze.md)). 기존 `WSMessageType` 25종 어휘는 재사용한다(정의 파일 `app/schemas/ws_messages.py` 는
+M3 3단계에서 `ws_game` 과 함께 삭제했다 — 7단계에서 git 히스토리를 참고해 다시 정의한다).
 
-현재 이 라우터는 `app/main.py`에 **등록되어 있지 않다** — 동작하는 기능으로
-오인되지 않게 한 의도적 조치다. 판정 내역은 `server/app/ws/__init__.py` docstring.
+구 핸들러 `app/ws/ws_game.py` 는 M3 3단계에서 **삭제했다**. maze WS 핸들러는 M3 7단계에서
+3단계 서비스(`app/services/maze_game.py`·`matchmaking.py`·`rooms.py`)를 대상으로 새로 작성해
+`app/main.py` 에 등록한다.
 
 ---
 

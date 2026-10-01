@@ -18,7 +18,7 @@
 | **인프라** | `M1`~`M4` | 이 문서 | 개발·배포 기반 정비 |
 
 두 축은 독립이다. 현재 위치는 **출시 `Phase 1`(Android) 진행 중 + 인프라
-`M2` 완료 + `M3` 0단계(실측) 완료**다.
+`M2` 완료 + `M3` 3단계(Redis 이전) 완료**다.
 
 > ⚠️ **git log 읽을 때 주의:** 커밋 `f831c0b`·`e189199`의 제목은 각각
 > "Phase 1"·"Phase 2"로 적혀 있다. 이 표기가 굳기 전에 작성된 것이며,
@@ -58,8 +58,9 @@
 [`plans/2026-10-01-이동규칙확정.md`](plans/2026-10-01-이동규칙확정.md)). 이동 규칙
 본문까지 닫혔으므로 착수 가능하다.
 
-현재 `app/ws/`의 상태가 전부 프로세스 내 모듈 전역 dict다
+착수 시점에는 `app/ws/`의 상태가 전부 프로세스 내 모듈 전역 dict였다
 (`connection_manager._connections`, `matchmaking._queue`, `room_manager._rooms`).
+큐·방·게임 상태는 3단계에서 Redis 로 옮겼고, 연결 맵(`connection_manager`)만 남았다.
 `PLATFORM_ARCHITECTURE.md` §2.2는 Redis 8이 매치메이킹 큐·실시간 방 상태·
 게임 시계와 접속 유예 데드라인·Pub/Sub을 전담하도록 규정한다.
 
@@ -106,11 +107,11 @@
 | 1 ✅ | 구 REST `/api/v1/quoridor/*` 폐기 + 엔진 N인 일반화 (`core/*`, `ai`, `serializers`) | 3 (엔진) | — |
 | 2 ✅ | `db/models.py` 정리 — `game_participants`+`seat_no`, `match_queue`·`game_rooms` 폐기, `daily_champions`·스케줄러·`apscheduler` 제거 | 3 (DB) + 4 | 1 |
 | 2.5 ⏸ | **역할별 독립 분석 (코드 변경 없음) — 보류** — 게임 리뷰어 → 스키마 최적화 → 악의적 공격자 → 클린 코드. 산출물은 `docs/research/` 보고서 + 제안별 채택 결정표. 채택 항목이 3단계 이후 계획서의 입력이 된다 | (신설) | 2 |
-| 3 | 큐·방·게임 상태를 Redis로 — 처음부터 `players[]`/`seat_no` 스키마 | 1 | 0, 1, 2 |
+| 3 ✅ | 큐·방·게임 상태를 Redis로 — 처음부터 `players[]`/`seat_no` 스키마. 구 `ws_game`·`room_manager`·`matchmaking`·`quoridor_service` 삭제 | 1 | 0, 1, 2 |
 | 4 | 워커 간 전달을 Pub/Sub으로 | 2 | 3 |
 | 5 | 시야 엔진 | 6 | 1, 3 |
 | 6 | 시간 체계 | 7 | 0, 4 |
-| 7 | `ws_game` 라우터 등록 + `--workers 2` 완료 판정 | 5 | 전부 |
+| 7 | **maze WS 핸들러(§12) 신규 작성**(3단계 서비스 대상) + `main.py` 라우터 등록 + `--workers 2` 완료 판정 | 5 | 전부 |
 
 > 작업 3(엔진)이 작업 1·4보다 먼저다. 좌석 모델(`seat_no`, `goals[]`, `eliminated`)이
 > Redis 키 스키마와 DB 스키마 양쪽의 입력이기 때문이다. 뒤에 하면 둘 다 2인용으로

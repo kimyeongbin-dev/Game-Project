@@ -177,8 +177,8 @@ MMR 자체는 정상적으로 계산·기록하고 리더보드에 쓴다([`../p
 ±700로 완화한다. 모드별 상한은 **설정 테이블의 행**이므로 모드가 늘어도
 스키마가 바뀌지 않는다.
 
-> 현행 `matchmaking.py`에 `SCORE_RANGE_MAX = 500`과 대기 시간 기반 확장 로직이
-> 이미 있다 (`server/app/ws/matchmaking.py:41,164`). **로직을 지우지 말고
+> 확장 규칙은 `server/app/services/matchmaking.py` 의 `mmr_window`(구간 표
+> `MMR_WINDOW_STEPS`, 모드별 상한 `MMR_WINDOW_CAP`)로 보존돼 있다(M3 3단계). **로직을 지우지 말고
 > 비활성화만 한다.** 도입 시점에 기준을 점수(`score`)에서 MMR로 바꿔 되살린다.
 
 ### 매칭 성사
@@ -1081,8 +1081,8 @@ Fog of War가 무너진다.
 ## §11 1:1:1 전용 규칙
 
 2인 규칙에서 자동으로 유도되지 않는 것들이다. 게임 엔진은 M3 1단계에서 좌석 수를
-가정하지 않게 일반화했고(`app/games/maze/core/layouts.py` 배치 테이블), 매치메이킹은
-아직 1:1 전용이다 — `matchmaking.py:145`가 `len(self._queue) < 2`로 하드코딩되어 있다.
+가정하지 않게 일반화했고(`app/games/maze/core/layouts.py` 배치 테이블), 매치메이킹·방도
+M3 3단계에서 정원을 그 테이블에서 받는다(`app/services/matchmaking.py`·`rooms.py`).
 
 ### 좌석과 목표 — 네 꼭짓점 중 랜덤 3개
 
@@ -1255,6 +1255,7 @@ Fog of War가 무너진다.
 | `nickname_required` | 닉네임 미설정 (§2) |
 | `already_in_queue` | 이미 큐에 있음 |
 | `already_in_room` | 이미 방에 있음 |
+| `already_in_game` | 진행 중인 게임이 있음 — 큐·방 입장 거절 (M3 3단계 추가) |
 | `not_in_queue` / `not_in_room` / `not_in_game` | 상태 불일치 |
 | `room_not_found` | 방 코드 없음 |
 | `room_full` | 정원 초과 |
@@ -1340,11 +1341,11 @@ Fog of War가 무너진다.
 
 | 항목 | 현재 | 필요 |
 | :--- | :--- | :--- |
-| 큐·방 상태 | 프로세스 내 dict | Redis |
+| 큐·방 상태 | ✅ Redis (M3 3단계) | Redis |
 | 게임·접속 시계 | 없음 | Redis **ZSET + 스위퍼** (§8) |
-| 게임 상태 | `quoridor_service._games` 프로세스 메모리 | Redis `game:<id>:state` + 게임별 락 (§8) |
+| 게임 상태 | ✅ Redis `game:<id>:state` + 게임별 락 (M3 3단계) | Redis `game:<id>:state` + 게임별 락 (§8) |
 | 배포 시 서버 유예 | 없음 | 종료 단계 판별 + 두 시계 정지 (§8) |
-| 인원 | `matchmaking.py:145` `len(queue) < 2` 하드코딩 | 모드별 정원 테이블 |
+| 인원 | ✅ 배치 테이블 정원 (M3 3단계) | 모드별 정원 테이블 |
 | 좌석 표현 | `player1_*`/`player2_*`, `player`(1\|2) | `game_participants` + `seat_no` ([`../platform.md`](../platform.md) §5) |
 | 목표 | ✅ `Player.goals` (M3 1단계) | **`goals[]`** — 축 + 값의 목록 (§11) |
 | 탈락 상태 | ✅ `eliminated_order`·`elimination_reason` (M3 1단계) | 좌석별 탈락 여부 + 탈락 순번 (§9) |
