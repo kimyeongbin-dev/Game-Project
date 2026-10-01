@@ -101,16 +101,16 @@ def parse_activity(value: str) -> tuple[str, str]:
 
 
 # ----- 이벤트 채널 (Pub/Sub) -----
-# 채널은 논리 DB 와 무관하게 Redis 서버 전역이다. 같은 Redis 를 쓰는 테스트(DB 1)와
-# 앱(DB 0)이 섞이지 않도록 `db{n}:` 를 붙인다. 워커는 패턴 하나로 전부 구독한다
-# (app/ws/bus.py) — 게임·방 단위로 나눠 두는 것은 나중에 구독 쪽만 동적 SUBSCRIBE 로
-# 바꿀 수 있게 하기 위해서다.
+# 채널은 논리 DB 와 무관하게 Redis 서버 전역이다. 같은 Redis 를 쓰는 테스트와 앱이
+# 섞이지 않도록 명시 설정 `pubsub_namespace`(앱 "app" / 테스트 "test")를 붙인다.
+# 워커는 패턴 하나로 전부 구독한다(app/ws/bus.py) — 게임·방 단위로 나눠 두는 것은
+# 나중에 구독 쪽만 동적 SUBSCRIBE 로 바꿀 수 있게 하기 위해서다.
 
 EVENT_SCOPES = ("game", "match", "room")
 
 
 def channel_namespace() -> str:
-    return f"db{settings.redis_db_index}:"
+    return f"{settings.pubsub_namespace}:"
 
 
 def events(scope: str, scope_id: str) -> str:

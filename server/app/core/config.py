@@ -10,10 +10,12 @@
 
 from functools import lru_cache
 from typing import Literal
-from urllib.parse import urlparse
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# 테스트 전용 Pub/Sub 네임스페이스 — tests/conftest.py 가 강제하고 production 은 거부한다
+TEST_PUBSUB_NAMESPACE = "test"
 
 
 class Settings(BaseSettings):
@@ -76,6 +78,11 @@ class Settings(BaseSettings):
     # Pub/Sub 구독이 끊겼을 때 재구독 대기 (지수 백오프 최소 → 최대). M3 4단계 app/ws/bus.py
     pubsub_reconnect_min_ms: int = Field(default=100, ge=1)
     pubsub_reconnect_max_ms: int = Field(default=5000, ge=1)
+    # Pub/Sub 채널 네임스페이스 — 모든 이벤트 채널 이름의 접두어 `<ns>:`.
+    # 채널은 논리 DB 와 무관한 Redis 서버 전역이라 DB 분리로는 격리되지 않는다. 그래서
+    # 명시적으로 나눈다: 앱 = "app", 테스트 = "test" (docker-compose 의 server / server-test).
+    # 테스트 픽스처는 "test" 가 아니면 중단하고, production 은 "test" 로 기동하지 않는다.
+    pubsub_namespace: str = Field(default="app", pattern=r"^[a-z][a-z0-9_-]*$")
 
     # -----------------------------------------------------------------------
     # 레이트 리미팅
@@ -97,15 +104,12 @@ class Settings(BaseSettings):
             return f"{self.redis_url}/{self.redis_limiter_db}"
         return f"{base}/{self.redis_limiter_db}"
 
-    @property
-    def redis_db_index(self) -> int:
-        """`redis_url` 의 논리 DB 번호 (없으면 0).
-
-        Pub/Sub 채널은 논리 DB 와 무관하게 서버 전역이다. 채널 이름에 이 번호를
-        접두어로 붙여 테스트(DB 1)와 앱(DB 0) 이벤트가 섞이지 않게 한다.
-        """
-        path = urlparse(self.redis_url).path.strip("/")
-        return int(path) if path.isdigit() else 0
+    @model_validator(mode="after")
+    def _production_never_uses_test_channels(self) -> "Settings":
+        """테스트 네임스페이스로 운영 서버가 뜨면 테스트 이벤트가 실제 소켓으로 간다"""
+        if self.environment == "production" and self.pubsub_namespace == TEST_PUBSUB_NAMESPACE:
+            raise ValueError("PUBSUB_NAMESPACE=test is not allowed in production")
+        return self
 
     @property
     def is_production(self) -> bool:

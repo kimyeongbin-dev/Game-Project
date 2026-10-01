@@ -70,13 +70,26 @@ def test_event_json_roundtrip():
     assert e.channel.startswith(keys.channel_namespace())
 
 
-def test_channel_namespace_is_logical_db():
-    """채널은 DB 전역이라 논리 DB 번호로 나눈다 — 테스트는 db1"""
-    assert keys.channel_namespace() == "db1:"
-    assert keys.room_events("ABC") == "db1:room:ABC:events"
-    assert keys.event_patterns() == ("db1:game:*:events", "db1:match:*:events", "db1:room:*:events")
+def test_test_channels_are_explicitly_separated():
+    """채널은 DB 전역이다 — 테스트는 명시 네임스페이스 "test", 앱은 "app" """
+    assert keys.channel_namespace() == "test:"
+    assert keys.room_events("ABC") == "test:room:ABC:events"
+    assert keys.event_patterns() == ("test:game:*:events", "test:match:*:events", "test:room:*:events")
     with pytest.raises(ValueError):
         keys.events("user", "1")
+
+
+def test_namespace_settings_guard():
+    """기본은 앱 네임스페이스, production 은 테스트 네임스페이스를 거부한다"""
+    from pydantic import ValidationError
+
+    from app.core.config import Settings
+
+    assert Settings(_env_file=None, pubsub_namespace="app").pubsub_namespace == "app"
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, environment="production", pubsub_namespace="test")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, pubsub_namespace="Bad Name:")
 
 
 # ----- 게임 -----

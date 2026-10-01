@@ -85,6 +85,8 @@ services:
       REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}@redis:6379/0
       REDIS_ENABLED: "true"
       REDIS_LIMITER_DB: "2"
+      # Pub/Sub 채널은 논리 DB 로 격리되지 않는다(서버 전역) — 네임스페이스로 나눈다
+      PUBSUB_NAMESPACE: app
       RATE_LIMIT_ENABLED: "true"
       RATE_LIMIT_PER_MINUTE: "${RATE_LIMIT_PER_MINUTE:-60}"
     ports:
@@ -116,6 +118,8 @@ services:
       REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}@redis:6379/1
       REDIS_ENABLED: "true"
       REDIS_LIMITER_DB: "1"
+      # 테스트 이벤트가 개발 서버 소켓으로 가지 않게 한다 — tests/conftest.py 가 강제
+      PUBSUB_NAMESPACE: test
       TESTING: "true"
     volumes:
       - ./server:/srv/gamemoa

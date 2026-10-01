@@ -11,7 +11,7 @@ from typing import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 
-from app.core.config import settings
+from app.core.config import TEST_PUBSUB_NAMESPACE, settings
 from app.db import redis_keys
 from app.db.config import Base
 from app.db.redis import close_redis, get_redis, init_redis
@@ -94,6 +94,10 @@ async def redis_client():
     # 앱 상태 DB 0 을 지우는 사고를 막는다 — docker-compose server-test 가 /1 을 준다
     assert settings.redis_url.rstrip("/").endswith("/1"), (
         f"tests must use Redis logical DB 1, got {settings.redis_url}"
+    )
+    # Pub/Sub 채널은 논리 DB 로 격리되지 않는다 — 네임스페이스가 따로 막는다
+    assert settings.pubsub_namespace == TEST_PUBSUB_NAMESPACE, (
+        f"tests must use PUBSUB_NAMESPACE={TEST_PUBSUB_NAMESPACE}, got {settings.pubsub_namespace}"
     )
 
     await init_redis()

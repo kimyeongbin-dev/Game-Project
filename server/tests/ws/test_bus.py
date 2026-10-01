@@ -139,11 +139,11 @@ async def test_non_recipients_receive_nothing(workers, games):
     assert outsider.sent_messages == []
 
 
-async def test_other_namespace_is_ignored(workers, redis_client):
-    """채널은 DB 전역이다 — db0(앱) 이벤트가 테스트 버스(db1)로 오지 않는다"""
+async def test_app_channels_do_not_reach_test_bus(workers, redis_client):
+    """채널은 DB 전역이다 — 앱("app:") 이벤트가 테스트 버스("test:")로 오지 않는다"""
     ws = await connect(workers[0][0], 1)
     foreign = Event(events.ROOM_UPDATED, "room", "ZZZZZZ", (1,), {"room": {}})
-    await redis_client.publish("db0:room:ZZZZZZ:events", foreign.to_json())
+    await redis_client.publish("app:room:ZZZZZZ:events", foreign.to_json())
 
     mine = Event(events.ROOM_DISSOLVED, "room", "AAAAAA", (1,), {"code": "AAAAAA"})
     await redis_client.publish(mine.channel, mine.to_json())

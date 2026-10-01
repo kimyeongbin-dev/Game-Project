@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+**응답 언어: 한국어.** 사용자에게 보이는 모든 텍스트(진행 보고·질문·최종 요약)는 한국어로 쓴다. 코드 식별자·명령어·커밋 해시는 그대로 둔다. 커밋 메시지·저장소 문서도 기존 관례대로 한국어다.
+
 ## Project Overview
 
 **게임모아 (gamemoa)** — 크로스플랫폼 통합 미니게임 플랫폼. 벤토 그리드 로비에서 6종 보드·퍼즐 게임에 접속한다.
@@ -169,6 +171,8 @@ settings.redis_url, settings.rate_limit_per_minute, ...
 ```
 
 Redis 논리 DB 를 용도별로 분리한다: **0 = 앱 상태(큐/방/세션), 1 = 테스트, 2 = 레이트 리미터.** 리미터 카운터가 앱 상태와 같은 DB 를 쓰면 키 스캔·FLUSHDB 가 서로를 건드린다.
+
+**Pub/Sub 채널은 논리 DB 로 격리되지 않는다**(서버 전역). 채널은 `PUBSUB_NAMESPACE` 로 명시적으로 나눈다: **`app` = 앱, `test` = 테스트** (`docker-compose.yml` 의 server / server-test). 테스트 픽스처는 `test` 가 아니면 중단하고, production 은 `test` 로 기동하지 않는다.
 
 DB 와 Redis 모두 **graceful degradation** 이다 — 연결 실패로 기동이 막히지 않는다. Redis 를 쓰는 코드는 반드시 `is_redis_available()` 로 가드한다. 단 **멀티플레이는 Redis 없이 성립하지 않는다** (워커 간 상태 공유 불가).
 
