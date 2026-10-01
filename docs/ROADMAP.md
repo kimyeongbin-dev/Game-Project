@@ -18,7 +18,7 @@
 | **인프라** | `M1`~`M4` | 이 문서 | 개발·배포 기반 정비 |
 
 두 축은 독립이다. 현재 위치는 **출시 `Phase 1`(Android) 진행 중 + 인프라
-`M2` 완료 + `M3` 선행 설계 완료**다.
+`M2` 완료 + `M3` 0단계(실측) 완료**다.
 
 > ⚠️ **git log 읽을 때 주의:** 커밋 `f831c0b`·`e189199`의 제목은 각각
 > "Phase 1"·"Phase 2"로 적혀 있다. 이 표기가 굳기 전에 작성된 것이며,
@@ -65,7 +65,8 @@
 
 작업:
 
-1. 매치메이킹 큐·방 상태를 Redis로 이전
+1. 매치메이킹 큐·방 상태 **+ 진행 중 게임 상태**를 Redis로 이전 — 게임 상태는
+   **Redis 권위 + 게임별 락** (0단계 실측 결론, [`api/games/maze.md`](api/games/maze.md) §8)
 2. 워커 간 브로드캐스트를 Redis Pub/Sub으로 (WebSocket 객체 자체는 본질적으로
    프로세스 내에 남는다 — 연결 맵은 그대로 두고 메시지 전달만 Pub/Sub)
 3. **1:1:1 지원 — 게임 엔진 N인 일반화**
@@ -94,7 +95,25 @@
    상태(`discovered_edges`·`last_seen_players`)를 Redis에 게임 수명 동안 보관
    ([`api/games/maze.md`](api/games/maze.md) §6)
 7. **시간 체계** — Fischer 게임 시계 + 접속 시계 분리 + Redis ZSET 스위퍼 +
-   워커 하트비트/무효 처리 ([`api/games/maze.md`](api/games/maze.md) §8)
+   배포 시 서버 유예 + Redis 상태 유실 시 무효 처리 ([`api/games/maze.md`](api/games/maze.md) §8)
+
+**실행 순서** — 계획서 [`plans/2026-10-01-M3-착수순서.md`](plans/2026-10-01-M3-착수순서.md).
+실측 보고서 [`research/2026-10-01-워커-redis-실측.md`](research/2026-10-01-워커-redis-실측.md).
+
+| 단계 | 내용 | 위 작업 | 선행 |
+| :--- | :--- | :--- | :--- |
+| 0 ✅ | 워커·Redis 동작 실측 → 게임 상태 모델 결정 → maze.md §8 개정 | (신설) | — |
+| 1 | 구 REST `/api/v1/quoridor/*` 폐기 + 엔진 N인 일반화 (`core/*`, `ai`, `serializers`) | 3 (엔진) | — |
+| 2 | `db/models.py` 정리 — `game_participants`+`seat_no`, `match_queue`·`game_rooms` 폐기, `daily_champions`·스케줄러·`apscheduler` 제거 | 3 (DB) + 4 | 1 |
+| 3 | 큐·방·게임 상태를 Redis로 — 처음부터 `players[]`/`seat_no` 스키마 | 1 | 0, 1 |
+| 4 | 워커 간 전달을 Pub/Sub으로 | 2 | 3 |
+| 5 | 시야 엔진 | 6 | 1, 3 |
+| 6 | 시간 체계 | 7 | 0, 4 |
+| 7 | `ws_game` 라우터 등록 + `--workers 2` 완료 판정 | 5 | 전부 |
+
+> 작업 3(엔진)이 작업 1·4보다 먼저다. 좌석 모델(`seat_no`, `goals[]`, `eliminated`)이
+> Redis 키 스키마와 DB 스키마 양쪽의 입력이기 때문이다. 뒤에 하면 둘 다 2인용으로
+> 만들었다가 다시 만든다.
 
 **완료 판정:** `server/Dockerfile` prod의 `--workers`를 2 이상으로 올리고
 매칭이 정상 동작해야 한다. 현재 `Dockerfile:120`에서 `1`로 고정되어 있고,

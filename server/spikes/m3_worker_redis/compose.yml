@@ -1,0 +1,60 @@
+# =============================================================================
+# M3 0단계 실측 전용 — 독립 compose 프로젝트 (개발 컨테이너·Redis 와 격리)
+#
+# 계획서: docs/plans/2026-10-01-M3-착수순서.md
+#
+#   docker compose -p m3spike -f server/spikes/m3_worker_redis/compose.yml up -d --build
+#   docker compose -p m3spike -f server/spikes/m3_worker_redis/compose.yml run --rm spike-client python client.py e1 100
+#   docker compose -p m3spike -f server/spikes/m3_worker_redis/compose.yml down -v
+#
+# 서버는 prod CMD 와 같은 플래그(--workers / --proxy-headers)를 쓰되 워커만 2개다.
+# 이미지는 server/Dockerfile 의 deps 스테이지 — 고정 의존성 그대로, 소스는 마운트.
+# =============================================================================
+name: m3spike
+
+services:
+  spike-redis:
+    # docker-compose.yml 의 redis 와 동일 다이제스트 · 동일 인자
+    image: redis:8-alpine@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    volumes:
+      - spike_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  spike-server:
+    build:
+      context: ../..
+      target: deps
+    environment:
+      REDIS_URL: redis://spike-redis:6379/0
+      REDIS_ENABLED: "true"
+      DB_ENABLED: "false"
+    working_dir: /srv/gamemoa
+    volumes:
+      - ../..:/srv/gamemoa:ro
+    command: ["uvicorn", "spike_app:app",
+              "--app-dir", "/srv/gamemoa/spikes/m3_worker_redis",
+              "--host", "0.0.0.0", "--port", "8000",
+              "--workers", "2",
+              "--proxy-headers", "--forwarded-allow-ips", "*"]
+    depends_on:
+      spike-redis:
+        condition: service_healthy
+
+  spike-client:
+    profiles: [client]
+    build:
+      context: ../..
+      target: deps
+    environment:
+      REDIS_URL: redis://spike-redis:6379/3
+    working_dir: /srv/gamemoa/spikes/m3_worker_redis
+    volumes:
+      - ../..:/srv/gamemoa:ro
+
+volumes:
+  spike_redis_data:
