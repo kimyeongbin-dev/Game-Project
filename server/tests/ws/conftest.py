@@ -82,27 +82,3 @@ async def connection_manager():
     """ConnectionManager 인스턴스"""
     from app.ws.connection_manager import ConnectionManager
     return ConnectionManager()
-
-
-@pytest_asyncio.fixture
-async def matchmaking_queue():
-    """MatchmakingQueue 인스턴스 (started)"""
-    from app.ws.matchmaking import MatchmakingQueue
-    queue = MatchmakingQueue()
-    await queue.start()
-    yield queue
-    await queue.stop()
-
-
-@pytest_asyncio.fixture
-async def matchmaking_queue_stopped():
-    """MatchmakingQueue 인스턴스 (not started)"""
-    from app.ws.matchmaking import MatchmakingQueue
-    return MatchmakingQueue()
-
-
-@pytest.fixture
-def room_manager():
-    """RoomManager 인스턴스"""
-    from app.ws.room_manager import RoomManager
-    return RoomManager()

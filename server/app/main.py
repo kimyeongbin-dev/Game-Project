@@ -129,10 +129,8 @@ async def health_check():
 # ---------------------------------------------------------------------------
 # 라우터
 #
-# NOTE: app/ws/ws_game.py 의 WebSocket 라우터는 아직 등록하지 않는다.
-#       구 Quoridor 2P 프로토콜이며 상태가 프로세스 내 dict 이라
-#       §2.2 를 만족하지 못한다. §4.1 재설계 후 등록한다.
-#       (판정 내역: app/ws/__init__.py)
+# NOTE: WebSocket 라우터는 아직 없다. maze WS 핸들러는 M3 7단계에서 새로
+#       작성해 여기 등록한다 (docs/ROADMAP.md, app/ws/__init__.py)
 # ---------------------------------------------------------------------------
 app.include_router(users_router)
 app.include_router(ranking_router)

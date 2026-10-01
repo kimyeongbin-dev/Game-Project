@@ -9,8 +9,8 @@ PLATFORM_ARCHITECTURE.md §4.1 대응:
 좌석 수를 가정하지 않는다. 인원·시작점·목표·벽 수는 core/layouts.py 의 모드별
 배치 테이블 값이며, 새 모드는 행 추가로 끝난다 (docs/api/platform.md §5).
 
-NOTE: 모듈·클래스 명칭 일부(quoridor_service 등)는 구 Quoridor 구현을 유지한
-      상태다. 도메인 리네이밍은 M3 3단계에서 서비스를 Redis 저장소로 교체할 때 한다.
+Redis 저장·락·종료 기록은 app/services/maze_game.py 의 몫이다. 이 패키지는
+프레임워크·저장소를 모른다.
 """
 
 from .core.game_state import GameState
