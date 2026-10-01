@@ -633,9 +633,9 @@ WebSocket 패킷으로 전송".
 하므로 브로드캐스트를 재사용할 수 없다. `connection_manager`의 일괄
 전송(`broadcast`)을 그대로 쓸 수 없고, **플레이어별 개별 전송**이 필요하다.
 
-> M3 구현 시 주의: 현행 `ConnectionManager`에 게임 단위 브로드캐스트가 있다
-> (`server/app/ws/connection_manager.py:36` `_game_players`). Fog of War에서는
-> 같은 페이로드를 여러 명에게 보내는 경로를 **쓰지 않는다.**
+> M3 4단계에서 반영했다: `ConnectionManager` 의 게임 단위 브로드캐스트(`_game_players`)를
+> 지웠고, 구독 버스가 수신자마다 `app/services/maze_view.py` 로 좌석별 패킷을 따로 만든다.
+> Fog of War에서는 같은 페이로드를 여러 명에게 보내는 경로를 **쓰지 않는다.**
 
 ---
 
