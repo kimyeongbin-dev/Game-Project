@@ -17,7 +17,8 @@
 | **출시** | `Phase 1/2/3` | `PLATFORM_ARCHITECTURE.md` §1.2 | Android → iOS 통합 → 웹 확장 |
 | **인프라** | `M1`~`M4` | 이 문서 | 개발·배포 기반 정비 |
 
-두 축은 독립이다. 현재 위치는 **출시 `Phase 1`(Android) 진행 중 + 인프라 `M2` 완료**다.
+두 축은 독립이다. 현재 위치는 **출시 `Phase 1`(Android) 진행 중 + 인프라
+`M2` 완료 + `M3` 선행 설계 완료**다.
 
 > ⚠️ **git log 읽을 때 주의:** 커밋 `f831c0b`·`e189199`의 제목은 각각
 > "Phase 1"·"Phase 2"로 적혀 있다. 이 표기가 굳기 전에 작성된 것이며,
@@ -53,11 +54,9 @@
 
 ### M3 — WebSocket 상태 Redis 이전 + 1:1:1 확장
 
-**선행 조건:** `docs/api/games/maze.md` 확정. 설계 없이 착수하면 1:1:1 확장 때 다시 뒤집힌다.
-
-> ⚠️ **아직 남았다 — 아래 "maze.md 잔여 설계 3건"을 먼저 닫는다.**
-> 미결 표는 비웠지만 **이동 규칙 본문이 없다.** 그 상태로 착수하면 작업 3의
-> `core/move_validator.py` 에서 막힌다.
+**선행 조건:** `docs/api/games/maze.md` 확정 — **완료**(2026-10-01, 계획서:
+[`plans/2026-10-01-이동규칙확정.md`](plans/2026-10-01-이동규칙확정.md)). 이동 규칙
+본문까지 닫혔으므로 착수 가능하다.
 
 현재 `app/ws/`의 상태가 전부 프로세스 내 모듈 전역 dict다
 (`connection_manager._connections`, `matchmaking._queue`, `room_manager._rooms`).
@@ -79,8 +78,8 @@
    | `core/board.py` | `PLAYER1_START`/`PLAYER2_START`, `PLAYER1_GOAL_ROW`/`PLAYER2_GOAL_ROW` → **모드별 배치 테이블**(`duel`=변 중앙 대향 2점, `trio`=네 꼭짓점 중 랜덤 3, `quad`(미래)=네 꼭짓점 전부) |
    | `core/player.py` | `player_id not in (1,2)` 예외, `create_player1`/`create_player2`, `goal_row` 단일 축 → `seat_no` + **`goals[]` 목록**(축+값), **`eliminated`·`eliminated_order`** 추가 |
    | `core/game_state.py` | `player1`/`player2` 속성 → 좌석 목록, `current_turn = 2 if … == 1 else 1` → 순환, `PLAYER1_WIN`/`PLAYER2_WIN` → `winner_seat_no`, `to_dict()` 의 `"player1"`/`"player2"` 키, 종료 판정에 **`last_standing`**(생존자 1명) 추가 |
-   | `core/move_validator.py` | 단일 `opponent: Player` → 상대 **목록** (점프 규칙이 3인에서 달라진다) |
-   | `core/pathfinder.py` | `player1_pos`/`player1_goal` 2인 전용 서명 → **생존자 목록** (탈락자를 포함하면 벽 설치가 영구 거절된다) |
+   | `core/move_validator.py` | **작업이 줄었다** — 점프 로직(`_get_jump_moves`) 삭제 + `opponent` 인자 **제거**. 상대 목록이 필요 없다 ([`api/games/maze.md`](api/games/maze.md) §5) |
+   | `core/pathfinder.py` | `player1_pos`/`player1_goal` 2인 전용 서명 → **생존자 목록** (탈락자를 포함하면 벽 설치가 영구 거절된다). `other_player_pos` 인자는 **삭제** — 말이 경로를 막지 않는다 (§5) |
    | `ai/simple_ai.py` | `game_state.opponent_player` 단일 상대 전제 |
    | `serializers/game_serializer.py` | `player1_name`/`player2_name` |
    | `db/models.py` | `player1_*`/`player2_*` → `game_participants` + `seat_no` |
@@ -117,62 +116,6 @@
    prod CMD의 `--proxy-headers --forwarded-allow-ips *`가 교정하지만 실측이 필요하다
 4. 다중 워커 환경에서 매칭·리미팅 정확성 E2E 검증
 5. 프로덕션 CORS 오리진 제한 (아래 TODO)
-
----
-
-## maze.md 잔여 설계 3건 — **다음 세션 / M3 선행**
-
-2026-10-01에 미결 15건을 확정(커밋 `e8af2d6`)했으나, 그 직후 점검에서 **제기된
-적이 없어 미결 표에 오르지도 못한** 구멍 2개가 드러났다. `maze.md` 의 미결 표가
-"현재 미결 없음"이라고 말하는 것은 **지금 사실이 아니다.**
-
-**플랜 모드로 사용자와 디테일을 맞춰가며 진행한다.** 아래 ①이 설계 판단이 많아
-혼자 확정하지 않는다.
-
-### ① 이동 규칙 본문 신설 (§5) — M3 를 직접 막는다
-
-현재 §5 "이동"은 payload 스키마 3줄(`row`, `col`)이 전부다. **"어느 칸으로 갈 수
-있는가"가 설계서 어디에도 없다.** §13 에 `invalid_move | 이동 규칙 위반` 코드만
-있고 그 "규칙"의 본문이 없다. §7(벽 설치)이 검증 순서를 4단계로 명시한 것과
-비대칭이다.
-
-특히 **점프 규칙**: 설계서 전체에서 `점프` 는 **1회**만 등장하며, 그것도 §11
-"왜 2인은 변 중앙인가" 표의 근거 문장에서 스쳐 지나간다. 정의가 없다.
-그런데 아래 M3 작업 3의 `core/move_validator.py` 행은 **"점프 규칙이 3인에서
-달라진다"**고 못박았다 — 달라진다는 것은 아는데 어떻게 달라지는지가 없다.
-
-맞춰야 할 것:
-
-| 쟁점 | 내용 |
-| :--- | :--- |
-| 기본 이동 | 직교 인접 1칸. 벽·보드 경계로 막히지 않을 것 |
-| 점프 (2인) | 인접 상대를 뛰어넘는다. 뒤에 벽이 있으면 대각 우회 |
-| 점프 (3인 이상) | **말 둘이 연달아 붙어 있으면?** 연쇄 점프 허용 여부 |
-| | **점프 착지점에 세 번째 말이 있으면?** |
-| | **대각 우회가 양쪽 다 가능하면?** 둘 다 허용 / 선택 강제 |
-| 탈락자의 말 | 보드에 남아 장애물로 취급한다(§9). **점프 대상이 되는가** |
-| **Fog of War 상호작용** | 상대가 **내 시야 밖이면 클라이언트는 점프 가능 여부를 계산할 수 없다.** §7 "유효 수 목록을 서버가 주지 않는다"와 정면으로 만난다. 서버가 거절로만 답할지, 거절이 §7 처럼 **의도된 추리 정보**인지, 턴당 횟수 제한을 걸지 결정해야 한다 |
-| 승리 판정 | `goals[]` 중 **아무 칸**에 도달하면 승리인지 명문화 (§11 의 L자 17칸) |
-
-> 재사용: `server/app/games/maze/core/move_validator.py` 에 2인 전제 구현이
-> 이미 있다. **규칙을 새로 발명하기 전에 현행 구현을 먼저 읽는다.**
-
-### ② 온라인 AI 좌석을 §1 에 반영 — 문서 불일치
-
-[`platform.md`](api/platform.md) §6 은 "온라인 AI 좌석은
-`game_participants.is_ai = true` 로 멀티 프로토콜을 그대로 재사용하고 서버
-엔진(`simple_ai.py`)이 둔다(MMR 미반영)"로 확정했다. 그런데 `maze.md` §1 은
-여전히 "솔로(AI 대전)는 100% 오프라인 / 클라이언트 AI 는 Dart" 만 말한다 —
-`maze.md` 에 `is_ai` 검색 **0건**이다. 두 문서가 어긋난다.
-
-### ③ 미결 표 정정
-
-`maze.md` 말미의 "**현재 미결 없음.**" 을 위 ①②로 교체한다. ①을 확정하면
-"확정된 항목" 표로 옮긴다.
-
-> **왜 이 절이 TODO 표가 아니라 여기 있는가:** 착수 시점이 미정인 항목이 아니라
-> **M3 의 선행 조건**이다. 그리고 `maze.md` 가 스스로 "미결 없음"이라 말하고
-> 있으므로, 그 문서만 읽고 M3 에 착수하는 것을 막을 기록이 여기 있어야 한다.
 
 ---
 
