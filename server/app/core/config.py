@@ -10,6 +10,7 @@
 
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import urlparse
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -72,6 +73,9 @@ class Settings(BaseSettings):
     room_ttl_sec: int = Field(default=3600, ge=1)
     # 매칭 MMR 범위 필터 (maze.md §3). Phase 1 은 끈다 — 큐 인구 확보 후 켠다
     match_mmr_filter_enabled: bool = False
+    # Pub/Sub 구독이 끊겼을 때 재구독 대기 (지수 백오프 최소 → 최대). M3 4단계 app/ws/bus.py
+    pubsub_reconnect_min_ms: int = Field(default=100, ge=1)
+    pubsub_reconnect_max_ms: int = Field(default=5000, ge=1)
 
     # -----------------------------------------------------------------------
     # 레이트 리미팅
@@ -92,6 +96,16 @@ class Settings(BaseSettings):
             # DB 번호가 없는 형태 (redis://host:6379) — 그대로 뒤에 붙인다
             return f"{self.redis_url}/{self.redis_limiter_db}"
         return f"{base}/{self.redis_limiter_db}"
+
+    @property
+    def redis_db_index(self) -> int:
+        """`redis_url` 의 논리 DB 번호 (없으면 0).
+
+        Pub/Sub 채널은 논리 DB 와 무관하게 서버 전역이다. 채널 이름에 이 번호를
+        접두어로 붙여 테스트(DB 1)와 앱(DB 0) 이벤트가 섞이지 않게 한다.
+        """
+        path = urlparse(self.redis_url).path.strip("/")
+        return int(path) if path.isdigit() else 0
 
     @property
     def is_production(self) -> bool:

@@ -7,9 +7,13 @@ docs/api/platform.md "Redis 키 스키마" 표가 정본이다.
 인원 수가 들어가는 키는 없다. `game` 은 게임 식별자(`maze_1p`), `mode` 는 배치
 테이블 키(`duel`/`trio`/…)다 — 모드가 늘어도 이 파일은 바뀌지 않는다.
 
-예약(아직 만들지 않음): `game:{id}:events`(4단계 Pub/Sub), `game:{id}:vision:{seat_no}`
-(5단계 시야), `game:{id}:clocks`·`{game}:deadlines`(6단계 시간 체계).
+Pub/Sub 채널(4단계)도 여기서 만든다. 키가 아니라 채널이다 — 아래 "이벤트 채널" 절.
+
+예약(아직 만들지 않음): `game:{id}:vision:{seat_no}`(5단계 시야),
+`game:{id}:clocks`·`{game}:deadlines`(6단계 시간 체계).
 """
+
+from app.core.config import settings
 
 # 테스트 픽스처가 정리할 접두어. 리미터 키(같은 테스트 DB)는 여기 없다
 PREFIXES = ("game:", "queue:", "match:", "room:", "user:")
@@ -94,3 +98,40 @@ def parse_activity(value: str) -> tuple[str, str]:
     """activity 값 → (종류, 나머지). 예: "game:abc" → ("game", "abc")"""
     kind, _, rest = value.partition(":")
     return kind, rest
+
+
+# ----- 이벤트 채널 (Pub/Sub) -----
+# 채널은 논리 DB 와 무관하게 Redis 서버 전역이다. 같은 Redis 를 쓰는 테스트(DB 1)와
+# 앱(DB 0)이 섞이지 않도록 `db{n}:` 를 붙인다. 워커는 패턴 하나로 전부 구독한다
+# (app/ws/bus.py) — 게임·방 단위로 나눠 두는 것은 나중에 구독 쪽만 동적 SUBSCRIBE 로
+# 바꿀 수 있게 하기 위해서다.
+
+EVENT_SCOPES = ("game", "match", "room")
+
+
+def channel_namespace() -> str:
+    return f"db{settings.redis_db_index}:"
+
+
+def events(scope: str, scope_id: str) -> str:
+    """scope 의 이벤트 채널. scope ∈ EVENT_SCOPES"""
+    if scope not in EVENT_SCOPES:
+        raise ValueError(f"Unknown event scope: {scope}")
+    return f"{channel_namespace()}{scope}:{scope_id}:events"
+
+
+def game_events(game_id: str) -> str:
+    return events("game", game_id)
+
+
+def match_events(match_id: str) -> str:
+    return events("match", match_id)
+
+
+def room_events(code: str) -> str:
+    return events("room", code)
+
+
+def event_patterns() -> tuple[str, ...]:
+    """PSUBSCRIBE 패턴 — 이 네임스페이스의 모든 이벤트 채널"""
+    return tuple(f"{channel_namespace()}{scope}:*:events" for scope in EVENT_SCOPES)

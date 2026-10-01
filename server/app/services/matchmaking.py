@@ -24,8 +24,9 @@ from app.core.config import settings
 from app.db import redis_keys as keys
 from app.db.redis_lock import LockTimeout, redis_lock, require_redis, store_errors
 from app.games.maze import GameState
-from app.services import activity
+from app.services import activity, events
 from app.services.activity import MultiplayerError
+from app.services.events import Publisher, redis_publisher
 from app.services.maze_game import GAME as MAZE, GameBusy, SeatPlayer, maze_games
 
 logger = logging.getLogger(__name__)
@@ -137,9 +138,11 @@ class Matchmaking:
         self,
         games: Optional[Mapping[str, GameService]] = None,
         rng_factory: Callable[[], random.Random] = random.Random,
+        publisher: Publisher = redis_publisher,
     ):
         self._games = dict(games) if games is not None else {MAZE: maze_games}
         self._rng_factory = rng_factory
+        self._publisher = publisher
 
     def _seats(self, game: str, mode: str) -> int:
         service = self._games.get(game)
@@ -228,6 +231,8 @@ class Matchmaking:
             )
             if not moved:
                 logger.warning("User %s left activity before match %s", p.user_id, match.match_id)
+        # 입장자가 아닌 좌석은 다른 워커에 붙어 있을 수 있다 — 발행으로 알린다
+        await self._publisher.publish(events.matched(match))
         return match
 
     async def mark_ready(self, match_id: str, user_id: int) -> Union[PendingMatch, GameState]:
@@ -249,8 +254,11 @@ class Matchmaking:
                 if not all(p.ready for p in match.players):
                     async with store_errors():
                         await redis.set(keys.match(match_id), match.to_json(), keepttl=True)
+                    seat_no = next(p.seat_no for p in match.players if p.user_id == user_id)
+                    await self._publisher.publish(events.match_ready(match, seat_no))
                     return match
 
+                # 게임 시작 통지는 create_game 이 발행한다 (출처는 하나)
                 state = await self._games[match.game].create_game(
                     mode=match.mode,
                     is_ranked=True,
@@ -298,6 +306,10 @@ class Matchmaking:
                 )
             requeued.append(p.user_id)
 
+        # 복귀·탈락 통지를 먼저 보내고, 이어서 성사되는 새 매치는 try_match 가 발행한다
+        await self._publisher.publish(
+            events.match_expired(match, ExpireResult(requeued, dropped, None))
+        )
         new_match = await self.try_match(match.game, match.mode) if requeued else None
         return ExpireResult(requeued, dropped, new_match)
 

@@ -23,8 +23,9 @@ from app.core.time import utcnow
 from app.db import redis_keys as keys
 from app.db.redis_lock import LockTimeout, redis_lock, require_redis, store_errors
 from app.games.maze import GameState
-from app.services import activity
+from app.services import activity, events
 from app.services.activity import MultiplayerError
+from app.services.events import Publisher, redis_publisher
 from app.services.matchmaking import GameService
 from app.services.maze_game import GAME as MAZE, GameBusy, SeatPlayer, maze_games
 
@@ -86,9 +87,11 @@ class Rooms:
         self,
         games: Optional[Mapping[str, GameService]] = None,
         code_factory: Callable[[], str] = _random_code,
+        publisher: Publisher = redis_publisher,
     ):
         self._games = dict(games) if games is not None else {MAZE: maze_games}
         self._code_factory = code_factory
+        self._publisher = publisher
 
     def _service(self, game: str) -> GameService:
         service = self._games.get(game)
@@ -138,6 +141,7 @@ class Rooms:
             async with store_errors():
                 await redis.delete(keys.room(room.code))
             raise
+        await self._publisher.publish(events.room_updated(room))
         return room
 
     async def join_room(self, code: str, user_id: int, nickname: str) -> Room:
@@ -157,6 +161,7 @@ class Rooms:
                            nickname=nickname, is_host=False),
             ))
             await self._save(redis, room)
+            await self._publisher.publish(events.room_updated(room))
             return room
 
     async def leave_room(self, user_id: int) -> LeaveResult:
@@ -177,7 +182,9 @@ class Rooms:
                 for uid in room.user_ids:
                     await activity.release(redis, uid, held)
                 others = [uid for uid in room.user_ids if uid != user_id]
-                return LeaveResult(room=room, dissolved=True, notify_user_ids=others)
+                result = LeaveResult(room=room, dissolved=True, notify_user_ids=others)
+                await self._publisher.publish(events.room_dissolved(result))
+                return result
 
             remaining = [p for p in room.players if p.user_id != user_id]
             room = replace(room, players=tuple(
@@ -185,6 +192,8 @@ class Rooms:
             ))
             await self._save(redis, room)
             await activity.release(redis, user_id, held)
+            # 떠난 사람도 받는다 — 다른 워커에 붙은 같은 유저의 화면이 방을 닫게 한다
+            await self._publisher.publish(events.room_updated(room, also_notify=[user_id]))
             return LeaveResult(room=room, dissolved=False, notify_user_ids=room.user_ids)
 
     async def set_ready(self, user_id: int, is_ready: bool = True) -> Union[Room, GameState]:
@@ -202,8 +211,10 @@ class Rooms:
             full = len(room.players) == room.capacity
             if not (full and all(p.is_ready for p in room.players)):
                 await self._save(redis, room)
+                await self._publisher.publish(events.room_updated(room))
                 return room
 
+            # 게임 시작 통지는 create_game 이 발행한다 (출처는 하나)
             state = await self._service(room.game).create_game(
                 mode=room.mode,
                 is_ranked=False,

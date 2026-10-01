@@ -8,7 +8,8 @@ docs/api/games/maze.md §8: 게임 상태의 권위는 Redis `game:<id>:state` �
 - 엔진(`app.games.maze`)은 저장소·유저를 모른다. 유저 ↔ 좌석 매핑은 `game:<id>:meta` 몫이다
 - 시작 시 DB 에 진행 중 행을 먼저 쓴다. §8 fail-safe 는 "DB 에는 진행 중인데 Redis 상태가
   없다"를 유실 판정 기준으로 쓴다
-- 메시지 전송은 하지 않는다. 결과를 돌려주면 핸들러(7단계)·Pub/Sub(4단계)이 전달한다
+- 상태를 쓴 직후(락 안에서) 이벤트를 발행만 한다(`app/services/events.py`). 소켓 전송은 ws 계층
+  구독 버스가 한다. 거절은 발행하지 않는다 — 행동한 사람에게만 응답한다(핸들러, 7단계)
 """
 
 import json
@@ -34,8 +35,9 @@ from app.db.repository import GameSessionRepository, ParticipantSeed, SeatResult
 from app.games.maze import GameState
 from app.games.maze.core.game_state import SCHEMA_VERSION
 from app.games.maze.core.layouts import get_layout
-from app.services import activity
+from app.services import activity, events
 from app.services.activity import MultiplayerError
+from app.services.events import Publisher, redis_publisher
 
 logger = logging.getLogger(__name__)
 
@@ -137,8 +139,13 @@ def seat_results(state: GameState) -> list[SeatResult]:
 class MazeGameService:
     """상태는 Redis·DB 에만 있다. 인스턴스는 의존성(DB 세션 팩토리)만 들고 있다"""
 
-    def __init__(self, session_factory: SessionFactoryProvider = _app_session_factory):
+    def __init__(
+        self,
+        session_factory: SessionFactoryProvider = _app_session_factory,
+        publisher: Publisher = redis_publisher,
+    ):
         self._session_factory = session_factory
+        self._publisher = publisher
 
     # ----- 생성·조회 -----
 
@@ -203,6 +210,7 @@ class MazeGameService:
             # Redis 에 상태가 없으면 이 게임은 진행할 수 없다 — DB 행을 무효로 닫는다
             await self._void_record(state.game_id)
             raise
+        await self._publisher.publish(events.game_started(meta))
         return state
 
     async def load_game(self, game_id: str) -> Optional[GameState]:
@@ -221,22 +229,31 @@ class MazeGameService:
     # ----- 행동 -----
 
     async def move(self, game_id: str, user_id: int, row: int, col: int) -> ActionOutcome:
-        return await self._act(game_id, user_id, lambda s, seat: s.move(seat, row, col))
+        return await self._act(
+            game_id, user_id, events.ACTION_MOVE, lambda s, seat: s.move(seat, row, col)
+        )
 
     async def place_wall(
         self, game_id: str, user_id: int, row: int, col: int, orientation: str
     ) -> ActionOutcome:
         return await self._act(
-            game_id, user_id, lambda s, seat: s.place_wall(seat, row, col, orientation)
+            game_id, user_id, events.ACTION_WALL,
+            lambda s, seat: s.place_wall(seat, row, col, orientation),
         )
 
     async def surrender(self, game_id: str, user_id: int) -> ActionOutcome:
         """즉시 탈락 (§9). 게임이 끝나는지는 엔진의 종료 조건이 정한다"""
-        return await self._act(game_id, user_id, lambda s, seat: s.eliminate(seat, "surrender"))
+        return await self._act(
+            game_id, user_id, events.ACTION_ELIMINATED,
+            lambda s, seat: s.eliminate(seat, "surrender"), reason="surrender",
+        )
 
     async def eliminate(self, game_id: str, seat_no: int, reason: str) -> ActionOutcome:
         """서버 사유 탈락 — 6단계 스위퍼가 time_forfeit / disconnect_forfeit 로 부른다"""
-        return await self._act(game_id, None, lambda s, _: s.eliminate(seat_no, reason))
+        return await self._act(
+            game_id, None, events.ACTION_ELIMINATED,
+            lambda s, _: s.eliminate(seat_no, reason), reason=reason, seat_no=seat_no,
+        )
 
     async def void_lost_game(self, game_id: str) -> None:
         """Redis 상태를 잃은 게임을 무효로 닫는다 (§8 fail-safe — 감지는 6단계)
@@ -249,6 +266,7 @@ class MazeGameService:
             raw_meta = await redis.get(keys.game_meta(game_id))
         if raw_meta is not None:
             meta = GameMeta.from_json(raw_meta)
+            await self._publisher.publish(events.game_voided(meta))
             for user_id in meta.human_user_ids:
                 await activity.release(redis, user_id, keys.activity_game(game_id))
             async with store_errors():
@@ -256,8 +274,21 @@ class MazeGameService:
 
     # ----- 내부 -----
 
-    async def _act(self, game_id: str, user_id: Optional[int], apply) -> ActionOutcome:
-        """락 → 읽기 → 판정 → 펜싱 저장 → (종료 시) 기록. user_id=None 은 서버 행위"""
+    async def _act(
+        self,
+        game_id: str,
+        user_id: Optional[int],
+        action: str,
+        apply,
+        *,
+        reason: Optional[str] = None,
+        seat_no: Optional[int] = None,
+    ) -> ActionOutcome:
+        """락 → 읽기 → 판정 → 펜싱 저장 → (종료 시) 기록 → 발행
+
+        user_id=None 은 서버 행위이고 그때는 seat_no 로 대상 좌석을 받는다.
+        action·reason 은 발행할 last_action 에만 쓴다 (좌표는 싣지 않는다).
+        """
         redis = require_redis()
         lock_key = keys.game_lock(game_id)
         try:
@@ -271,7 +302,6 @@ class MazeGameService:
                 state = _decode_state(raw_state)
                 meta = GameMeta.from_json(raw_meta)
 
-                seat_no = None
                 if user_id is not None:
                     seat_no = meta.seat_of(user_id)
                     if seat_no is None or state.seat(seat_no).is_eliminated:
@@ -292,6 +322,11 @@ class MazeGameService:
 
                 if ended:
                     await self._finalize(redis, state, meta)
+                if rejection is None:
+                    # 락 안에서 발행한다 — 같은 게임의 이벤트가 상태 순서대로 나간다
+                    await self._publisher.publish(events.game_updated(
+                        meta, state, seat_no=seat_no, action=action, reason=reason, ended=ended,
+                    ))
                 return ActionOutcome(rejection.value if rejection else None, state, ended)
         except LockTimeout as exc:
             raise GameBusy(str(exc)) from exc
