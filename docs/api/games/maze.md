@@ -224,7 +224,7 @@ MMR에 반영되지 않는 비랭크 경기다.
                "players": [ { "seat_no": 1, "nickname": "미로장인", "is_host": true } ] } }
 ```
 
-방 코드는 6자다 (현행 `room_manager.py:76` `ROOM_CODE_LENGTH = 6`).
+방 코드는 6자다 (`server/app/services/rooms.py` `ROOM_CODE_LENGTH = 6`).
 
 ### 방 참가
 
@@ -1279,7 +1279,7 @@ M3 3단계에서 정원을 그 테이블에서 받는다(`app/services/matchmaki
 | 4002 | 익명 계정 (로그인 필요) |
 | 4003 | 닉네임 미설정 |
 
-> 4001~4003은 신규다. 현행 `ws_game.py:161`은 4001만 쓴다.
+> 4001~4003은 신규다. 구 `ws_game.py`(M3 3단계에서 삭제)는 4001만 썼다. 4000~4003 은 7단계 핸들러가 구현한다.
 
 ---
 

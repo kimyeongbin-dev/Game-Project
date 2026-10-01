@@ -88,10 +88,11 @@
 
    > 판단 기준: **"인원이 4명이 되면 무엇을 고쳐야 하는가?"** 행 추가 외에
    > 스키마·코드 변경이 필요하면 아직 하드코딩이 남은 것이다.
-4. `match_queue`·`game_rooms` **테이블**과 in-process dataclass의 권위 경계 정리.
-   현재 같은 개념이 두 곳에 병존한다 (`app/db/models.py:115,150` vs
-   `app/ws/room_manager.py:37,80`)
-5. `app/ws/ws_game.py` 라우터를 `main.py`에 등록 (지금은 의도적으로 미등록)
+4. `match_queue`·`game_rooms` **테이블**과 in-process dataclass의 권위 경계 정리 —
+   **완료.** 테이블은 2단계, in-process `room_manager`·`matchmaking` 은 3단계에서 폐기했고
+   권위는 Redis 다 ([`api/platform.md`](api/platform.md) "Redis 키 스키마")
+5. maze WS 라우터를 `main.py`에 등록 — 7단계에서 §12 핸들러를 **새로 작성**한 뒤 등록한다
+   (구 `app/ws/ws_game.py` 는 3단계에서 삭제했다)
 6. **시야 엔진** — 3×3 차폐 판정 + 변 단위 `visible_edges` + 플레이어별 누적
    상태(`discovered_edges`·`last_seen_players`)를 Redis에 게임 수명 동안 보관
    ([`api/games/maze.md`](api/games/maze.md) §6)
@@ -111,7 +112,7 @@
 | 4 ✅ | 워커 간 전달을 Pub/Sub으로 — 서비스가 상태를 쓴 직후 발행, 워커당 패턴 구독 1개 + 재구독 후 재동기화, `connection_manager` 는 연결 맵만 | 2 | 3 |
 | 5 | 시야 엔진 | 6 | 1, 3 |
 | 6 | 시간 체계 | 7 | 0, 4 |
-| 7 | **maze WS 핸들러(§12) 신규 작성**(3단계 서비스 대상) + `main.py` 라우터 등록 + `--workers 2` 완료 판정 | 5 | 전부 |
+| 7 | **maze WS 핸들러(§12) 신규 작성**(3단계 서비스 대상) + `main.py` 라우터 등록 + 구독 버스 lifespan 배선 + `--workers 2` 완료 판정. **실제 다중 프로세스 확인 포함** — 4단계는 한 프로세스 안에 버스 2개를 띄워 흉내 냈을 뿐이다. 아래 "완료 판정" 참조 | 5 | 전부 |
 
 > 작업 3(엔진)이 작업 1·4보다 먼저다. 좌석 모델(`seat_no`, `goals[]`, `eliminated`)이
 > Redis 키 스키마와 DB 스키마 양쪽의 입력이기 때문이다. 뒤에 하면 둘 다 2인용으로
@@ -135,6 +136,13 @@
 **완료 판정:** `server/Dockerfile` prod의 `--workers`를 2 이상으로 올리고
 매칭이 정상 동작해야 한다. 현재 `Dockerfile:120`에서 `1`로 고정되어 있고,
 그 이유가 바로 이 마일스톤이다.
+
+7단계에서 **실제 uvicorn 워커 2개**로 아래를 확인한다(4단계 테스트는 한 프로세스 안의 버스 2개였다):
+
+- 좌석들이 서로 다른 워커에 붙은 상태에서 매칭·방·게임 이벤트가 전원에게 좌석별 내용으로 간다
+  (어느 워커에 붙었는지는 E1 처럼 응답의 pid 로 판별한다)
+- 한 워커의 구독 연결만 `CLIENT KILL ID` 로 끊으면, 그 워커만 재구독하고 소켓 전원이 재동기화를 받는다
+- 한 워커를 죽여도 다른 워커에 붙은 좌석의 게임이 이어지고, 재접속하면 상태가 복원된다
 
 ### M4 — 리버스 프록시 + E2E 서비스 흐름 검증
 
@@ -163,7 +171,8 @@
 | :--- | :--- | :--- |
 | Alembic 도입 | 스키마 생성이 `app/db/config.py` 의 `create_all` 뿐이다. `create_all` 은 기존 테이블을 바꾸지도 지우지도 않아 스키마 변경 시 DB 를 손으로 리셋해야 한다(M3 2단계에서 개발 DB 를 1회 리셋했다) | **첫 운영 배포 전 필수.** 지금 도입하지 않은 이유: 운영 DB·보존할 데이터가 없고, `users` 가 인증 작업에서 다시 전면 개편된다 — 베이스라인을 지금 만들면 곧 다시 쓴다 (2026-10-02 사용자 결정) |
 | CORS 오리진 제한 | `app/main.py:96`이 `allow_origins=["*"]` | 개발 편의. **프로덕션 배포 전 필수**. M4에서 처리 |
-| WS 라우터 미등록 | `app/ws/ws_game.py`가 `main.py`에 등록되어 있지 않다 | 의도적. 구 Quoridor 프로토콜이며 §4.1 재설계 대기. 동작하는 기능으로 오인되지 않게 하려는 것. 판정 내역은 `app/ws/__init__.py` docstring |
+| WS 라우터 미등록 | maze WS 라우터가 아직 없다. 구 Quoridor 핸들러 `app/ws/ws_game.py` 는 M3 3단계에서 삭제했다 | 의도적. M3 7단계에서 §12 핸들러를 새로 작성해 `main.py` 에 등록하고, 구독 버스(`app/ws/bus.py`) start/stop 도 lifespan 에 함께 건다. 현황은 `app/ws/__init__.py` docstring |
+| CI 비밀번호 생성 단계 첫 실행 확인 | `test-and-merge.yml` server-tests 잡의 `Generate Redis password` 단계(커밋 `e39b806`, compose 비밀번호 기본값 제거)가 아직 한 번도 실행되지 않았다. 워크플로가 `dev-test` push 에서만 돈다 | **재구조화 완료 후 첫 `dev-test` push 때** 확인한다 — 잡 통과, 로그에 비밀번호가 마스킹됨, `docker compose` 가 `:?` 필수값 오류 없이 뜸. 로컬에서는 같은 조건(무작위 비밀번호 + 필수값)으로 확인했다 |
 | 스케줄러 제거 판단 | `app/services/scheduler/`는 일일 리셋 전용이고, 랭킹이 MMR로 단순화되면 쓰이지 않는다 | **완료**(M3 2단계, 커밋 `3e889a9`). 근거 3개: ① 시계 만료를 ZSET 스위퍼가 처리한다 ② `refresh_tokens` 정리가 주기 작업을 쓰지 않는다 ③ `daily_champions` 폐기로 `daily_reset.py`의 유일한 용도가 소멸한다 → `app/services/scheduler/`와 `apscheduler==3.10.4` 제거, `uv.lock` 재생성(전이 의존성 `pytz`·`tzdata`·`tzlocal` 동반 제거) |
 
 ---
