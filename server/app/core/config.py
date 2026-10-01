@@ -58,6 +58,22 @@ class Settings(BaseSettings):
     redis_max_connections: int = 50
 
     # -----------------------------------------------------------------------
+    # 멀티플레이 상태 (Redis 논리 DB 0) — 키 스키마는 app/db/redis_keys.py
+    # -----------------------------------------------------------------------
+    # 게임·매치·방 락 (SET NX PX). TTL 은 임계 구역 최대 길이보다 길어야 한다
+    game_lock_ttl_ms: int = Field(default=5000, ge=100)
+    # 락 대기 상한. 넘기면 GameBusy / LockTimeout
+    game_lock_wait_ms: int = Field(default=2000, ge=0)
+    # 종료된 게임 state·meta 보존 시간 — 재접속자가 game_end 를 받을 수 있게
+    game_finished_ttl_sec: int = Field(default=300, ge=1)
+    # 매칭 성사 후 ready 대기 기록의 안전망 TTL. 실제 기한 감지는 M3 6단계 스위퍼
+    match_record_ttl_sec: int = Field(default=60, ge=1)
+    # 친구 대전 방 TTL. 방이 바뀔 때마다 갱신한다
+    room_ttl_sec: int = Field(default=3600, ge=1)
+    # 매칭 MMR 범위 필터 (maze.md §3). Phase 1 은 끈다 — 큐 인구 확보 후 켠다
+    match_mmr_filter_enabled: bool = False
+
+    # -----------------------------------------------------------------------
     # 레이트 리미팅
     # -----------------------------------------------------------------------
     rate_limit_enabled: bool = True
