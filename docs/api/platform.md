@@ -828,7 +828,9 @@ Redis와 이중 기록이 되고 정합성 문제가 생긴다. 방 기록이 �
 | `room:{code}` | STRING | `{code, game, mode, capacity, status, game_id, created_at, players:[{seat_no, user_id, nickname, is_host, is_ready}]}` | `room_ttl_sec`(3600), 변경마다 갱신 | 방 서비스 | 방 서비스 |
 | `room:{code}:lock` | STRING | 토큰 | PX | 락 헬퍼 | 락 헬퍼 |
 | `user:{uid}:activity` | STRING | `queue:{game}:{mode}` \| `match:{id}` \| `room:{code}` \| `game:{id}` | 담는 대상과 같게(게임은 없음) | 전 서비스 — 진입 `SET NX`, 전이·해제 CAS | 전 서비스, 재접속 |
-| `game:{id}:events` | Pub/Sub | — | — | **4단계에서 신설** | |
+| `db{n}:game:{id}:events` | Pub/Sub 채널 | 이벤트 JSON `{kind, scope, scope_id, recipients, hint, seq}` — 권위 없음 | — | 게임 서비스(상태를 쓴 직후, 락 안) | 워커별 구독 버스 |
+| `db{n}:match:{id}:events` | Pub/Sub 채널 | 〃 | — | 매치메이킹 | 〃 |
+| `db{n}:room:{code}:events` | Pub/Sub 채널 | 〃 | — | 방 서비스 | 〃 |
 | `game:{id}:vision:{seat_no}` | — | 발견 맵 | — | **5단계에서 신설** | |
 | `game:{id}:clocks`, `{game}:deadlines` | — | 시계, 데드라인 ZSET | — | **6단계에서 신설** | |
 
@@ -848,6 +850,22 @@ Redis와 이중 기록이 되고 정합성 문제가 생긴다. 방 기록이 �
 - **시작 시 DB 를 먼저 쓴다.** `game_sessions` 에 진행 중 행을 만든 뒤 Redis 에 상태를 쓴다. §8 fail-safe 는
   "DB 에는 진행 중인데 Redis 상태가 없다"를 유실 판정 기준으로 쓴다. Redis 쓰기가 실패하면 그 행을 `void` 한다
 - **테스트는 논리 DB 1** 을 쓰고, 상태 접두어만 지운다. 같은 DB 의 리미터 카운터를 건드리지 않으려고 `FLUSHDB` 를 쓰지 않는다
+
+**이벤트 채널 — 확정 (M3 4단계)**
+
+- **채널에는 권위가 없다.** Pub/Sub 은 at-most-once 다([실측](../research/2026-10-01-워커-redis-실측.md) E5).
+  이벤트는 "바뀌었다"는 통지일 뿐이고, 게임 상태는 받은 워커가 Redis 에서 다시 읽어 **좌석별로** 만든다
+  ([`games/maze.md`](games/maze.md) §6). 채널은 모든 워커에 가므로 `hint` 에는 공개 정보만 싣는다 — 좌표·벽·상태는 없다
+- **수신자는 발행자가 정한다.** 발행자는 방금 락 안에서 Redis 를 읽었다(meta.players / room.players / match.players).
+  받는 워커는 그 목록과 자기 연결 맵의 교집합에만 보낸다. 받는 쪽이 다시 읽으면 그 사이 바뀔 수 있고(해산된 방은 키가 없다)
+  이벤트마다 워커 수만큼 조회가 는다
+- **워커당 패턴 구독 하나.** 게임·방마다 SUBSCRIBE 하면 유저가 붙은 직후 구독이 끝나기 전의 메시지를 잃고, 채널별
+  참조 카운트(프로세스 내 소속 맵)가 다시 생긴다. 턴제라 이벤트가 적어 모든 워커가 전부 받아도 싸다. 채널을 게임·방
+  단위로 나눠 둔 것은 팬아웃이 커지면 구독 쪽만 동적 구독으로 바꿀 수 있게 하기 위해서다
+- **`db{n}:` 네임스페이스.** Pub/Sub 채널은 논리 DB 와 무관하게 **서버 전역**이다. 같은 Redis 를 쓰는 테스트(DB 1)의
+  이벤트가 앱(DB 0) 워커로 가지 않도록 `REDIS_URL` 의 DB 번호를 접두어로 붙인다
+- **끊기면 재구독 → 재동기화.** 버스는 지수 백오프로 새 연결에 다시 구독하고, 직후 자기 소켓 전원에게 각자의
+  활동(`user:{uid}:activity`)에 맞는 현재 상태를 보낸다. 유실된 이벤트는 이것으로 메워진다
 
 ---
 

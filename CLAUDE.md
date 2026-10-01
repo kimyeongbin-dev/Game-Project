@@ -135,7 +135,7 @@ games/ ┘
 ### 알아둘 설계 패턴
 - **Graceful Degradation**: DB 연결 실패 시 서버는 메모리 전용 모드로 계속 동작한다. DB 작업 전에 `is_db_available()`을 확인한다.
 - **게임 상태 직렬화**: `GameState.to_dict()` / `from_dict()` 가 Redis `game:<id>:state` 값 전체다(M3 3단계에서 저장). `schema_version` 이 다르면 복원을 거부한다.
-- **멀티플레이 상태는 Redis 에만**: `services/maze_game.py`(게임 상태·락·종료 기록), `services/matchmaking.py`(큐), `services/rooms.py`(방), `services/activity.py`(유저당 활동 하나). 서비스 인스턴스는 상태를 갖지 않는다. 키는 `app/db/redis_keys.py` 에서만 만들고, 스키마 표는 `docs/api/platform.md` "Redis 키 스키마"에 있다.
+- **멀티플레이 상태는 Redis 에만**: `services/maze_game.py`(게임 상태·락·종료 기록), `services/matchmaking.py`(큐), `services/rooms.py`(방), `services/activity.py`(유저당 활동 하나). 서비스 인스턴스는 상태를 갖지 않는다. 상태를 쓴 직후 `services/events.py` 로 이벤트를 **발행만** 하고(권위 없음, at-most-once), 워커마다 `ws/bus.py` 가 구독해 자기 소켓에만 보낸다. 키는 `app/db/redis_keys.py` 에서만 만들고, 스키마 표는 `docs/api/platform.md` "Redis 키 스키마"에 있다.
 - **하드웨어 금고 키 보관**: AES/HMAC 키를 소스에 하드코딩하지 않는다. 앱 최초 실행 시 기기 내부에서 난수 생성해 Keystore/Keychain에만 보관한다 (§3.2).
 - **개수를 박지 않는다**: 인원·게임·모드 수를 코드나 스키마에 고정값으로 쓰지 않는다. 판단 기준은 "인원이 4명이 되면 무엇을 고쳐야 하는가?" — 행 추가 외에 변경이 필요하면 하드코딩이다 (`docs/api/platform.md` §5 확장성 원칙).
 
@@ -151,7 +151,7 @@ games/ ┘
 | `server/app/core/` | `config.py`(환경변수 단일 진입점), `time.py`(표준 utcnow) |
 | Redis | 연결 계층(`app/db/redis.py`) + lifespan 배선 완료. graceful degradation |
 | 레이트 리미터 | **배선 완료** — Redis 저장소, 커스텀 429, `main.py` 등록. 테스트 10건 |
-| `server/app/ws/` | `connection_manager` 만 남았다(3단계에서 구 핸들러·큐·방 삭제). Pub/Sub 은 4단계, maze WS 핸들러는 7단계 신규 작성 |
+| `server/app/ws/` | **Pub/Sub 전달 완료**(M3 4단계) — `connection_manager`(연결 맵만), `bus`(패턴 구독·재구독·재동기화), `delivery`(좌석별 화면 §6 자리, 시야는 5단계). maze WS 핸들러·lifespan 배선은 7단계 신규 작성 |
 | `client/lib/**` | 디렉토리 골격 + 허브 placeholder만 존재 |
 | 나머지 5종 게임 | 미착수 |
 
@@ -208,6 +208,6 @@ git show origin/develop:<구 경로> > <새 구조의 경로>
 
 ## 주의사항
 - `docs/quoridor/`는 재설계 대기 중인 **구 API 문서**다. 새 작업의 근거로 삼지 않는다.
-- `server/app/ws/` 에는 연결 관리(`connection_manager`)만 있고 WS 라우터가 없다. maze WS 핸들러는 M3 7단계에서 `services/` 를 대상으로 새로 작성한다. 구 Quoridor 핸들러는 git 히스토리에서만 참고한다.
+- `server/app/ws/` 에는 연결 맵·구독 버스·전달(`connection_manager`·`bus`·`delivery`)만 있고 WS 라우터가 없다. 버스는 아직 lifespan 에 배선되지 않았다. maze WS 핸들러는 M3 7단계에서 `services/` 를 대상으로 새로 작성한다. 구 Quoridor 핸들러는 git 히스토리에서만 참고한다.
 - `client/android/key.properties`와 keystore는 절대 커밋하지 않는다. 릴리스 빌드 시 볼륨 마운트로 주입한다.
 - 배포 빌드에는 `--obfuscate` 옵션을 적용한다 (§3.2).

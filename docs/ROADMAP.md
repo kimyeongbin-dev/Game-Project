@@ -18,7 +18,7 @@
 | **인프라** | `M1`~`M4` | 이 문서 | 개발·배포 기반 정비 |
 
 두 축은 독립이다. 현재 위치는 **출시 `Phase 1`(Android) 진행 중 + 인프라
-`M2` 완료 + `M3` 3단계(Redis 이전) 완료**다.
+`M2` 완료 + `M3` 4단계(워커 간 Pub/Sub) 완료**다.
 
 > ⚠️ **git log 읽을 때 주의:** 커밋 `f831c0b`·`e189199`의 제목은 각각
 > "Phase 1"·"Phase 2"로 적혀 있다. 이 표기가 굳기 전에 작성된 것이며,
@@ -108,7 +108,7 @@
 | 2 ✅ | `db/models.py` 정리 — `game_participants`+`seat_no`, `match_queue`·`game_rooms` 폐기, `daily_champions`·스케줄러·`apscheduler` 제거 | 3 (DB) + 4 | 1 |
 | 2.5 ⏸ | **역할별 독립 분석 (코드 변경 없음) — 보류** — 게임 리뷰어 → 스키마 최적화 → 악의적 공격자 → 클린 코드. 산출물은 `docs/research/` 보고서 + 제안별 채택 결정표. 채택 항목이 3단계 이후 계획서의 입력이 된다 | (신설) | 2 |
 | 3 ✅ | 큐·방·게임 상태를 Redis로 — 처음부터 `players[]`/`seat_no` 스키마. 구 `ws_game`·`room_manager`·`matchmaking`·`quoridor_service` 삭제 | 1 | 0, 1, 2 |
-| 4 | 워커 간 전달을 Pub/Sub으로 | 2 | 3 |
+| 4 ✅ | 워커 간 전달을 Pub/Sub으로 — 서비스가 상태를 쓴 직후 발행, 워커당 패턴 구독 1개 + 재구독 후 재동기화, `connection_manager` 는 연결 맵만 | 2 | 3 |
 | 5 | 시야 엔진 | 6 | 1, 3 |
 | 6 | 시간 체계 | 7 | 0, 4 |
 | 7 | **maze WS 핸들러(§12) 신규 작성**(3단계 서비스 대상) + `main.py` 라우터 등록 + `--workers 2` 완료 판정 | 5 | 전부 |
