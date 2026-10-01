@@ -102,8 +102,6 @@ class RankingService:
     async def get_leaderboard(self, limit: int = 20) -> list[dict]:
         """리더보드 조회"""
         users = await self.ranking_repo.get_leaderboard(limit)
-        yesterday_champion = await self.ranking_repo.get_yesterday_champion()
-        champion_nickname = yesterday_champion.nickname if yesterday_champion else None
 
         result = []
         for idx, user in enumerate(users, start=1):
@@ -113,8 +111,7 @@ class RankingService:
                 "score": user.score,
                 "wins": user.wins,
                 "losses": user.losses,
-                "best_turn_count": user.best_turn_count,
-                "is_champion": user.nickname == champion_nickname
+                "best_turn_count": user.best_turn_count
             })
 
         return result

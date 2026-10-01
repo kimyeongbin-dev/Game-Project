@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import (
     GameSession, GameStatus, GameMode,
-    User, DailyChampion, MatchQueue, MatchQueueStatus, GameRoom, RoomStatus,
+    User,
     utcnow
 )
 
@@ -329,19 +329,6 @@ class UserRepository:
         await self.session.refresh(user)
         return user
 
-    async def reset_stats(self, user_id: int) -> bool:
-        """유저 통계 리셋 (일일 리셋용)"""
-        user = await self.get_by_id(user_id)
-        if not user:
-            return False
-
-        user.score = 0
-        user.wins = 0
-        user.losses = 0
-        user.best_turn_count = None
-        await self.session.commit()
-        return True
-
     async def delete_user(self, user_id: int) -> bool:
         """유저 삭제"""
         user = await self.get_by_id(user_id)
@@ -351,22 +338,6 @@ class UserRepository:
         await self.session.delete(user)
         await self.session.commit()
         return True
-
-    async def delete_inactive_users(self, exclude_user_id: Optional[int] = None) -> int:
-        """게임 중이 아닌 유저 삭제 (일일 리셋용)"""
-        query = delete(User).where(User.current_game_id == None)
-        if exclude_user_id:
-            query = query.where(User.id != exclude_user_id)
-
-        result = await self.session.execute(query)
-        await self.session.commit()
-        return result.rowcount
-
-    async def delete_all_users(self) -> int:
-        """모든 유저 삭제"""
-        result = await self.session.execute(delete(User))
-        await self.session.commit()
-        return result.rowcount
 
 
 class RankingRepository:
@@ -387,19 +358,6 @@ class RankingRepository:
             .limit(limit)
         )
         return list(result.scalars().all())
-
-    async def get_top_user(self) -> Optional[User]:
-        """1위 유저 조회"""
-        result = await self.session.execute(
-            select(User)
-            .order_by(
-                User.score.desc(),
-                User.wins.desc(),
-                User.best_turn_count.asc().nullslast()
-            )
-            .limit(1)
-        )
-        return result.scalar_one_or_none()
 
     async def get_user_rank(self, user_id: int) -> int:
         """유저의 현재 순위 조회"""
@@ -433,51 +391,3 @@ class RankingRepository:
         """총 유저 수"""
         result = await self.session.execute(select(func.count(User.id)))
         return result.scalar() or 0
-
-    async def save_daily_champion(
-        self,
-        nickname: str,
-        score: float,
-        wins: int,
-        losses: int,
-        best_turn_count: Optional[int],
-        champion_date: date,
-        preserved_user_id: Optional[int] = None
-    ) -> DailyChampion:
-        """일일 챔피언 저장"""
-        champion = DailyChampion(
-            nickname=nickname,
-            score=score,
-            wins=wins,
-            losses=losses,
-            best_turn_count=best_turn_count,
-            champion_date=champion_date,
-            reset_at=utcnow(),
-            preserved_user_id=preserved_user_id
-        )
-        self.session.add(champion)
-        await self.session.commit()
-        await self.session.refresh(champion)
-        return champion
-
-    async def get_champion_by_date(self, target_date: date) -> Optional[DailyChampion]:
-        """특정 날짜의 챔피언 조회"""
-        result = await self.session.execute(
-            select(DailyChampion).where(DailyChampion.champion_date == target_date)
-        )
-        return result.scalar_one_or_none()
-
-    async def get_recent_champions(self, days: int = 7) -> list[DailyChampion]:
-        """최근 N일 챔피언 목록"""
-        result = await self.session.execute(
-            select(DailyChampion)
-            .order_by(DailyChampion.champion_date.desc())
-            .limit(days)
-        )
-        return list(result.scalars().all())
-
-    async def get_yesterday_champion(self) -> Optional[DailyChampion]:
-        """어제의 챔피언 조회"""
-        from datetime import timedelta
-        yesterday = date.today() - timedelta(days=1)
-        return await self.get_champion_by_date(yesterday)

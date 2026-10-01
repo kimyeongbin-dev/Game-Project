@@ -4,7 +4,6 @@ Ranking Repository Tests
 """
 
 import pytest
-from datetime import date, timedelta
 from app.db.repository import UserRepository, RankingRepository
 
 
@@ -73,23 +72,6 @@ class TestRankingRepository:
         assert leaderboard[0].nickname == "morewins"
         assert leaderboard[1].nickname == "lesswins"
 
-    async def test_get_top_user(
-        self,
-        user_repository: UserRepository,
-        ranking_repository: RankingRepository
-    ):
-        """1위 유저 조회 테스트"""
-        # 유저 생성
-        user1, _ = await user_repository.create("first", "pass1234")
-        user2, _ = await user_repository.create("second", "pass1234")
-
-        await user_repository.update_score(user1.id, 100, True, 10)
-        await user_repository.update_score(user2.id, 50, True, 15)
-
-        top_user = await ranking_repository.get_top_user()
-        assert top_user is not None
-        assert top_user.nickname == "first"
-
     async def test_get_user_rank(
         self,
         user_repository: UserRepository,
@@ -130,84 +112,6 @@ class TestRankingRepository:
 
         total = await ranking_repository.get_total_users()
         assert total == 3
-
-    async def test_save_daily_champion(
-        self,
-        ranking_repository: RankingRepository
-    ):
-        """일일 챔피언 저장 테스트"""
-        today = date.today()
-
-        champion = await ranking_repository.save_daily_champion(
-            nickname="champion",
-            score=100.5,
-            wins=20,
-            losses=5,
-            best_turn_count=12,
-            champion_date=today,
-            preserved_user_id=1
-        )
-
-        assert champion is not None
-        assert champion.nickname == "champion"
-        assert champion.score == 100.5
-        assert champion.wins == 20
-        assert champion.champion_date == today
-
-    async def test_get_champion_by_date(
-        self,
-        ranking_repository: RankingRepository
-    ):
-        """날짜별 챔피언 조회 테스트"""
-        today = date.today()
-        yesterday = today - timedelta(days=1)
-
-        # 챔피언 저장
-        await ranking_repository.save_daily_champion(
-            nickname="todaychamp",
-            score=100,
-            wins=20,
-            losses=5,
-            best_turn_count=12,
-            champion_date=today
-        )
-
-        # 오늘 챔피언 조회
-        champion = await ranking_repository.get_champion_by_date(today)
-        assert champion is not None
-        assert champion.nickname == "todaychamp"
-
-        # 어제 챔피언 조회 (없음)
-        yesterday_champion = await ranking_repository.get_champion_by_date(yesterday)
-        assert yesterday_champion is None
-
-    async def test_get_recent_champions(
-        self,
-        ranking_repository: RankingRepository
-    ):
-        """최근 챔피언 목록 테스트"""
-        today = date.today()
-
-        # 3일치 챔피언 저장
-        for i in range(3):
-            target_date = today - timedelta(days=i)
-            await ranking_repository.save_daily_champion(
-                nickname=f"champ{i}",
-                score=100 - i * 10,
-                wins=20 - i,
-                losses=5,
-                best_turn_count=12 + i,
-                champion_date=target_date
-            )
-
-        # 최근 7일 챔피언 조회
-        champions = await ranking_repository.get_recent_champions(7)
-        assert len(champions) == 3
-
-        # 날짜 내림차순 정렬 확인
-        assert champions[0].nickname == "champ0"  # 오늘
-        assert champions[1].nickname == "champ1"  # 어제
-        assert champions[2].nickname == "champ2"  # 그저께
 
 
 class TestRankingService:

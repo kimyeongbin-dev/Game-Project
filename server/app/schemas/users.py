@@ -32,7 +32,6 @@ class UserInfoResponse(BaseModel):
     losses: int
     best_turn_count: Optional[int] = None
     rank: Optional[int] = None
-    is_champion: bool = False  # 전날 챔피언 여부
 
 
 class RegisterResponse(BaseModel):

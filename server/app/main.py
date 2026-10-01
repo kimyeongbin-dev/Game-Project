@@ -23,7 +23,6 @@ from app.middleware.rate_limiter import (
     limiter,
     rate_limit_exceeded_handler,
 )
-from app.services.scheduler import setup_scheduler, shutdown_scheduler
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,8 +35,8 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """애플리케이션 생명주기.
 
-    기동 순서: DB -> Redis -> 스케줄러
-    종료 순서: 역순 (스케줄러가 DB 를 쓰므로 먼저 멈춘다)
+    기동 순서: DB -> Redis
+    종료 순서: 역순
 
     DB 와 Redis 는 모두 graceful degradation 이다 — 연결 실패로 기동이
     막히지 않는다. 대신 어떤 기능이 비활성인지 로그로 남긴다.
@@ -50,7 +49,6 @@ async def lifespan(app: FastAPI):
 
     await init_db()
     await init_redis()
-    setup_scheduler()
 
     logger.info(
         "Startup complete — db=%s redis=%s rate_limit=%s",
@@ -61,7 +59,6 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    shutdown_scheduler()
     await close_redis()
     await close_db()
     logger.info("Shutdown complete")

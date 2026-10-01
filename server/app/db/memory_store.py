@@ -6,7 +6,7 @@ DB 없이 테스트용 인메모리 저장소
 import secrets
 import bcrypt
 import logging
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 from dataclasses import dataclass, field
 from app.core.time import utcnow
@@ -41,26 +41,12 @@ class MemoryUser:
         return utcnow() < self.token_expires_at
 
 
-@dataclass
-class MemoryDailyChampion:
-    """인메모리 일일 챔피언"""
-    id: int
-    nickname: str
-    score: float
-    wins: int
-    losses: int
-    best_turn_count: Optional[int]
-    champion_date: date
-    reset_at: datetime
-
-
 class InMemoryUserStore:
     """인메모리 유저 저장소 (싱글톤)"""
 
     def __init__(self):
         self._users: Dict[int, MemoryUser] = {}
         self._next_id = 1
-        self._champions: List[MemoryDailyChampion] = []
         self._initialized = False
 
     def _hash_password(self, password: str) -> str:
@@ -85,7 +71,7 @@ class InMemoryUserStore:
             ("tester1", "tester1", 0.0, 0, 0, None),
             ("tester2", "tester2", 0.0, 0, 0, None),
 
-            # 전날 챔피언
+            # 최상위 점수
             ("champion", "champion", 100.0, 10, 2, 15),
 
             # 리더보드 테스트용 (다양한 순위)
@@ -126,19 +112,6 @@ class InMemoryUserStore:
             )
             self._users[self._next_id] = user
             self._next_id += 1
-
-        # champion을 어제의 챔피언으로 등록
-        yesterday = date.today() - timedelta(days=1)
-        self._champions.append(MemoryDailyChampion(
-            id=1,
-            nickname="champion",
-            score=100.0,
-            wins=10,
-            losses=2,
-            best_turn_count=15,
-            champion_date=yesterday,
-            reset_at=utcnow()
-        ))
 
         self._initialized = True
         logger.info(f"[메모리 초기화] 테스트 유저 {len(test_users)}명")
@@ -219,18 +192,6 @@ class InMemoryUserStore:
             if user.id == user_id:
                 return idx
         return 0
-
-    def get_yesterday_champion(self) -> Optional[MemoryDailyChampion]:
-        """어제의 챔피언 조회"""
-        yesterday = date.today() - timedelta(days=1)
-        for champ in self._champions:
-            if champ.champion_date == yesterday:
-                return champ
-        return None
-
-    def get_recent_champions(self, days: int = 7) -> List[MemoryDailyChampion]:
-        """최근 N일 챔피언 목록"""
-        return sorted(self._champions, key=lambda c: c.champion_date, reverse=True)[:days]
 
     def update_heartbeat(self, user_id: int) -> bool:
         """하트비트 업데이트"""

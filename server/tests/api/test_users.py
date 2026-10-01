@@ -189,24 +189,3 @@ class TestUserRepository:
         # 상태 확인
         user = await user_repository.get_by_id(user.id)
         assert user.is_online is False
-
-    async def test_reset_stats(self, user_repository: UserRepository):
-        """통계 리셋 테스트"""
-        # 유저 생성 및 점수 쌓기
-        user, _ = await user_repository.create("resettest", "password123")
-        await user_repository.update_score(user.id, 10, True, 15)
-        await user_repository.update_score(user.id, 3, True, 20)
-
-        user = await user_repository.get_by_id(user.id)
-        assert user.score == 13
-        assert user.wins == 2
-
-        # 리셋
-        success = await user_repository.reset_stats(user.id)
-        assert success is True
-
-        user = await user_repository.get_by_id(user.id)
-        assert user.score == 0
-        assert user.wins == 0
-        assert user.losses == 0
-        assert user.best_turn_count is None

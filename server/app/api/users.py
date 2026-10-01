@@ -166,10 +166,6 @@ async def get_my_info(authorization: Optional[str] = Header(None)):
         ranking_repo = RankingRepository(session)
         rank = await ranking_repo.get_user_rank(user.id)
 
-        # 전날 챔피언 체크
-        yesterday_champion = await ranking_repo.get_yesterday_champion()
-        is_champion = yesterday_champion and yesterday_champion.nickname == user.nickname
-
         return UserInfoResponse(
             user_id=user.id,
             nickname=user.nickname,
@@ -177,8 +173,7 @@ async def get_my_info(authorization: Optional[str] = Header(None)):
             wins=user.wins,
             losses=user.losses,
             best_turn_count=user.best_turn_count,
-            rank=rank,
-            is_champion=is_champion
+            rank=rank
         )
 
 

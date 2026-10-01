@@ -15,14 +15,12 @@ class LeaderboardEntry(BaseModel):
     wins: int
     losses: int
     best_turn_count: Optional[int] = None
-    is_champion: bool = False  # 전날 챔피언 표시
 
 
 class LeaderboardResponse(BaseModel):
     """리더보드 응답"""
     entries: list[LeaderboardEntry]
     total_players: int
-    last_reset: Optional[str] = None  # 마지막 리셋 시간
 
 
 class MyRankResponse(BaseModel):
@@ -34,29 +32,6 @@ class MyRankResponse(BaseModel):
     losses: int
     best_turn_count: Optional[int] = None
     total_players: int
-
-
-class DailyChampionEntry(BaseModel):
-    """일일 챔피언 항목"""
-    date: str
-    nickname: str
-    score: float
-    wins: int
-    losses: int = 0
-    best_turn_count: Optional[int] = None
-
-
-class ChampionResponse(BaseModel):
-    """챔피언 응답 (단일)"""
-    success: bool
-    champion: Optional[DailyChampionEntry] = None
-    message: str
-
-
-class ChampionsResponse(BaseModel):
-    """챔피언 목록 응답"""
-    champions: list[DailyChampionEntry]
-    count: int
 
 
 # ===== 점수 계산 관련 =====
