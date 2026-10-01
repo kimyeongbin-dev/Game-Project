@@ -1,0 +1,16 @@
+{
+  "plansDirectory": "docs/plans",
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && bash scripts/sweep-plans.sh",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}

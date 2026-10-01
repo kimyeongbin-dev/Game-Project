@@ -116,7 +116,14 @@ docs/_private/
 # ===========================
 # Claude Code
 # ===========================
-.claude/
+# 디렉토리째(`.claude/`) 무시하면 하위 파일을 `!` 로 되살릴 수 없다.
+# 내용물만 무시해야 아래 예외가 동작한다.
+.claude/*
+# 프로젝트 공용 설정은 커밋한다 — plansDirectory 와 SessionEnd 훅(계획서
+# 회수)이 여기 있다. 이것까지 무시하면 클론마다 손으로 다시 설정해야 하고,
+# 실제로 한 번 잊어 계획서를 저장소 밖에 흘렸다 (docs/plans/README.md 참조).
+# 개인·머신 종속 설정은 settings.local.json 에 두고 계속 무시한다.
+!.claude/settings.json
 
 # ===========================
 # FastAPI / Backend

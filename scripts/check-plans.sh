@@ -7,16 +7,18 @@
 # 그 자리에 두면 새 세션이 존재를 모르고, 컨텍스트를 비우면 계획의 근거·제외
 # 범위를 추적할 수 없다. 실제로 초판 API 설계서 계획이 이렇게 소실됐다.
 #
-# 이 저장소는 `plansDirectory` 설정으로 생성 위치 자체를 `docs/plans/` 로
-# 돌려놓는다. 따라서 **유실은 구조적으로 막히고**, 남는 위험은 이름과 머리글이
-# 규약을 벗어나는 것이다. 이 스크립트가 검사하는 것이 바로 그 불변식이다.
+# 이 저장소는 생성 위치를 2단으로 `docs/plans/` 에 묶는다 —
+# `.claude/settings.json` 의 `plansDirectory`(커밋됨) + `SessionEnd` 훅이 부르는
+# `scripts/sweep-plans.sh`(회수). **설정만으로는 부족하다:** `plansDirectory` 는
+# 대화형 세션에서 무시된다 (2026-10-01 실측, 2.1.285 — docs/plans/README.md).
+# 이 스크립트는 그 2단이 모두 실패했을 때를 받는 **3단 가드**다.
 #
 #   1. `docs/plans/` 안에 YYYY-MM-DD-작업명.md 가 아닌 파일이 있는가
 #      (= 플랜 모드가 만든 무작위 이름이 정리되지 않았다)
 #   2. 이름은 맞지만 상태 머리글이 없는가
 #   3. 하니스 기본 디렉토리에 계획서가 남아 있는가
-#      (= 이 클론에 `plansDirectory` 가 설정되지 않았다 — 설정은 `.claude/` 가
-#        gitignore 대상이라 커밋되지 않으므로 클론마다 수동이다)
+#      (= 회수 훅이 아직 돌지 않았거나 — 세션이 비정상 종료되어 `SessionEnd`
+#        가 발화하지 않았다. `scripts/sweep-plans.sh` 를 직접 돌리면 된다)
 #
 # 규약 전문은 docs/plans/README.md 에 있다.
 #
@@ -116,11 +118,12 @@ if [ -n "$stray" ]; then
   echo
   printf '%s' "$stray"
   echo
-  echo "이 클론에 plansDirectory 가 설정되지 않은 것으로 보입니다."
-  echo "  .claude/settings.local.json 에 추가:  \"plansDirectory\": \"docs/plans\""
-  echo "  (.claude/ 는 gitignore 대상이라 이 설정은 커밋되지 않는다 — 클론당 1회)"
+  echo "회수 훅이 아직 돌지 않았습니다 (세션 비정상 종료 등). 지금 회수하세요:"
   echo
-  echo "위 파일들은 docs/plans/ 로 옮기고 원본은 삭제한다."
+  echo "  bash scripts/sweep-plans.sh"
+  echo
+  echo "plansDirectory 는 대화형 세션에서 무시되므로 계획서가 여기 생깁니다."
+  echo "SessionEnd 훅이 평소에는 자동으로 회수합니다 — docs/plans/README.md 참조."
   echo
 fi
 
