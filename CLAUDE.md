@@ -196,7 +196,7 @@ games/            →  server/app/games/maze/
 
 **3중 차단이 걸려 있다:**
 1. **ancestry 차단** — `feature/platform-restructure` 에서 두 원격 브랜치를 `git merge -s ours` 로 머지해 조상으로 편입했다. 따라서 이후 `git merge develop` 은 no-op 이며 구 경로를 되살릴 수 없다.
-2. **커밋 차단** — `.githooks/pre-commit` 이 레거시 경로 추적을 감지하면 커밋을 거부한다. 클론 후 1회 활성화: `git config core.hooksPath .githooks`
+2. **커밋 차단** — `.githooks/pre-commit` 이 레거시 경로 추적을 감지하면 커밋을 거부한다 (이관되지 않은 계획서도 함께 검사한다). 클론 후 1회 활성화: `git config core.hooksPath .githooks`
 3. **CI 차단** — `version-guard` 잡의 `scripts/check-legacy-paths.sh` 스텝
 
 원격 히스토리에서 코드를 가져와야 할 때는 **머지하지 말고 내용만** 꺼낸다:

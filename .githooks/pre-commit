@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
 # 커밋 전 검사. 활성화: git config core.hooksPath .githooks
+#
+# 여기서 돌리는 것은 **로컬에서만 의미 있는** 검사다.
+# CI 에서도 돌아야 하는 검사(버전 고정 등)는 .github/workflows 에 있다.
 set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel)"
+
+# 폐기된 레거시 경로가 되살아났는지 (머지 사고 감지)
 bash "$repo_root/scripts/check-legacy-paths.sh"
+
+# 하니스 디렉토리에 이관되지 않은 계획서가 남아 있는지
+# (경로가 머신에 종속되어 CI 에서는 검사할 수 없다)
+bash "$repo_root/scripts/check-plans.sh"

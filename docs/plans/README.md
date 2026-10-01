@@ -69,6 +69,24 @@ YYYY-MM-DD-작업명.md
 2. 승인·실행 완료 후 이 디렉토리로 **옮기고** 위 규약대로 이름·머리글 정리
 3. 원본은 삭제한다 (두 곳에 남기지 않는다)
 
+### 잊으면 커밋이 막힌다
+
+규약 의존만으로는 또 잊는다. [`scripts/check-plans.sh`](../../scripts/check-plans.sh)
+가 하니스 디렉토리에 이관되지 않은 계획서가 남아 있으면 **pre-commit 에서 커밋을
+거부**한다.
+
+```bash
+bash scripts/check-plans.sh          # 감지되면 exit 1
+bash scripts/check-plans.sh --warn    # 경고만 (진행 중인 계획이 있을 때)
+```
+
+진행 중인 계획이라 아직 옮길 수 없다면 `git commit --no-verify` 로 이번 커밋만
+건너뛴다.
+
+> 이 검사는 사용자 홈 경로를 보므로 **머신에 종속된다.** CI 에서는 의미가 없어
+> pre-commit 훅에서만 돌린다. 훅 활성화는 클론당 1회:
+> `git config core.hooksPath .githooks`
+
 ---
 
 ## 목록
