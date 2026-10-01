@@ -54,9 +54,9 @@ services:
     container_name: gamemoa-redis
     restart: unless-stopped
     # requirepass — 비밀번호 없는 Redis 는 CONFIG/키 쓰기로 장악된다 (2026-10-02 침입 흔적)
-    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1", "--requirepass", "${REDIS_PASSWORD:-gamemoa-dev}"]
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}"]
     environment:
-      REDISCLI_AUTH: ${REDIS_PASSWORD:-gamemoa-dev}
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
     ports:
       - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     volumes:
@@ -82,7 +82,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-gamemoa}
       DB_ENABLED: "true"
       # Redis 논리 DB: 0=앱 상태, 1=테스트, 2=레이트 리미터
-      REDIS_URL: redis://:${REDIS_PASSWORD:-gamemoa-dev}@redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}@redis:6379/0
       REDIS_ENABLED: "true"
       REDIS_LIMITER_DB: "2"
       RATE_LIMIT_ENABLED: "true"
@@ -113,7 +113,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_TEST_DB:-gamemoa_test}
       DB_ENABLED: "true"
       # 테스트는 논리 DB 1 을 쓴다 (앱 상태 0 과 격리)
-      REDIS_URL: redis://:${REDIS_PASSWORD:-gamemoa-dev}@redis:6379/1
+      REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}@redis:6379/1
       REDIS_ENABLED: "true"
       REDIS_LIMITER_DB: "1"
       TESTING: "true"
