@@ -155,7 +155,7 @@ games/ ┘
 
 **API 계약:** [`docs/api/platform.md`](docs/api/platform.md) (인증·병합·프로필·MMR), [`docs/api/games/maze.md`](docs/api/games/maze.md) (1인칭 미로 WS·Fog of War). 각 문서 말미에 미결 사항이 정리돼 있다.
 
-**남은 작업과 TODO:** [`docs/ROADMAP.md`](docs/ROADMAP.md). 구조 변경이나 대규모 코드 작성 전에는 플랜을 먼저 세우고, 완료 후 [`docs/plans/`](docs/plans/README.md) 로 옮긴다 (규약은 그 README).
+**남은 작업과 TODO:** [`docs/ROADMAP.md`](docs/ROADMAP.md). 구조 변경이나 대규모 코드 작성 전에는 플랜을 먼저 세운다. 계획서는 [`docs/plans/`](docs/plans/README.md) 에 생성되며(`plansDirectory` 설정 — 클론당 1회), 완료 후 이름·상태 머리글을 규약대로 정리한다.
 
 ## 설정과 의존 서비스
 
@@ -196,7 +196,7 @@ games/            →  server/app/games/maze/
 
 **3중 차단이 걸려 있다:**
 1. **ancestry 차단** — `feature/platform-restructure` 에서 두 원격 브랜치를 `git merge -s ours` 로 머지해 조상으로 편입했다. 따라서 이후 `git merge develop` 은 no-op 이며 구 경로를 되살릴 수 없다.
-2. **커밋 차단** — `.githooks/pre-commit` 이 레거시 경로 추적을 감지하면 커밋을 거부한다 (이관되지 않은 계획서도 함께 검사한다). 클론 후 1회 활성화: `git config core.hooksPath .githooks`
+2. **커밋 차단** — `.githooks/pre-commit` 이 레거시 경로 추적을 감지하면 커밋을 거부한다 (계획서 규약도 함께 검사한다). 클론 후 1회 활성화: `git config core.hooksPath .githooks`
 3. **CI 차단** — `version-guard` 잡의 `scripts/check-legacy-paths.sh` 스텝
 
 원격 히스토리에서 코드를 가져와야 할 때는 **머지하지 말고 내용만** 꺼낸다:
