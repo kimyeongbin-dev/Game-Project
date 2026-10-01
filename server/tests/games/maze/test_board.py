@@ -3,10 +3,13 @@ Board Tests
 보드 및 위치 테스트
 """
 
+import random
+
 import pytest
 
 
-from app.games.maze.core.board import Board, Position, BOARD_SIZE, WALL_POSITIONS
+from app.games.maze.core.board import Board, Goal, Position, BOARD_SIZE, WALL_POSITIONS, reaches_any
+from app.games.maze.core.layouts import CORNER_SLOTS, LAYOUTS, Layout, get_layout
 
 
 class TestPosition:
@@ -90,16 +93,6 @@ class TestBoardConstants:
         """벽 설치 위치 수"""
         assert Board.WALL_POSITIONS == 8
         assert WALL_POSITIONS == 8
-
-    def test_player_start_positions(self):
-        """플레이어 시작 위치"""
-        assert Board.PLAYER1_START == Position(8, 4)
-        assert Board.PLAYER2_START == Position(0, 4)
-
-    def test_goal_rows(self):
-        """골 라인"""
-        assert Board.PLAYER1_GOAL_ROW == 0
-        assert Board.PLAYER2_GOAL_ROW == 8
 
     def test_directions(self):
         """이동 방향"""
@@ -195,3 +188,68 @@ class TestBoardDirection:
         """우 방향"""
         direction = Board.get_direction(Position(4, 4), Position(4, 5))
         assert direction == (0, 1)
+
+
+class TestGoal:
+    """Goal (축 + 값) 테스트"""
+
+    def test_row_goal(self):
+        goal = Goal("row", 0)
+        assert goal.is_reached(Position(0, 7)) is True
+        assert goal.is_reached(Position(1, 0)) is False
+
+    def test_col_goal(self):
+        goal = Goal("col", 8)
+        assert goal.is_reached(Position(3, 8)) is True
+        assert goal.is_reached(Position(8, 3)) is False
+
+    def test_reaches_any(self):
+        goals = (Goal("row", 8), Goal("col", 8))
+        assert reaches_any(Position(8, 0), goals) is True
+        assert reaches_any(Position(0, 8), goals) is True
+        assert reaches_any(Position(8, 8), goals) is True
+        assert reaches_any(Position(4, 4), goals) is False
+
+    @pytest.mark.parametrize("axis, value", [("diag", 0), ("row", 9), ("col", -1)])
+    def test_invalid_goal(self, axis, value):
+        with pytest.raises(ValueError):
+            Goal(axis, value)
+
+    def test_dict_roundtrip(self):
+        goal = Goal("col", 3)
+        assert Goal.from_dict(goal.to_dict()) == goal
+
+
+class TestLayouts:
+    """모드별 배치 테이블 (maze.md §11)"""
+
+    def test_duel_matches_legacy_two_player_layout(self):
+        """duel 은 구 2인 배치와 같다 — seat 1 이 하단 중앙에서 출발"""
+        seat1, seat2 = LAYOUTS["duel"].assign()
+        assert (seat1.start, seat1.goals) == (Position(8, 4), (Goal("row", 0),))
+        assert (seat2.start, seat2.goals) == (Position(0, 4), (Goal("row", 8),))
+        assert LAYOUTS["duel"].walls_per_seat == 10
+
+    def test_trio_takes_three_distinct_corners(self):
+        corners = {Position(0, 0), Position(0, 8), Position(8, 0), Position(8, 8)}
+        for seed in range(20):
+            slots = LAYOUTS["trio"].assign(random.Random(seed))
+            starts = [s.start for s in slots]
+            assert len(set(starts)) == 3
+            assert set(starts) <= corners
+        assert LAYOUTS["trio"].walls_per_seat == 7
+
+    def test_corner_goals_are_opposite_edges(self):
+        """꼭짓점의 목표는 대각 반대편 두 변"""
+        for slot in CORNER_SLOTS:
+            opposite = {Goal("row", 8 - slot.start.row), Goal("col", 8 - slot.start.col)}
+            assert set(slot.goals) == opposite
+
+    def test_quad_is_not_a_production_mode(self):
+        """quad 는 인당 벽 수 미정 — 테이블에 없다"""
+        with pytest.raises(ValueError):
+            get_layout("quad")
+
+    def test_layout_rejects_more_seats_than_slots(self):
+        with pytest.raises(ValueError):
+            Layout(slots=CORNER_SLOTS, seats=5, walls_per_seat=5, shuffle=True)

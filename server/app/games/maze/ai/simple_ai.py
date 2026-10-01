@@ -1,27 +1,32 @@
 """
 Simple AI Module
 휴리스틱 기반 AI 플레이어
+
+전체 벽을 보고 판단한다 (Fog of War 무시). 온라인 AI 좌석으로 노출하기 전에
+시야 제한을 다뤄야 한다 — docs/api/platform.md §6.
 """
 
 import random
 from typing import Optional
 
 from ..core.game_state import GameState, Action, ActionType
-from ..core.board import Board, Position
-from ..core.wall import Wall, Orientation
-from ..core.move_validator import MoveValidator
+from ..core.board import Position, reaches_any
+from ..core.player import Player
+from ..core.wall import Wall
 from ..core.pathfinder import Pathfinder
 
 
 class SimpleAI:
     """휴리스틱 기반 AI"""
 
-    def __init__(self, difficulty: str = "normal"):
+    def __init__(self, difficulty: str = "normal", rng: Optional[random.Random] = None):
         """
         Args:
             difficulty: "easy", "normal", "hard"
+            rng: 난수원 (테스트에서 시드 고정용)
         """
         self.difficulty = difficulty
+        self.rng = rng or random.Random()
 
         # 난이도별 설정
         if difficulty == "easy":
@@ -36,18 +41,13 @@ class SimpleAI:
 
     def get_move(self, game_state: GameState) -> Optional[Action]:
         """
-        AI의 다음 행동 결정
-
-        Args:
-            game_state: 현재 게임 상태
+        현재 차례 좌석의 다음 행동 결정
 
         Returns:
             수행할 Action 또는 None
         """
         ai_player = game_state.current_player
-        opponent = game_state.opponent_player
 
-        # 유효한 이동 목록 가져오기
         valid_moves = game_state.get_valid_pawn_moves()
         valid_walls = game_state.get_valid_wall_placements() if ai_player.has_walls() else []
 
@@ -55,11 +55,20 @@ class SimpleAI:
             return None
 
         # 랜덤 행동 (난이도에 따라)
-        if random.random() < self.randomness:
+        if self.rng.random() < self.randomness:
             return self._random_action(valid_moves, valid_walls)
 
         # 전략적 결정
         return self._strategic_action(game_state, valid_moves, valid_walls)
+
+    @staticmethod
+    def _leading_opponent(game_state: GameState) -> Optional[Player]:
+        """생존 상대 중 목표에 가장 가까운 좌석 — 방해 대상"""
+        me = game_state.current_seat_no
+        opponents = [p for p in game_state.survivors if p.seat_no != me]
+        if not opponents:
+            return None
+        return min(opponents, key=lambda p: game_state.get_player_distance_to_goal(p.seat_no))
 
     def _strategic_action(
         self,
@@ -69,67 +78,67 @@ class SimpleAI:
     ) -> Action:
         """전략적 행동 결정"""
         ai_player = game_state.current_player
-        opponent = game_state.opponent_player
+        target = self._leading_opponent(game_state)
         wall_manager = game_state.wall_manager
 
-        # 각 플레이어의 목표까지 거리 계산
         ai_distance = Pathfinder.get_shortest_distance(
-            ai_player.position, ai_player.goal_row, wall_manager
-        )
-        opponent_distance = Pathfinder.get_shortest_distance(
-            opponent.position, opponent.goal_row, wall_manager
+            ai_player.position, ai_player.goals, wall_manager
         )
 
         # 1. 승리 직전이면 무조건 이동
         if ai_distance == 1:
-            return self._move_to_goal(valid_moves, ai_player.goal_row)
+            return self._move_to_goal(valid_moves, ai_player, wall_manager)
 
-        # 2. 상대가 더 가까우면 벽으로 방해
-        if (
-            opponent_distance < ai_distance
-            and valid_walls
-            and random.random() < self.wall_probability + 0.2
-        ):
-            wall = self._find_blocking_wall(game_state, valid_walls)
-            if wall:
-                return Action(
-                    action_type=ActionType.WALL,
-                    row=wall.row,
-                    col=wall.col,
-                    orientation=wall.orientation
-                )
+        if target is not None:
+            target_distance = Pathfinder.get_shortest_distance(
+                target.position, target.goals, wall_manager
+            )
 
-        # 3. 벽 설치 확률 체크
-        if valid_walls and random.random() < self.wall_probability:
-            wall = self._find_blocking_wall(game_state, valid_walls)
-            if wall:
-                return Action(
-                    action_type=ActionType.WALL,
-                    row=wall.row,
-                    col=wall.col,
-                    orientation=wall.orientation
-                )
+            # 2. 상대가 더 가까우면 벽으로 방해
+            if (
+                target_distance < ai_distance
+                and valid_walls
+                and self.rng.random() < self.wall_probability + 0.2
+            ):
+                wall = self._find_blocking_wall(game_state, target, valid_walls)
+                if wall:
+                    return self._wall_action(wall)
+
+            # 3. 벽 설치 확률 체크
+            if valid_walls and self.rng.random() < self.wall_probability:
+                wall = self._find_blocking_wall(game_state, target, valid_walls)
+                if wall:
+                    return self._wall_action(wall)
 
         # 4. 기본: 목표 방향으로 이동
-        best_move = self._find_best_move(valid_moves, ai_player.goal_row, wall_manager)
+        best_move = self._find_best_move(valid_moves, ai_player, wall_manager)
         return Action(
             action_type=ActionType.MOVE,
             row=best_move.row,
             col=best_move.col
         )
 
-    def _move_to_goal(self, valid_moves: list[Position], goal_row: int) -> Action:
-        """목표 행으로 이동"""
+    @staticmethod
+    def _wall_action(wall: Wall) -> Action:
+        return Action(
+            action_type=ActionType.WALL,
+            row=wall.row,
+            col=wall.col,
+            orientation=wall.orientation
+        )
+
+    def _move_to_goal(self, valid_moves: list[Position], ai_player: Player, wall_manager) -> Action:
+        """목표 칸으로 이동"""
         for move in valid_moves:
-            if move.row == goal_row:
+            if reaches_any(move, ai_player.goals):
                 return Action(
                     action_type=ActionType.MOVE,
                     row=move.row,
                     col=move.col
                 )
 
-        # 목표 행 이동이 없으면 가장 가까운 이동
-        best_move = min(valid_moves, key=lambda m: abs(m.row - goal_row))
+        # 목표 칸 이동이 없으면 거리 기준 최선
+        best_move = self._find_best_move(valid_moves, ai_player, wall_manager)
         return Action(
             action_type=ActionType.MOVE,
             row=best_move.row,
@@ -139,7 +148,7 @@ class SimpleAI:
     def _find_best_move(
         self,
         valid_moves: list[Position],
-        goal_row: int,
+        ai_player: Player,
         wall_manager
     ) -> Position:
         """최적의 이동 위치 찾기"""
@@ -149,7 +158,7 @@ class SimpleAI:
         # 각 이동 후 목표까지 거리 계산
         move_scores = []
         for move in valid_moves:
-            distance = Pathfinder.get_shortest_distance(move, goal_row, wall_manager)
+            distance = Pathfinder.get_shortest_distance(move, ai_player.goals, wall_manager)
             # 거리가 짧을수록 좋음 (점수 높음)
             move_scores.append((move, -distance if distance >= 0 else -100))
 
@@ -157,37 +166,34 @@ class SimpleAI:
         max_score = max(score for _, score in move_scores)
         best_moves = [move for move, score in move_scores if score == max_score]
 
-        return random.choice(best_moves)
+        return self.rng.choice(best_moves)
 
     def _find_blocking_wall(
         self,
         game_state: GameState,
+        target: Player,
         valid_walls: list[Wall]
     ) -> Optional[Wall]:
-        """상대방을 효과적으로 방해하는 벽 찾기"""
-        opponent = game_state.opponent_player
+        """방해 대상을 효과적으로 늦추는 벽 찾기"""
         wall_manager = game_state.wall_manager
 
-        # 현재 상대방 거리
         current_distance = Pathfinder.get_shortest_distance(
-            opponent.position, opponent.goal_row, wall_manager
+            target.position, target.goals, wall_manager
         )
 
-        # 벽 효과 평가
         best_walls = []
         best_increase = 0
 
         # 샘플링 (전체 검사는 너무 느림)
         sample_size = min(50, len(valid_walls))
-        sampled_walls = random.sample(valid_walls, sample_size)
+        sampled_walls = self.rng.sample(valid_walls, sample_size)
 
         for wall in sampled_walls:
-            # 임시로 벽 설치
             temp_manager = wall_manager.copy()
             temp_manager.add_wall(wall)
 
             new_distance = Pathfinder.get_shortest_distance(
-                opponent.position, opponent.goal_row, temp_manager
+                target.position, target.goals, temp_manager
             )
 
             if new_distance < 0:
@@ -202,7 +208,7 @@ class SimpleAI:
                 best_walls.append(wall)
 
         if best_walls:
-            return random.choice(best_walls)
+            return self.rng.choice(best_walls)
 
         return None
 
@@ -210,24 +216,12 @@ class SimpleAI:
         self,
         valid_moves: list[Position],
         valid_walls: list[Wall]
-    ) -> Action:
+    ) -> Optional[Action]:
         """랜덤 행동"""
-        # 이동과 벽 설치 중 선택
-        actions = []
+        actions = [
+            Action(action_type=ActionType.MOVE, row=move.row, col=move.col)
+            for move in valid_moves
+        ]
+        actions.extend(self._wall_action(wall) for wall in valid_walls[:20])  # 벽은 최대 20개만
 
-        for move in valid_moves:
-            actions.append(Action(
-                action_type=ActionType.MOVE,
-                row=move.row,
-                col=move.col
-            ))
-
-        for wall in valid_walls[:20]:  # 벽은 최대 20개만
-            actions.append(Action(
-                action_type=ActionType.WALL,
-                row=wall.row,
-                col=wall.col,
-                orientation=wall.orientation
-            ))
-
-        return random.choice(actions) if actions else None
+        return self.rng.choice(actions) if actions else None

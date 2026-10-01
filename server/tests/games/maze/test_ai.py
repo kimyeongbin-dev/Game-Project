@@ -3,193 +3,158 @@ SimpleAI Tests
 AI 플레이어 테스트
 """
 
+import random
+
 import pytest
-from unittest.mock import patch
 
 
 from app.games.maze.ai.simple_ai import SimpleAI
 from app.games.maze.core.game_state import GameState, ActionType
-from app.games.maze.core.board import Position
+from app.games.maze.core.board import Position, reaches_any
+from app.games.maze.core.pathfinder import Pathfinder
+
+
+class StubRandom(random.Random):
+    """random() 은 고정값, choice()·sample() 은 앞에서부터 — AI 를 결정적으로 만든다"""
+
+    def __init__(self, value: float):
+        super().__init__(0)
+        self._value = value
+
+    def random(self):
+        return self._value
+
+    def choice(self, seq):
+        return seq[0]
+
+    def sample(self, population, k, **kwargs):
+        return list(population)[:k]
 
 
 class TestAICreation:
     """AI 생성 테스트"""
 
     def test_create_easy_ai(self):
-        """Easy 난이도 AI 생성"""
         ai = SimpleAI(difficulty="easy")
-
         assert ai.difficulty == "easy"
         assert ai.wall_probability == 0.1
         assert ai.randomness == 0.3
 
     def test_create_normal_ai(self):
-        """Normal 난이도 AI 생성"""
         ai = SimpleAI(difficulty="normal")
-
         assert ai.difficulty == "normal"
         assert ai.wall_probability == 0.25
         assert ai.randomness == 0.15
 
     def test_create_hard_ai(self):
-        """Hard 난이도 AI 생성"""
         ai = SimpleAI(difficulty="hard")
-
         assert ai.difficulty == "hard"
         assert ai.wall_probability == 0.4
         assert ai.randomness == 0.05
 
 
-class TestAIMovement:
-    """AI 이동 테스트"""
+class TestAIDecision:
+    """AI 의사결정 테스트"""
 
     def test_ai_returns_action(self):
-        """AI가 액션 반환"""
-        ai = SimpleAI()
+        """AI 가 행동을 반환하고, 그 행동은 엔진이 수락한다"""
+        ai = SimpleAI(rng=random.Random(0))
         game = GameState()
-        game.move_pawn(7, 4)  # Player 1 이동, AI 턴
+        game.move(1, 7, 4)
 
         action = ai.get_move(game)
 
         assert action is not None
-        assert action.action_type in [ActionType.MOVE, ActionType.WALL]
+        assert action.action_type in (ActionType.MOVE, ActionType.WALL)
 
     def test_ai_move_action(self):
-        """AI 이동 액션"""
-        ai = SimpleAI()
+        """랜덤·벽 확률을 끄면 이동한다"""
+        ai = SimpleAI(rng=StubRandom(1.0))
         game = GameState()
-        game.move_pawn(7, 4)
-
-        # 랜덤 제거하고 테스트
-        with patch('random.random', return_value=1.0):  # 랜덤 행동 안함
-            with patch('random.choice', side_effect=lambda x: x[0]):
-                action = ai.get_move(game)
-
-        if action.action_type == ActionType.MOVE:
-            # 유효한 위치인지 확인
-            valid_moves = game.get_valid_pawn_moves()
-            target = Position(action.row, action.col)
-            assert target in valid_moves
-
-    def test_ai_wall_action(self):
-        """AI 벽 설치 액션"""
-        ai = SimpleAI(difficulty="hard")  # 벽 확률 높음
-        game = GameState()
-        game.move_pawn(7, 4)
-
-        # 여러 번 시도하여 벽 설치 확인
-        wall_placed = False
-        for _ in range(20):
-            action = ai.get_move(game.copy())
-            if action.action_type == ActionType.WALL:
-                wall_placed = True
-                # 유효한 벽인지 확인
-                valid_walls = game.get_valid_wall_placements()
-                from app.games.maze.core.wall import Wall, Orientation
-                wall = Wall(action.row, action.col, action.orientation)
-                assert wall in valid_walls
-                break
-
-        # Hard AI는 벽을 설치할 가능성이 높음
-        # 하지만 랜덤 요소가 있어 항상 보장되지는 않음
-
-
-class TestAIStrategy:
-    """AI 전략 테스트"""
-
-    def test_ai_moves_toward_goal(self):
-        """AI가 목표 방향으로 이동"""
-        ai = SimpleAI()
-        game = GameState()
-        game.move_pawn(7, 4)  # Player 1 이동
-
-        # AI 턴 (Player 2, 목표 row=8)
-        initial_pos = game.player2.position
-
-        # 랜덤 행동 제거
-        with patch('random.random', return_value=1.0):
-            with patch('random.choice', side_effect=lambda x: x[0]):
-                action = ai.get_move(game)
-
-        if action.action_type == ActionType.MOVE:
-            # 목표 행에 가까워지거나 같은 거리
-            assert action.row >= initial_pos.row or action.row == initial_pos.row
-
-    def test_ai_wins_when_possible(self):
-        """AI 승리 가능 시 이동"""
-        ai = SimpleAI()
-        game = GameState()
-
-        # Player 2를 골 라인 바로 앞에 배치
-        game.player2.position = Position(7, 4)
-        game.current_turn = 2  # AI 턴으로 설정
-
-        # SimpleAI 는 randomness 확률(normal=0.15)로 무작위 행동을 선택하므로
-        # 전략 판단을 검증하려면 랜덤 분기를 차단해야 한다.
-        # (형제 테스트 test_ai_moves_toward_goal 과 동일한 패턴)
-        with patch('random.random', return_value=1.0):
-            action = ai.get_move(game)
-
-        # 승리 직전이면 무조건 이동해야 함
-        assert action.action_type == ActionType.MOVE
-        assert action.row == 8  # 골 라인
-
-
-class TestAIEdgeCases:
-    """AI 엣지 케이스 테스트"""
-
-    def test_ai_no_valid_moves(self):
-        """유효한 이동 없을 때 (극히 드문 경우)"""
-        # 실제 게임에서는 거의 발생하지 않음
-        # 벽에 완전히 갇힌 경우
-        pass
-
-    def test_ai_no_walls_remaining(self):
-        """벽 없을 때 이동만"""
-        ai = SimpleAI()
-        game = GameState()
-        game.move_pawn(7, 4)
-        game.player2.walls_remaining = 0
+        game.move(1, 7, 4)
 
         action = ai.get_move(game)
 
-        # 벽이 없으면 이동만 가능
         assert action.action_type == ActionType.MOVE
+        assert game.move(2, action.row, action.col) is None
+
+    def test_ai_wall_action(self):
+        """상대가 더 가깝고 벽 확률을 통과하면 벽을 둔다"""
+        ai = SimpleAI(difficulty="hard", rng=StubRandom(0.3))  # randomness 0.05 < 0.3 < 0.6
+        game = GameState()
+        game.seat(1).position = Position(2, 4)   # seat 1 이 목표에 훨씬 가깝다
+        game.move(1, 2, 3)                        # seat 2 차례
+
+        action = ai.get_move(game)
+
+        assert action.action_type == ActionType.WALL
+        assert game.place_wall(2, action.row, action.col, action.orientation.value) is None
+
+    def test_ai_moves_toward_goal(self):
+        """AI 가 목표 방향으로 이동"""
+        ai = SimpleAI(rng=StubRandom(1.0))
+        game = GameState()
+        game.move(1, 7, 4)
+
+        before = game.get_player_distance_to_goal(2)
+        action = ai.get_move(game)
+        game.move(2, action.row, action.col)
+
+        assert game.get_player_distance_to_goal(2) == before - 1
+
+    def test_ai_wins_when_possible(self):
+        """한 칸 앞이 목표면 무조건 이동해 이긴다"""
+        ai = SimpleAI(rng=StubRandom(1.0))
+        game = GameState()
+        game.move(1, 7, 4)
+        game.seat(2).position = Position(7, 3)
+
+        action = ai.get_move(game)
+
+        assert action.action_type == ActionType.MOVE
+        assert reaches_any(Position(action.row, action.col), game.seat(2).goals)
+
+    def test_ai_no_walls_remaining(self):
+        """벽이 없으면 이동만"""
+        ai = SimpleAI(difficulty="hard", rng=random.Random(0))
+        game = GameState()
+        game.move(1, 7, 4)
+        game.seat(2).walls_remaining = 0
+
+        for _ in range(10):
+            assert ai.get_move(game).action_type == ActionType.MOVE
+
+    def test_ai_targets_leading_opponent(self):
+        """방해 대상은 생존 상대 중 목표에 가장 가까운 좌석이다 (N인)"""
+        game = GameState("trio", rng=random.Random(0))
+        leader = game.seat(3)
+        path = Pathfinder.find_shortest_path(leader.position, leader.goals, game.wall_manager)
+        leader.position = path[-2]  # 목표 한 칸 앞. seat 2 는 시작점(거리 8)
+
+        assert SimpleAI._leading_opponent(game).seat_no == 3
+
+    def test_leading_opponent_skips_eliminated(self):
+        game = GameState("trio", rng=random.Random(0))
+        game.eliminate(3, "surrender")
+
+        assert SimpleAI._leading_opponent(game).seat_no == 2
+
+
+class TestAIConsistency:
+    """AI 일관성 테스트"""
 
     def test_ai_consistency(self):
-        """같은 상황에서 일관된 동작"""
-        ai = SimpleAI(difficulty="hard")
+        """같은 시드면 같은 행동"""
         game = GameState()
-        game.move_pawn(7, 4)
+        game.move(1, 7, 4)
 
-        # 랜덤 시드 고정
-        import random
-        random.seed(42)
+        a1 = SimpleAI(difficulty="hard", rng=random.Random(42)).get_move(game)
+        a2 = SimpleAI(difficulty="hard", rng=random.Random(42)).get_move(game)
 
-        action1 = ai.get_move(game.copy())
-
-        random.seed(42)
-        action2 = ai.get_move(game.copy())
-
-        # 같은 시드면 같은 결과
-        assert action1.action_type == action2.action_type
-        assert action1.row == action2.row
-        assert action1.col == action2.col
-
-
-class TestAIDifficulty:
-    """난이도별 AI 동작 테스트"""
+        assert a1.to_dict() == a2.to_dict()
 
     def test_easy_more_random(self):
-        """Easy AI는 더 랜덤"""
-        easy_ai = SimpleAI(difficulty="easy")
-        hard_ai = SimpleAI(difficulty="hard")
-
-        assert easy_ai.randomness > hard_ai.randomness
+        assert SimpleAI(difficulty="easy").randomness > SimpleAI(difficulty="hard").randomness
 
     def test_hard_more_walls(self):
-        """Hard AI는 벽 더 많이 사용"""
-        easy_ai = SimpleAI(difficulty="easy")
-        hard_ai = SimpleAI(difficulty="hard")
-
-        assert hard_ai.wall_probability > easy_ai.wall_probability
+        assert SimpleAI(difficulty="hard").wall_probability > SimpleAI(difficulty="easy").wall_probability

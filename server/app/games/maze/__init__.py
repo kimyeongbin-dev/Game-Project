@@ -13,8 +13,9 @@ NOTE: 클래스/함수 명칭은 구 Quoridor 구현을 그대로 유지한 상�
 from .core.game_state import GameState
 from .core.player import Player
 from .core.wall import Wall
-from .core.board import Board
-from .core.move_validator import MoveValidator
+from .core.board import Board, Goal
+from .core.layouts import LAYOUTS
+from .core.move_validator import MoveValidator, Rejection
 from .core.pathfinder import Pathfinder
 from .ai.simple_ai import SimpleAI
 
@@ -23,7 +24,10 @@ __all__ = [
     "Player",
     "Wall",
     "Board",
+    "Goal",
+    "LAYOUTS",
     "MoveValidator",
+    "Rejection",
     "Pathfinder",
     "SimpleAI",
 ]

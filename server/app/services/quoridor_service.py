@@ -21,9 +21,9 @@ class QuoridorService:
     def __init__(self):
         self._games: dict[str, GameState] = {}
 
-    async def create_game(self, game_mode: str = "local_2p") -> GameState:
-        """새 게임 생성"""
-        game = GameState(game_mode=game_mode)
+    async def create_game(self, mode: str = "duel") -> GameState:
+        """새 게임 생성 (mode 는 배치 테이블 키)"""
+        game = GameState(mode)
         self._games[game.game_id] = game
         return game
 
@@ -33,25 +33,29 @@ class QuoridorService:
 
     async def move_pawn(
         self, game_id: str, row: int, col: int
-    ) -> tuple[bool, str, Optional[GameState]]:
-        """현재 차례 좌석의 말 이동. (성공 여부, 메시지, 게임 상태)"""
+    ) -> tuple[bool, Optional[str], Optional[GameState]]:
+        """현재 차례 좌석의 말 이동. (성공 여부, §13 거절 코드, 게임 상태)"""
         game = self._games.get(game_id)
         if not game:
-            return False, "Game not found", None
+            return False, "not_in_game", None
 
-        success, message = game.move_pawn(row, col)
-        return success, message, game if success else None
+        rejection = game.move(game.current_seat_no, row, col)
+        if rejection:
+            return False, rejection.value, None
+        return True, None, game
 
     async def place_wall(
         self, game_id: str, row: int, col: int, orientation: str
-    ) -> tuple[bool, str, Optional[GameState]]:
-        """현재 차례 좌석의 벽 설치. (성공 여부, 메시지, 게임 상태)"""
+    ) -> tuple[bool, Optional[str], Optional[GameState]]:
+        """현재 차례 좌석의 벽 설치. (성공 여부, §13 거절 코드, 게임 상태)"""
         game = self._games.get(game_id)
         if not game:
-            return False, "Game not found", None
+            return False, "not_in_game", None
 
-        success, message = game.place_wall(row, col, orientation)
-        return success, message, game if success else None
+        rejection = game.place_wall(game.current_seat_no, row, col, orientation)
+        if rejection:
+            return False, rejection.value, None
+        return True, None, game
 
 
 # 싱글톤 인스턴스

@@ -1,6 +1,6 @@
 """
 Board Module
-9x9 쿼리도 보드 표현
+9x9 보드 기하 — 좌표, 인접, 목표 판정
 """
 
 from dataclasses import dataclass
@@ -28,20 +28,49 @@ class Position:
     def from_tuple(cls, t: Tuple[int, int]) -> "Position":
         return cls(t[0], t[1])
 
+    def to_dict(self) -> dict:
+        return {"row": self.row, "col": self.col}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Position":
+        return cls(data["row"], data["col"])
+
+
+@dataclass(frozen=True)
+class Goal:
+    """목표 한 줄 — 축(row|col) + 값. 좌석의 목표는 이것의 목록이다 (maze.md §11)"""
+    axis: str
+    value: int
+
+    AXES = ("row", "col")
+
+    def __post_init__(self):
+        if self.axis not in self.AXES:
+            raise ValueError(f"Invalid goal axis: {self.axis}")
+        if not (0 <= self.value < BOARD_SIZE):
+            raise ValueError(f"Invalid goal value: {self.value}")
+
+    def is_reached(self, pos: Position) -> bool:
+        return (pos.row if self.axis == "row" else pos.col) == self.value
+
+    def to_dict(self) -> dict:
+        return {"axis": self.axis, "value": self.value}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Goal":
+        return cls(data["axis"], data["value"])
+
+
+def reaches_any(pos: Position, goals) -> bool:
+    """goals 중 하나라도 만족하면 도달 (maze.md §5 승리 판정)"""
+    return any(goal.is_reached(pos) for goal in goals)
+
 
 class Board:
-    """9x9 쿼리도 보드"""
+    """9x9 보드"""
 
     SIZE = BOARD_SIZE
     WALL_POSITIONS = WALL_POSITIONS
-
-    # 플레이어 시작 위치 (클래스 로드 후 설정)
-    PLAYER1_START: Position = None  # type: ignore
-    PLAYER2_START: Position = None  # type: ignore
-
-    # 플레이어 목표 행
-    PLAYER1_GOAL_ROW = 0  # 상단
-    PLAYER2_GOAL_ROW = 8  # 하단
 
     # 이동 방향 (상, 하, 좌, 우)
     DIRECTIONS = [(-1, 0), (1, 0), (0, -1), (0, 1)]
@@ -70,8 +99,3 @@ class Board:
     def get_direction(cls, from_pos: Position, to_pos: Position) -> Tuple[int, int]:
         """두 위치 사이의 방향 벡터 반환"""
         return (to_pos.row - from_pos.row, to_pos.col - from_pos.col)
-
-
-# 클래스 정의 후 시작 위치 설정
-Board.PLAYER1_START = Position(8, 4)  # 하단 중앙
-Board.PLAYER2_START = Position(0, 4)  # 상단 중앙

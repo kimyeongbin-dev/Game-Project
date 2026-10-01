@@ -6,7 +6,8 @@ MoveValidator Tests
 import pytest
 
 
-from app.games.maze.core.move_validator import MoveValidator
+from app.games.maze.core.layouts import LAYOUTS
+from app.games.maze.core.move_validator import MoveValidator, Rejection
 from app.games.maze.core.board import Position
 from app.games.maze.core.player import Player
 from app.games.maze.core.wall import Wall, WallManager, Orientation
@@ -17,14 +18,14 @@ class TestPawnMoveValidation:
 
     def setup_method(self):
         """각 테스트 전 설정"""
-        self.player1 = Player.create_player1("P1")
-        self.player2 = Player.create_player2("P2")
+        self.player1 = Player.from_slot(1, LAYOUTS["duel"].slots[0], 10)
+        self.player2 = Player.from_slot(2, LAYOUTS["duel"].slots[1], 10)
         self.wall_manager = WallManager()
 
     def test_valid_moves_from_start(self):
         """시작 위치에서 유효한 이동"""
         valid_moves = MoveValidator.get_valid_pawn_moves(
-            self.player1, self.player2, self.wall_manager
+            self.player1, self.wall_manager
         )
 
         # Player 1 (8, 4)에서 가능한 이동: 상, 좌, 우
@@ -45,7 +46,7 @@ class TestPawnMoveValidation:
         self.wall_manager.add_wall(Wall(7, 4, Orientation.HORIZONTAL))
 
         valid_moves = MoveValidator.get_valid_pawn_moves(
-            self.player1, self.player2, self.wall_manager
+            self.player1, self.wall_manager
         )
 
         # 위로 이동 불가
@@ -55,61 +56,35 @@ class TestPawnMoveValidation:
         """특정 이동 유효성 확인"""
         # 유효한 이동
         is_valid = MoveValidator.is_valid_pawn_move(
-            self.player1, self.player2, Position(7, 4), self.wall_manager
+            self.player1, Position(7, 4), self.wall_manager
         )
         assert is_valid is True
 
         # 무효한 이동 (너무 멈)
         is_valid = MoveValidator.is_valid_pawn_move(
-            self.player1, self.player2, Position(6, 4), self.wall_manager
+            self.player1, Position(6, 4), self.wall_manager
         )
         assert is_valid is False
 
-
-class TestJumpMoves:
-    """점프 이동 테스트"""
-
-    def setup_method(self):
-        self.wall_manager = WallManager()
-
-    def test_jump_over_opponent(self):
-        """상대방 넘어서 점프"""
-        player1 = Player(1, "P1", Position(2, 4), 10)
-        player2 = Player(2, "P2", Position(1, 4), 10)  # 바로 앞
+    def test_can_move_onto_other_piece(self):
+        """다른 말 위로 이동 가능 (점프 없음)"""
+        self.player1.move_to(Position(5, 4))
+        self.player2.move_to(Position(4, 4))
 
         valid_moves = MoveValidator.get_valid_pawn_moves(
-            player1, player2, self.wall_manager
+            self.player1, self.wall_manager
         )
 
-        # 상대 뒤로 점프 가능 (0, 4)
-        assert Position(0, 4) in valid_moves
-
-    def test_diagonal_jump_when_blocked(self):
-        """직선 점프 불가 시 대각선 점프"""
-        player1 = Player(1, "P1", Position(2, 4), 10)
-        player2 = Player(2, "P2", Position(1, 4), 10)
-
-        # 상대 뒤에 벽 설치 (직선 점프 막음)
-        self.wall_manager.add_wall(Wall(0, 3, Orientation.HORIZONTAL))
-        self.wall_manager.add_wall(Wall(0, 4, Orientation.HORIZONTAL))
-
-        valid_moves = MoveValidator.get_valid_pawn_moves(
-            player1, player2, self.wall_manager
-        )
-
-        # 직선 점프 불가, 대각선 점프 가능
-        assert Position(0, 4) not in valid_moves
-        # 대각선 (1, 3) 또는 (1, 5) 중 하나는 가능해야 함
-        has_diagonal = Position(1, 3) in valid_moves or Position(1, 5) in valid_moves
-        assert has_diagonal is True
+        assert Position(4, 4) in valid_moves
+        assert Position(3, 4) not in valid_moves
 
 
 class TestWallPlacementValidation:
     """벽 설치 유효성 테스트"""
 
     def setup_method(self):
-        self.player1 = Player.create_player1("P1")
-        self.player2 = Player.create_player2("P2")
+        self.player1 = Player.from_slot(1, LAYOUTS["duel"].slots[0], 10)
+        self.player2 = Player.from_slot(2, LAYOUTS["duel"].slots[1], 10)
         self.wall_manager = WallManager()
 
     def test_valid_wall_placement(self):
@@ -117,7 +92,7 @@ class TestWallPlacementValidation:
         wall = Wall(4, 4, Orientation.HORIZONTAL)
 
         is_valid = MoveValidator.is_valid_wall_placement(
-            wall, self.player1, self.player2, self.wall_manager
+            wall, self.player1, [self.player1, self.player2], self.wall_manager
         )
 
         assert is_valid is True
@@ -131,7 +106,7 @@ class TestWallPlacementValidation:
         wall = Wall(4, 4, Orientation.HORIZONTAL)
 
         is_valid = MoveValidator.is_valid_wall_placement(
-            wall, self.player1, self.player2, self.wall_manager
+            wall, self.player1, [self.player1, self.player2], self.wall_manager
         )
 
         assert is_valid is False
@@ -145,7 +120,7 @@ class TestWallPlacementValidation:
         wall = Wall(4, 4, Orientation.VERTICAL)
 
         is_valid = MoveValidator.is_valid_wall_placement(
-            wall, self.player1, self.player2, self.wall_manager
+            wall, self.player1, [self.player1, self.player2], self.wall_manager
         )
 
         assert is_valid is False
@@ -157,7 +132,7 @@ class TestWallPlacementValidation:
         wall = Wall(4, 4, Orientation.HORIZONTAL)
 
         is_valid = MoveValidator.is_valid_wall_placement(
-            wall, self.player1, self.player2, self.wall_manager
+            wall, self.player1, [self.player1, self.player2], self.wall_manager
         )
 
         assert is_valid is False
@@ -165,9 +140,41 @@ class TestWallPlacementValidation:
     def test_get_valid_wall_placements_count(self):
         """초기 상태 유효 벽 개수"""
         valid_walls = MoveValidator.get_valid_wall_placements(
-            self.player1, self.player2, self.wall_manager
+            self.player1, [self.player1, self.player2], self.wall_manager
         )
 
         # 8x8 위치 x 2방향 = 128, 일부는 경로 차단으로 불가
         assert len(valid_walls) > 0
         assert len(valid_walls) <= 128
+
+    def test_check_wall_placement_codes(self):
+        """거절 사유 코드"""
+        survivors = [self.player1, self.player2]
+        wall = Wall(4, 4, Orientation.HORIZONTAL)
+        assert MoveValidator.check_wall_placement(
+            wall, self.player1, survivors, self.wall_manager
+        ) is None
+
+        self.wall_manager.add_wall(Wall(4, 4, Orientation.HORIZONTAL))
+        assert MoveValidator.check_wall_placement(
+            Wall(4, 4, Orientation.VERTICAL), self.player1, survivors, self.wall_manager
+        ) == Rejection.INVALID_WALL_POSITION
+
+        self.player1.walls_remaining = 0
+        assert MoveValidator.check_wall_placement(
+            wall, self.player1, survivors, WallManager()
+        ) == Rejection.NO_WALLS_REMAINING
+
+    def test_wall_blocks_path_code(self):
+        """경로를 막는 벽은 생존 좌석 기준으로만 거절"""
+        self.player2.position = Position(0, 0)
+        # (0,0)-(0,1), (1,0)-(1,1) 차단 -> 출구는 (1,0)-(2,0) 하나
+        assert self.wall_manager.add_wall(Wall(0, 0, Orientation.VERTICAL)) is True
+
+        closer = Wall(1, 0, Orientation.HORIZONTAL)  # (1,0)-(2,0) 차단
+        assert MoveValidator.check_wall_placement(
+            closer, self.player1, [self.player1, self.player2], self.wall_manager
+        ) == Rejection.WALL_BLOCKS_PATH
+        assert MoveValidator.check_wall_placement(
+            closer, self.player1, [self.player1], self.wall_manager
+        ) is None

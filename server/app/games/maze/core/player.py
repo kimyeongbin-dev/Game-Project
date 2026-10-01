@@ -1,35 +1,49 @@
 """
 Player Module
-플레이어 상태 관리
+좌석 상태 관리
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
-from .board import Position, Board
+from .board import Goal, Position, reaches_any
+from .layouts import SeatSlot
+
+
+# 탈락 사유 (maze.md §9). 게임 종료 사유와 별개다
+ELIMINATION_REASONS = ("surrender", "time_forfeit", "disconnect_forfeit")
 
 
 @dataclass
 class Player:
-    """플레이어 클래스"""
+    """좌석 하나의 규칙 상태. 정체성(유저·닉네임)은 담지 않는다"""
 
-    player_id: int  # 1 또는 2
-    name: str
+    seat_no: int  # 1..N
     position: Position
-    walls_remaining: int = 10
-    goal_row: int = field(init=False)
-
-    INITIAL_WALLS = 10
+    goals: tuple[Goal, ...]
+    walls_remaining: int
+    turns_taken: int = 0
+    eliminated_order: Optional[int] = None    # 1 = 가장 먼저 탈락
+    elimination_reason: Optional[str] = None
 
     def __post_init__(self):
-        if self.player_id not in (1, 2):
-            raise ValueError("player_id must be 1 or 2")
+        if self.seat_no < 1:
+            raise ValueError("seat_no must be >= 1")
+        if not self.goals:
+            raise ValueError("goals must not be empty")
+        self.goals = tuple(self.goals)
 
-        # 목표 행 설정
-        self.goal_row = Board.PLAYER1_GOAL_ROW if self.player_id == 1 else Board.PLAYER2_GOAL_ROW
+    @classmethod
+    def from_slot(cls, seat_no: int, slot: SeatSlot, walls: int) -> "Player":
+        """배치 테이블의 후보로 좌석 생성"""
+        return cls(seat_no=seat_no, position=slot.start, goals=slot.goals, walls_remaining=walls)
+
+    @property
+    def is_eliminated(self) -> bool:
+        return self.eliminated_order is not None
 
     def move_to(self, new_position: Position) -> None:
-        """폰을 새 위치로 이동"""
+        """말을 새 위치로 이동"""
         self.position = new_position
 
     def use_wall(self) -> bool:
@@ -44,32 +58,47 @@ class Player:
         return self.walls_remaining > 0
 
     def has_reached_goal(self) -> bool:
-        """목표에 도달했는지 확인"""
-        return self.position.row == self.goal_row
+        """goals 중 하나라도 만족하면 도달"""
+        return reaches_any(self.position, self.goals)
+
+    def eliminate(self, order: int, reason: str) -> None:
+        """탈락 표시. 순번은 GameState 가 매긴다"""
+        if reason not in ELIMINATION_REASONS:
+            raise ValueError(f"Invalid elimination reason: {reason}")
+        self.eliminated_order = order
+        self.elimination_reason = reason
 
     def copy(self) -> "Player":
-        """플레이어 상태 복사"""
+        """좌석 상태 복사 (Position·Goal 은 불변이라 공유한다)"""
         return Player(
-            player_id=self.player_id,
-            name=self.name,
-            position=Position(self.position.row, self.position.col),
-            walls_remaining=self.walls_remaining
+            seat_no=self.seat_no,
+            position=self.position,
+            goals=self.goals,
+            walls_remaining=self.walls_remaining,
+            turns_taken=self.turns_taken,
+            eliminated_order=self.eliminated_order,
+            elimination_reason=self.elimination_reason,
         )
 
-    @classmethod
-    def create_player1(cls, name: str = "Player") -> "Player":
-        """Player 1 생성 (하단에서 시작)"""
-        return cls(
-            player_id=1,
-            name=name,
-            position=Board.PLAYER1_START
-        )
+    def to_dict(self) -> dict:
+        return {
+            "seat_no": self.seat_no,
+            "position": self.position.to_dict(),
+            "goals": [goal.to_dict() for goal in self.goals],
+            "walls_remaining": self.walls_remaining,
+            "turns_taken": self.turns_taken,
+            "eliminated_order": self.eliminated_order,
+            "elimination_reason": self.elimination_reason,
+        }
 
     @classmethod
-    def create_player2(cls, name: str = "AI") -> "Player":
-        """Player 2 생성 (상단에서 시작)"""
+    def from_dict(cls, data: dict) -> "Player":
         return cls(
-            player_id=2,
-            name=name,
-            position=Board.PLAYER2_START
+            seat_no=data["seat_no"],
+            position=Position.from_dict(data["position"]),
+            goals=tuple(Goal.from_dict(g) for g in data["goals"]),
+            walls_remaining=data["walls_remaining"],
+            turns_taken=data["turns_taken"],
+            eliminated_order=data["eliminated_order"],
+            elimination_reason=data["elimination_reason"],
         )
