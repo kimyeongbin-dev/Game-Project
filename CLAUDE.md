@@ -155,7 +155,7 @@ games/ ┘
 
 **API 계약:** [`docs/api/platform.md`](docs/api/platform.md) (인증·병합·프로필·MMR), [`docs/api/games/maze.md`](docs/api/games/maze.md) (1인칭 미로 WS·Fog of War). 각 문서 말미에 미결 사항이 정리돼 있다.
 
-**남은 작업과 TODO:** [`docs/ROADMAP.md`](docs/ROADMAP.md). 구조 변경이나 대규모 코드 작성 전에는 플랜을 먼저 세운다.
+**남은 작업과 TODO:** [`docs/ROADMAP.md`](docs/ROADMAP.md). 구조 변경이나 대규모 코드 작성 전에는 플랜을 먼저 세우고, 완료 후 [`docs/plans/`](docs/plans/README.md) 로 옮긴다 (규약은 그 README).
 
 ## 설정과 의존 서비스
 

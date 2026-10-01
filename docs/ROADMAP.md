@@ -149,3 +149,4 @@
 | [`api/platform.md`](api/platform.md) | 플랫폼 공통 API — 인증, 계정 병합, 프로필, MMR |
 | [`api/games/maze.md`](api/games/maze.md) | 1인칭 미로 API — WebSocket 프로토콜, Fog of War |
 | [`환경.md`](환경.md) | 개발 환경 구성과 트러블슈팅 |
+| [`plans/`](plans/README.md) | 계획서 보관소. 완료된 계획의 결정 근거·이탈 기록 |
