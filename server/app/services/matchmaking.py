@@ -186,6 +186,13 @@ class Matchmaking:
 
     # ----- 매칭 -----
 
+    async def get_match(self, match_id: str) -> Optional[PendingMatch]:
+        """ready 대기 중인 매치 (락 없는 스냅샷). 재동기화가 쓴다"""
+        redis = require_redis()
+        async with store_errors():
+            raw = await redis.get(keys.match(match_id))
+        return PendingMatch.from_json(raw) if raw is not None else None
+
     async def try_match(self, game: str, mode: str) -> Optional[PendingMatch]:
         """정원이 차 있으면 가장 오래 기다린 N명으로 매치를 만든다. 좌석은 무작위"""
         if settings.match_mmr_filter_enabled:

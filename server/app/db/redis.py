@@ -73,6 +73,24 @@ async def init_redis() -> None:
         await _dispose()
 
 
+def new_pubsub_client(client_name: str) -> Redis:
+    """구독 전용 클라이언트 — 앱 풀과 따로 둔다 (M3 4단계 `app/ws/bus.py`).
+
+    구독은 연결 하나를 계속 점유하고, 끊기면 통째로 새로 만든다(실측 E5 — redis-py 는
+    조용히 재연결하지 않는다). `client_name` 은 CLIENT LIST 에서 버스 연결을 찾는 표식이다.
+    대기는 `get_message(timeout=…)` 가 하므로 소켓 읽기 타임아웃은 두지 않고, 죽은 TCP 는
+    health check PING 이 잡는다.
+    """
+    return Redis.from_url(
+        settings.redis_url,
+        client_name=client_name,
+        socket_timeout=None,
+        socket_connect_timeout=settings.redis_socket_connect_timeout,
+        health_check_interval=30,
+        decode_responses=True,
+    )
+
+
 async def close_redis() -> None:
     """Redis 연결 종료."""
     global _available
