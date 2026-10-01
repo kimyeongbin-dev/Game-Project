@@ -248,7 +248,6 @@ gamemoa/
     │   │                             #   matchmaking / maze_session / gomoku_session
     │   ├── schemas/                  # Pydantic 요청·응답 스키마
     │   ├── services/                 # 비즈니스 로직 및 서버 권위 검증 코어
-    │   │   └── scheduler/            # 일일 랭킹 리셋 (APScheduler)
     │   └── games/
     │       └── maze/                 # 1인칭 미로 서버 권위 판정 엔진 (순수 Python)
     │           ├── core/             # Board, Player, Wall, GameState, MoveValidator, Pathfinder

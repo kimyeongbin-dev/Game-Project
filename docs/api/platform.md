@@ -704,23 +704,43 @@ GET /api/v1/leaderboard?game=maze_1p&mode=duel&limit=20&cursor=<opaque>
 > 방어"만 적용하며 서버 검증 대상이 아니다. 구조를 서버 스키마로 고정하면
 > 게임 규칙이 바뀔 때마다 마이그레이션이 필요해진다.
 
-### `game_sessions` — 변경 (⚠️ 1:1:1 차단 요인)
+### `game_sessions` — 변경 완료 (M3 2단계, 커밋 `c26f4ad`)
 
-**현 스키마는 2인 하드코딩이며 1:1:1을 지원할 수 없다.**
-
-| 컬럼 | 현재 | 문제 |
-| :--- | :--- | :--- |
-| `player1_name`, `player2_name` | `String(50)` | 3번째 플레이어를 담을 곳이 없다 |
-| `player1_user_id`, `player2_user_id` | `Integer` FK | 동일 |
-| `winner` | `Integer` nullable | 1\|2 전제 |
-| `current_turn` | `Integer` default 1 | 1\|2 전제 |
-
-**해결: `game_participants` 테이블로 정규화한다.**
+구 스키마는 2인 하드코딩(`player1_*`/`player2_*`, `winner`·`current_turn` 이 1\|2 전제)이라
+1:1:1을 지원할 수 없었다. **`game_participants` 로 정규화**하고, `game_sessions` 는
+**게임 한 판의 시작·종료 기록**만 담는다.
 
 | 컬럼 | 타입 | 비고 |
 | :--- | :--- | :--- |
-| `game_id` | `String(36)` FK, PK 일부 | |
-| `seat_no` | `Integer`, PK 일부 | 1, 2, 3 … |
+| `game_id` | `String(36)` PK | |
+| `game` | `String(32)` | `maze_1p`, … |
+| `mode` | `String(16)` | `duel`, `trio`, … |
+| `is_ranked` | `Boolean` | |
+| `status` | `String(16)`, index | `in_progress` \| `finished` \| `void` |
+| `end_reason` | `String(16)` nullable | `goal_reached` \| `last_standing` \| `server_fault` ([`games/maze.md`](games/maze.md) §10) |
+| `winner_seat_no` | `Integer` nullable | |
+| `turn_count` | `Integer` | 종료 시 기록 |
+| `started_at` / `ended_at` | `DateTime` / nullable | |
+
+**진행 중 상태를 DB 에 두지 않는다.** 초판은 `current_turn` 을 `current_seat_no` 로
+이름만 바꾸라고 적었으나, 이는 게임 상태의 권위를 정하기 **전**의 문장이다. M3 0단계
+실측으로 진행 중 상태의 권위는 Redis `game:<id>:state` 로 정해졌다([`games/maze.md`](games/maze.md) §8).
+차례·위치·벽을 DB 에도 쓰면 행동마다 두 곳을 맞춰야 하는 이중 기록이 된다. 그래서
+`current_turn`·`game_state`(JSONB)를 이름 변경 없이 **삭제**했다. 같은 이유로
+`ai_difficulty`(온라인 AI 좌석 착수 시 좌석 단위로 재설계)와 `is_deleted`(폐기된 REST
+`DELETE` 전용)도 삭제했다.
+
+DB 의 역할은 둘이다. ① **시작 시** `status = in_progress` 로 행을 만든다 — §8 fail-safe 가
+"Redis 상태가 사라진 진행 중 게임"을 찾는 기준이다. ② **종료 시** 결과를 채운다.
+`game`·`mode`·`status`·`end_reason` 은 DB ENUM 이 아닌 문자열이며, 허용 값은
+`app/db/repository.py` 가 검증한다(위 확장성 원칙).
+
+**`game_participants`** — 좌석 하나가 행 하나다.
+
+| 컬럼 | 타입 | 비고 |
+| :--- | :--- | :--- |
+| `game_id` | `String(36)` FK(`ON DELETE CASCADE`), PK 일부 | |
+| `seat_no` | `Integer`, PK 일부 | 1, 2, 3 … (1..N 연속) |
 | `user_id` | `Integer` FK nullable | AI면 `null` |
 | `display_name` | `String(50)` | |
 | `is_ai` | `Boolean` | |
@@ -729,10 +749,8 @@ GET /api/v1/leaderboard?game=maze_1p&mode=duel&limit=20&cursor=<opaque>
 | `elimination_reason` | `String` nullable | `surrender` \| `time_forfeit` \| `disconnect_forfeit` |
 | `mmr_before`, `mmr_after` | `Integer` nullable | 랭크전만 |
 
-전부 좌석 행의 열이므로 인원이 늘어도 행만 는다.
-
-`game_sessions`에서 `player*_name`·`player*_user_id`를 제거하고, `winner`는
-`winner_seat_no`로 바꾼다. `current_turn`은 `current_seat_no`로 바꾼다.
+전부 좌석 행의 열이므로 인원이 늘어도 행만 는다. 리포지토리 테스트가 2·3·4좌석으로
+파라미터화되어 이를 고정한다(`tests/db/test_game_session_repository.py`).
 
 > 대안으로 `player3_*` 컬럼을 추가하는 방법이 있으나 택하지 않는다 — 인원이
 > 늘 때마다 스키마가 바뀌고, 3인 중 2명만 채워진 상태를 표현하기 어렵다.
@@ -752,7 +770,7 @@ GET /api/v1/leaderboard?game=maze_1p&mode=duel&limit=20&cursor=<opaque>
 복원이 필요하면 git에서 꺼낸다 — [`../ROADMAP.md`](../ROADMAP.md) 향후 확장에
 복원 지점 커밋이 적혀 있다.
 
-### `daily_champions` — 폐기
+### `daily_champions` — 폐기 완료 (M3 2단계, 커밋 `3e889a9`)
 
 랭킹을 MMR 하나로 단순화하면서 일일 리셋 개념을 없앤다. 이 테이블과 이를 쓰는
 `RankingRepository`의 챔피언 관련 메서드, 일일 리셋 스케줄러가 함께 폐기 대상이다.
@@ -771,9 +789,9 @@ GET /api/v1/leaderboard?game=maze_1p&mode=duel&limit=20&cursor=<opaque>
 | 데이터 | 권위 | 이유 |
 | :--- | :--- | :--- |
 | 실시간 큐·방 상태 | **Redis** | §2.2. 워커 간 공유가 필요하고 수명이 짧다 |
-| 종료된 게임 기록 | **PostgreSQL** (`game_sessions`, `game_participants`, `game_moves`) | 영속 기록 |
+| 종료된 게임 기록 | **PostgreSQL** (`game_sessions`, `game_participants`) | 영속 기록 |
 
-→ `match_queue`·`game_rooms` **테이블은 폐기한다.** 실시간 상태를 DB에 쓰면
+→ `match_queue`·`game_rooms` **테이블은 폐기했다**(M3 2단계, 커밋 `c26f4ad`). 실시간 상태를 DB에 쓰면
 Redis와 이중 기록이 되고 정합성 문제가 생긴다. 방 기록이 필요하면 게임이
 시작될 때 `game_sessions`에 남으므로 충분하다.
 
@@ -817,8 +835,8 @@ Redis와 이중 기록이 되고 정합성 문제가 생긴다. 방 기록이 �
 | :--- | :--- |
 | `GET /leaderboard` | `GET /api/v1/leaderboard?game=&mode=` (MMR 기준, 커서 페이지네이션) |
 | `GET /my-rank` | `GET /api/v1/me/stats` (`(game, mode)` 별 `rank` 포함) |
-| `GET /champion` | **폐기.** 일일 리셋 개념 제거 |
-| `GET /champions` | **폐기.** 동일 |
+| `GET /champion` | **폐기 완료**(커밋 `3e889a9`). 일일 리셋 개념 제거 |
+| `GET /champions` | **폐기 완료**(커밋 `3e889a9`). 동일 |
 
 ### `/api/v1/quoridor/*` (14개) — 미로 WS 프로토콜로 대체
 

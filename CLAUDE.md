@@ -126,7 +126,7 @@ games/ ┘
 | `api/` | REST 라우터 |
 | `ws/` | 실시간 멀티플레이 WebSocket 핸들러 *(골격 — 미구현)* |
 | `schemas/` | Pydantic 요청·응답 스키마 |
-| `services/` | 비즈니스 로직, 서버 권위 검증. `services/scheduler/`는 일일 랭킹 리셋 |
+| `services/` | 비즈니스 로직, 서버 권위 검증 |
 | `games/maze/` | 1인칭 미로 **서버 권위 판정 엔진** (순수 Python, 프레임워크 무의존) |
 
 - import는 항상 `app.` 절대 경로를 쓴다 (`from app.db.repository import ...`). `sys.path` 조작 금지.
@@ -146,6 +146,7 @@ games/ ┘
 | 디렉토리 구조 / Docker 환경 | 완료 |
 | `server/app/games/maze/` | **N인 좌석 모델로 일반화 완료**(M3 1단계) — 모드별 배치 테이블 `core/layouts.py`, 점프 제거, 탈락·`last_standing`·순위·턴당 거절 카운터. 2·3·4좌석 파라미터화 테스트(`test_seat_scaling.py`). 도메인 리네이밍 미적용 |
 | 구 REST `/api/v1/quoridor/*` | **폐기 완료**(M3 1단계). `services/quoridor_service.py` 만 `ws_game` 용 shim 으로 남았다 |
+| `server/app/db/` | **2인 전제 제거 완료**(M3 2단계) — `game_sessions` 는 시작·종료 기록만, 좌석은 `game_participants` 행. `match_queue`·`game_rooms`·`daily_champions`·스케줄러 폐기. 마이그레이션 도구 없음(`create_all`) — Alembic 은 첫 운영 배포 전 |
 | `server/app/core/` | `config.py`(환경변수 단일 진입점), `time.py`(표준 utcnow) |
 | Redis | 연결 계층(`app/db/redis.py`) + lifespan 배선 완료. graceful degradation |
 | 레이트 리미터 | **배선 완료** — Redis 저장소, 커스텀 429, `main.py` 등록. 테스트 10건 |
