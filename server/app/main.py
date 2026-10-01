@@ -12,7 +12,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.quoridor import router as quoridor_router
 from app.api.ranking import router as ranking_router
 from app.api.users import router as users_router
 from app.core.config import settings
@@ -138,7 +137,6 @@ async def health_check():
 #       §2.2 를 만족하지 못한다. §4.1 재설계 후 등록한다.
 #       (판정 내역: app/ws/__init__.py)
 # ---------------------------------------------------------------------------
-app.include_router(quoridor_router)
 app.include_router(users_router)
 app.include_router(ranking_router)
 

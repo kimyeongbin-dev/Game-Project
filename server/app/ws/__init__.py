@@ -16,6 +16,12 @@
 | `ws_game`            | Quoridor 프로토콜 핸들러 | **재설계 대상.** §4.1 의 1인칭 미로 / Fog of War /
                                               서버 측 Raycasting 시야 필터링으로 대체 |
 
+> **M3 1단계 이후 `ws_game` 은 서비스·엔진과 어긋나 있다 (의도적으로 방치).**
+> `quoridor_service` 는 메서드 4개짜리 shim 이 되었고 엔진은 좌석(`seat_no`) 모델로
+> 바뀌었다. `create_game(..., is_ranked=, player1_user_id=)` 호출부와 2인 전제 필드
+> (`current_turn`, `winner`, `player{n}_win`)는 1단계 전부터 이미 서비스와 맞지 않았다.
+> 라우터 미등록이라 실행 경로가 없고, 3·4단계 재설계가 통째로 대체한다.
+
 ### 반드시 해결해야 하는 구조적 제약
 
 모든 상태가 **프로세스 내 모듈 전역 dict** 다 (`_connections`, `_queue`, `_rooms`).
