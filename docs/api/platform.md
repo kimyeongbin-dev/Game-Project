@@ -102,6 +102,7 @@ https://<host>/api/v1
 | `nickname_invalid` | 400 | 닉네임 규칙 위반 |
 | `already_merged` | 409 | 이미 병합된 계정 (§2) |
 | `merge_not_applicable` | 409 | 병합 조건 불충족 (§2.3) |
+| `feature_disabled` | 400 | 현 Phase 범위 밖 기능 (예: `chat` — [`games/maze.md`](games/maze.md) §12) |
 | `rate_limit_exceeded` | 429 | 레이트 리미트 |
 | `internal_error` | 500 | 서버 오류 |
 
@@ -383,9 +384,12 @@ Authorization: Bearer <익명 access token>      ← 이 헤더가 있으면 병
 이유: 서버가 "더 진행된 쪽"을 자동 선택하면 유저가 무엇을 잃는지 예측할 수 없다.
 어느 쪽을 남길지는 유저가 결정해야 하는 문제이며, 그 UI는 클라이언트가 제공한다.
 
-> 클라이언트가 유저 선택을 받아 재시도하는 API는 **이 문서 범위 밖**이다.
-> 필요해지면 `POST /api/v1/me/solo-progress`(덮어쓰기)로 별도 설계한다.
-> **판단 필요:** Phase 1 범위에 포함할지.
+유저 선택을 받아 재시도하는 병합 API는 **Phase 1 범위 밖**이며 **솔로 플레이
+도입 시점에 함께 설계**한다. 설계 후보: `PUT /api/v1/me/solo-progress/{game}`
+(전체 교체, 멱등).
+
+> **MUST:** 병합이 거절되면 클라이언트는 **로컬 솔로 진행도를 삭제하지 않는다.**
+> 선택 병합 API가 추가될 때 복구할 원본이 사라진다.
 
 ### §2.4 멱등성
 
@@ -652,9 +656,18 @@ GET /api/v1/leaderboard?game=maze_1p&mode=duel&limit=20&cursor=<opaque>
 | `revoked_at` | `DateTime` nullable | 폐기 시각 |
 | `replaced_by_jti` | `String(36)` nullable | 회전 추적. 폐기된 토큰이 재사용되면 탈취로 판정 |
 
-> **판단 필요:** 만료된 행의 정리 방식. 주기 작업으로 지울지, `expires_at`
-> 인덱스로 조회 시 걸러낼지. 스케줄러 존속 여부와 함께 결정
-> ([`../ROADMAP.md`](../ROADMAP.md) TODO).
+만료된 행의 정리 방식:
+
+1. 모든 조회에 `revoked_at IS NULL AND expires_at > now()` 조건을 건다
+2. **토큰 회전·로그인 시** 같은 `user_id`의 만료 행을 함께 삭제한다
+   (`DELETE … WHERE user_id=? AND expires_at < now()`) — 정리 부하가 유저
+   트래픽에 비례하고, 유저당 행 수가 활성 기기 수 수준으로 유지된다
+3. 인덱스 `(user_id, expires_at)`을 둔다
+4. 삭제 기준은 `revoked_at`이 **아니라 `expires_at`**이다 — 폐기된 행이
+   만료까지 남아야 `replaced_by_jti` 체인으로 재사용(탈취)을 잡을 수 있다 (§1.4)
+
+**주기 작업을 만들지 않는다.** 이는 [`../ROADMAP.md`](../ROADMAP.md)의
+스케줄러 제거 판단 근거 중 하나다.
 
 ### `user_game_stats` — 신규
 
@@ -711,8 +724,12 @@ GET /api/v1/leaderboard?game=maze_1p&mode=duel&limit=20&cursor=<opaque>
 | `user_id` | `Integer` FK nullable | AI면 `null` |
 | `display_name` | `String(50)` | |
 | `is_ai` | `Boolean` | |
-| `result` | `String` nullable | `win` \| `lose` \| `draw` \| `abandoned` |
+| `result` | `String` nullable | `win` \| `lose` \| `draw` \| `abandoned` \| `void` |
+| `rank` | `Integer` nullable | 순위. 산정 규칙은 [`games/maze.md`](games/maze.md) §9 |
+| `elimination_reason` | `String` nullable | `surrender` \| `time_forfeit` \| `disconnect_forfeit` |
 | `mmr_before`, `mmr_after` | `Integer` nullable | 랭크전만 |
+
+전부 좌석 행의 열이므로 인원이 늘어도 행만 는다.
 
 `game_sessions`에서 `player*_name`·`player*_user_id`를 제거하고, `winner`는
 `winner_seat_no`로 바꾼다. `current_turn`은 `current_seat_no`로 바꾼다.
@@ -760,8 +777,19 @@ GET /api/v1/leaderboard?game=maze_1p&mode=duel&limit=20&cursor=<opaque>
 Redis와 이중 기록이 되고 정합성 문제가 생긴다. 방 기록이 필요하면 게임이
 시작될 때 `game_sessions`에 남으므로 충분하다.
 
-> **판단 필요:** 성사되지 않은 매칭 시도의 통계가 필요한지. 필요하면 집계
-> 전용 테이블을 별도로 두고, 실시간 상태와 섞지 않는다.
+성사되지 않은 매칭 시도의 통계는 전용 테이블을 만들지 않고 **구조화 로그**로
+남긴다. 필드 이름을 지금 고정해 둔다(나중에 집계 테이블로 그대로 옮긴다).
+
+| 필드 | 값 |
+| :--- | :--- |
+| `event` | `match_found` \| `match_cancelled` \| `queue_left` |
+| `game` / `mode` | `maze_1p` / `duel`·`trio`… |
+| `wait_ms` | 큐 진입 ~ 이벤트까지 경과 시간 |
+| `mmr_gap` | 성사 시 참가자 MMR 최대 차 |
+| `queue_size` | 이벤트 시점 큐 길이 |
+
+유일한 비용은 소급 데이터가 로그 보존 기간까지만 복구된다는 것이다. `mode`가
+필드이므로 새 모드가 생겨도 값만 늘고 스키마는 그대로다.
 
 ---
 
@@ -801,7 +829,7 @@ Redis와 이중 기록이 되고 정합성 문제가 생긴다. 방 기록이 �
 | `DELETE /games/{id}` | WS `surrender` 또는 방 이탈 |
 | `POST /games/{id}/move` | WS `move` |
 | `POST /games/{id}/wall` | WS `wall` |
-| `POST /games/{id}/ai-move` | **판단 필요** — 솔로 AI 대전을 서버에서 돌릴지. §1.1은 솔로를 100% 오프라인·클라이언트 연산으로 규정한다. 그렇다면 이 엔드포인트는 폐기하고 AI를 Dart로 구현한다 |
+| `POST /games/{id}/ai-move` | **폐기.** 솔로 AI는 두 경로로 나뉜다 — **오프라인 솔로**(비로그인)는 Dart Isolate AI로 §1.1의 "100% 오프라인"을 그대로 유지하고, **온라인 AI 좌석**(로그인)은 `game_participants.is_ai = true`로 멀티 프로토콜을 그대로 재사용하며 서버 엔진(`simple_ai.py`)이 둔다(MMR 미반영, 랭크전 아님). 어느 쪽도 이 엔드포인트가 필요 없다. 둘 다 멀티플레이 상호작용 검증 이후 착수한다. `simple_ai.py`는 온라인 AI 좌석의 기반으로 보존하되 Phase 1에서는 미노출이다 |
 | `POST /games/{id}/abandon` | WS `surrender` |
 | `POST /games/{id}/recover` | WS 재접속 흐름 ([`games/maze.md`](games/maze.md)) |
 | `GET /games/{id}/valid-moves` | **폐기.** 서버가 유효 수 목록을 주면 Fog of War가 무너진다 — 시야 밖 정보가 드러난다. 클라이언트가 자신의 시야 내에서 계산한다 |
@@ -845,14 +873,7 @@ Fog of War 정책(전체 공개 vs 플레이어 시점 재생)과 함께 재설�
 
 ## 미결 사항 요약
 
-구현 착수 전에 결정해야 하는 항목.
-
-| # | 항목 | 위치 |
-| :--- | :--- | :--- |
-| 1 | 솔로 AI를 서버에서 돌릴지 (§1.1은 오프라인 규정) | §6 `ai-move` |
-| 2 | 충돌 시 유저 선택 병합 API를 Phase 1에 넣을지 | §2.3 |
-| 3 | `refresh_tokens` 만료 행 정리 방식 | §5 |
-| 4 | 매칭 시도 통계 필요 여부 | §5 |
+**현재 미결 없음.**
 
 ### 확정된 항목 (초판에서 미결이었던 것)
 
@@ -860,3 +881,16 @@ Fog of War 정책(전체 공개 vs 플레이어 시점 재생)과 함께 재설�
 | :--- | :--- |
 | 리플레이·히스토리 | **폐기.** 코드·DB·테스트 제거 완료. git 복원 지점만 기록 (§6) |
 | MMR 분리 단위 | **`(game, mode)` 조합.** 게임별 분리 방식을 모드에도 적용 (§4.2) |
+| 솔로 AI | **두 경로로 분리.** 오프라인 솔로는 Dart Isolate, 온라인 AI 좌석은 서버 엔진(`simple_ai.py`). 둘 다 멀티 검증 이후, `ai-move`는 폐기 (§6) |
+| 유저 선택 병합 | **솔로 플레이 도입 시점으로 유보.** 거절 시 클라이언트는 로컬 진행도를 삭제하지 않는다 (§2.3) |
+| `refresh_tokens` 정리 | **토큰 회전·로그인 시** 만료 행 삭제. 기준은 `expires_at`. 주기 작업 없음 (§5) |
+| 매칭 시도 통계 | **전용 테이블 없이 구조화 로그.** 필드 고정(`event`/`game`/`mode`/`wait_ms`/`mmr_gap`/`queue_size`) (§5) |
+
+### 운영 중 조정 항목
+
+설계는 확정됐고 서버 설정값의 숫자만 운영 데이터로 조정한다. 하드코딩 금지
+원칙(§5 확장성 원칙)의 실천이다.
+
+| 항목 | 초기값 | 조정 신호 | 위치 |
+| :--- | :--- | :--- | :--- |
+| MMR K 계수 | duel 40/24, trio 32/16 | 레이팅 수렴 속도 | §4.2 |

@@ -58,7 +58,7 @@
 현재 `app/ws/`의 상태가 전부 프로세스 내 모듈 전역 dict다
 (`connection_manager._connections`, `matchmaking._queue`, `room_manager._rooms`).
 `PLATFORM_ARCHITECTURE.md` §2.2는 Redis 8이 매치메이킹 큐·실시간 방 상태·
-턴 타이머·Pub/Sub을 전담하도록 규정한다.
+게임 시계와 접속 유예 데드라인·Pub/Sub을 전담하도록 규정한다.
 
 작업:
 
@@ -72,11 +72,11 @@
 
    | 파일 | 대상 |
    | :--- | :--- |
-   | `core/board.py` | `PLAYER1_START`/`PLAYER2_START`, `PLAYER1_GOAL_ROW`/`PLAYER2_GOAL_ROW` → 좌석별 시작·목표 테이블 |
-   | `core/player.py` | `player_id not in (1,2)` 예외, `create_player1`/`create_player2`, `goal_row` 단일 축 → `seat_no` + 목표(축+값) |
-   | `core/game_state.py` | `player1`/`player2` 속성 → 좌석 목록, `current_turn = 2 if … == 1 else 1` → 순환, `PLAYER1_WIN`/`PLAYER2_WIN` → `winner_seat_no`, `to_dict()` 의 `"player1"`/`"player2"` 키 |
+   | `core/board.py` | `PLAYER1_START`/`PLAYER2_START`, `PLAYER1_GOAL_ROW`/`PLAYER2_GOAL_ROW` → **모드별 배치 테이블**(`duel`=변 중앙 대향 2점, `trio`=네 꼭짓점 중 랜덤 3, `quad`(미래)=네 꼭짓점 전부) |
+   | `core/player.py` | `player_id not in (1,2)` 예외, `create_player1`/`create_player2`, `goal_row` 단일 축 → `seat_no` + **`goals[]` 목록**(축+값), **`eliminated`·`eliminated_order`** 추가 |
+   | `core/game_state.py` | `player1`/`player2` 속성 → 좌석 목록, `current_turn = 2 if … == 1 else 1` → 순환, `PLAYER1_WIN`/`PLAYER2_WIN` → `winner_seat_no`, `to_dict()` 의 `"player1"`/`"player2"` 키, 종료 판정에 **`last_standing`**(생존자 1명) 추가 |
    | `core/move_validator.py` | 단일 `opponent: Player` → 상대 **목록** (점프 규칙이 3인에서 달라진다) |
-   | `core/pathfinder.py` | `player1_pos`/`player1_goal` 2인 전용 서명 → 참가자 목록 |
+   | `core/pathfinder.py` | `player1_pos`/`player1_goal` 2인 전용 서명 → **생존자 목록** (탈락자를 포함하면 벽 설치가 영구 거절된다) |
    | `ai/simple_ai.py` | `game_state.opponent_player` 단일 상대 전제 |
    | `serializers/game_serializer.py` | `player1_name`/`player2_name` |
    | `db/models.py` | `player1_*`/`player2_*` → `game_participants` + `seat_no` |
@@ -87,6 +87,11 @@
    현재 같은 개념이 두 곳에 병존한다 (`app/db/models.py:115,150` vs
    `app/ws/room_manager.py:37,80`)
 5. `app/ws/ws_game.py` 라우터를 `main.py`에 등록 (지금은 의도적으로 미등록)
+6. **시야 엔진** — 3×3 차폐 판정 + 변 단위 `visible_edges` + 플레이어별 누적
+   상태(`discovered_edges`·`last_seen_players`)를 Redis에 게임 수명 동안 보관
+   ([`api/games/maze.md`](api/games/maze.md) §6)
+7. **시간 체계** — Fischer 게임 시계 + 접속 시계 분리 + Redis ZSET 스위퍼 +
+   워커 하트비트/무효 처리 ([`api/games/maze.md`](api/games/maze.md) §8)
 
 **완료 판정:** `server/Dockerfile` prod의 `--workers`를 2 이상으로 올리고
 매칭이 정상 동작해야 한다. 현재 `Dockerfile:120`에서 `1`로 고정되어 있고,
@@ -120,7 +125,7 @@
 | `utcnow` 일원화 | `app/core/time.py`에 표준 헬퍼가 있으나, 동일한 로컬 헬퍼가 3곳에 중복 정의되어 있다 — `app/db/models.py:20`, `app/games/maze/core/game_state.py:22`, `app/services/quoridor_service.py:24` | 동작에는 문제 없음. 정리는 해당 파일을 손댈 때 함께 |
 | CORS 오리진 제한 | `app/main.py:96`이 `allow_origins=["*"]` | 개발 편의. **프로덕션 배포 전 필수**. M4에서 처리 |
 | WS 라우터 미등록 | `app/ws/ws_game.py`가 `main.py`에 등록되어 있지 않다 | 의도적. 구 Quoridor 프로토콜이며 §4.1 재설계 대기. 동작하는 기능으로 오인되지 않게 하려는 것. 판정 내역은 `app/ws/__init__.py` docstring |
-| 스케줄러 제거 판단 | `app/services/scheduler/`는 일일 리셋 전용이고, 랭킹이 MMR로 단순화되면 쓰이지 않는다 | **지금 지우지 않는다.** M3에서 턴 타임아웃 정리 등 주기 작업이 생길 수 있어 제거 시점을 M3 이후로 미룬다 |
+| 스케줄러 제거 판단 | `app/services/scheduler/`는 일일 리셋 전용이고, 랭킹이 MMR로 단순화되면 쓰이지 않는다 | **결정 완료.** 근거 3개: ① 시계 만료를 ZSET 스위퍼가 처리한다 ② `refresh_tokens` 정리가 주기 작업을 쓰지 않는다 ③ `daily_champions` 폐기로 `daily_reset.py`의 유일한 용도가 소멸한다 → **M3에서 `app/services/scheduler/`와 `apscheduler==3.10.4` 제거**(`uv.lock` 재생성 포함) |
 
 ---
 
@@ -135,7 +140,12 @@
 - **리플레이·수 기록** — 2026-10-01에 폐기했다(엔드포인트 5개, `game_moves`,
   `game_state_snapshot`, `game_sessions.game_history`, `GameSerializer`의 리플레이
   부분, 테스트 11개). 복원이 필요하면 **커밋 `2a56fa9` 에서 꺼낸다.**
-  재도입 시 Fog of War 정책(전체 공개 vs 플레이어 시점 재생)을 함께 설계한다
+  재도입 시 Fog of War 정책(전체 공개 vs 플레이어 시점 재생)과 함께, **이동
+  경로·수 기록을 `game_end.full_board`와 함께** 설계한다 — 지금 `full_board`는
+  최종 상태만 담고 경로·수 기록은 담지 않는다
+- **MMR 매칭 범위 제한** — Phase 1은 매칭에 MMR 필터를 걸지 않는다(출시 직후
+  동시 접속자가 적어 필터를 걸면 매칭이 성사되지 않는다). 큐 인구가 확보된
+  뒤 서버 설정으로 켠다 ([`api/games/maze.md`](api/games/maze.md) §3)
 - 나머지 5종 게임 API — `docs/api/games/`에 `maze.md`와 동일한 틀로 추가
 
 ---
