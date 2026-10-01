@@ -92,84 +92,45 @@ class TestConnectionMessage:
         await connection_manager.send_personal(999, {"type": "test"})
 
 
-class TestGameManagement:
-    """게임 관리 테스트"""
+class TestReplacedConnection:
+    """교체된 옛 연결의 정리가 새 연결을 지우지 않는다"""
 
     @pytest.mark.asyncio
-    async def test_join_and_leave_game(self, connection_manager, mock_websocket, mock_user):
-        """게임 참가 및 탈퇴"""
-        await connection_manager.connect(
-            mock_websocket, mock_user.id, mock_user.nickname
-        )
-
-        # 게임 참가 (동기 메서드)
-        connection_manager.join_game(mock_user.id, "game-123")
-        conn = connection_manager.get_connection(mock_user.id)
-        assert conn.current_game_id == "game-123"
-
-        # 게임 탈퇴 (비동기 메서드)
-        await connection_manager.leave_game(mock_user.id, "game-123")
-        conn = connection_manager.get_connection(mock_user.id)
-        assert conn.current_game_id is None
-
-    @pytest.mark.asyncio
-    async def test_send_to_game(self, connection_manager, mock_user, mock_user2):
-        """게임 참가자들에게 메시지 전송"""
+    async def test_stale_disconnect_keeps_new_connection(self, connection_manager, mock_user):
         from tests.ws.conftest import MockWebSocket
 
-        ws1 = MockWebSocket()
-        ws2 = MockWebSocket()
+        old, new = MockWebSocket(), MockWebSocket()
+        await connection_manager.connect(old, mock_user.id, mock_user.nickname)
+        await connection_manager.connect(new, mock_user.id, mock_user.nickname)
 
-        await connection_manager.connect(ws1, mock_user.id, mock_user.nickname)
-        await connection_manager.connect(ws2, mock_user2.id, mock_user2.nickname)
+        # 옛 핸들러가 끝나며 자기 소켓으로 disconnect 를 부른다
+        await connection_manager.disconnect(mock_user.id, old)
 
-        # 게임 참가 (동기 메서드)
-        connection_manager.join_game(mock_user.id, "game-123")
-        connection_manager.join_game(mock_user2.id, "game-123")
-
-        await connection_manager.send_to_game(
-            "game-123", {"type": "game_state", "data": {}}
-        )
-
-        assert len(ws1.sent_messages) == 1
-        assert len(ws2.sent_messages) == 1
-
-
-class TestRoomManagement:
-    """방 관리 테스트"""
+        assert connection_manager.get_connection(mock_user.id).websocket is new
 
     @pytest.mark.asyncio
-    async def test_join_and_leave_room(self, connection_manager, mock_websocket, mock_user):
-        """방 참가 및 탈퇴"""
-        await connection_manager.connect(
-            mock_websocket, mock_user.id, mock_user.nickname
-        )
-
-        # 방 참가 (동기 메서드)
-        connection_manager.join_room(mock_user.id, "ROOM01")
-        conn = connection_manager.get_connection(mock_user.id)
-        assert conn.current_room_code == "ROOM01"
-
-        # 방 탈퇴 (비동기 메서드)
-        await connection_manager.leave_room(mock_user.id, "ROOM01")
-        conn = connection_manager.get_connection(mock_user.id)
-        assert conn.current_room_code is None
+    async def test_own_disconnect_removes(self, connection_manager, mock_websocket, mock_user):
+        await connection_manager.connect(mock_websocket, mock_user.id, mock_user.nickname)
+        await connection_manager.disconnect(mock_user.id, mock_websocket)
+        assert not connection_manager.is_connected(mock_user.id)
 
 
-class TestQueueState:
-    """큐 상태 테스트"""
+class TestLocalUsers:
+    """연결 맵만 로컬이다 — 게임·방 소속은 Redis 권위"""
 
     @pytest.mark.asyncio
-    async def test_set_queue_state(self, connection_manager, mock_websocket, mock_user):
-        """큐 상태 설정"""
-        await connection_manager.connect(
-            mock_websocket, mock_user.id, mock_user.nickname
-        )
+    async def test_local_user_ids(self, connection_manager, mock_user, mock_user2):
+        from tests.ws.conftest import MockWebSocket
 
-        connection_manager.set_in_queue(mock_user.id, True)
-        conn = connection_manager.get_connection(mock_user.id)
-        assert conn.is_in_queue is True
+        assert connection_manager.local_user_ids() == set()
+        await connection_manager.connect(MockWebSocket(), mock_user.id, mock_user.nickname)
+        await connection_manager.connect(MockWebSocket(), mock_user2.id, mock_user2.nickname)
+        assert connection_manager.local_user_ids() == {mock_user.id, mock_user2.id}
 
-        connection_manager.set_in_queue(mock_user.id, False)
-        conn = connection_manager.get_connection(mock_user.id)
-        assert conn.is_in_queue is False
+        await connection_manager.disconnect(mock_user.id)
+        assert connection_manager.local_user_ids() == {mock_user2.id}
+        assert connection_manager.get_stats() == {"total_connections": 1}
+
+    def test_no_membership_state(self, connection_manager):
+        for attr in ("_game_players", "_room_players", "join_game", "join_room", "send_to_game"):
+            assert not hasattr(connection_manager, attr)

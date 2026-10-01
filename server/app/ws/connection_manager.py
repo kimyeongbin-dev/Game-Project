@@ -1,11 +1,15 @@
 """
 WebSocket Connection Manager
-WebSocket 연결 관리
+WebSocket 연결 관리 — 이 워커 프로세스의 소켓만 안다
+
+소켓 객체는 본래 프로세스 안에 있으므로 연결 맵(user_id → 소켓)만 여기 둔다.
+누가 어느 게임·방에 속하는지는 Redis(`game:{id}:meta`·`room:{code}`)가 권위다.
+게임·방 단위 전송은 이벤트 발행(`app/services/events.py`)과 구독 버스
+(`app/ws/bus.py`)가 맡고, 버스는 수신자 목록과 `local_user_ids()` 의 교집합에만 보낸다.
 """
 
 import logging
-import json
-from typing import Dict, Optional, Set, Any
+from typing import Dict, Optional
 from fastapi import WebSocket
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -21,9 +25,6 @@ class PlayerConnection:
     user_id: int
     nickname: str
     connected_at: datetime = field(default_factory=utcnow)
-    current_game_id: Optional[str] = None
-    current_room_code: Optional[str] = None
-    is_in_queue: bool = False
 
 
 class ConnectionManager:
@@ -32,10 +33,6 @@ class ConnectionManager:
     def __init__(self):
         # user_id -> PlayerConnection
         self._connections: Dict[int, PlayerConnection] = {}
-        # game_id -> set of user_ids
-        self._game_players: Dict[str, Set[int]] = {}
-        # room_code -> set of user_ids
-        self._room_players: Dict[str, Set[int]] = {}
 
     async def connect(self, websocket: WebSocket, user_id: int, nickname: str) -> PlayerConnection:
         """새 연결 등록"""
@@ -58,20 +55,17 @@ class ConnectionManager:
         logger.info(f"WebSocket connected: {nickname} (user_id={user_id})")
         return connection
 
-    async def disconnect(self, user_id: int):
-        """연결 해제"""
-        if user_id not in self._connections:
+    async def disconnect(self, user_id: int, websocket: Optional[WebSocket] = None):
+        """연결 해제
+
+        websocket 을 넘기면 그 소켓이 지금 등록된 소켓일 때만 지운다. 4000 으로 교체된
+        옛 연결의 핸들러가 끝나며 부르는 disconnect 가 새 연결을 지우지 않게 한다.
+        """
+        conn = self._connections.get(user_id)
+        if conn is None:
             return
-
-        conn = self._connections[user_id]
-
-        # 게임에서 제거
-        if conn.current_game_id:
-            await self.leave_game(user_id, conn.current_game_id)
-
-        # 방에서 제거
-        if conn.current_room_code:
-            await self.leave_room(user_id, conn.current_room_code)
+        if websocket is not None and conn.websocket is not websocket:
+            return
 
         del self._connections[user_id]
         logger.info(f"WebSocket disconnected: {conn.nickname} (user_id={user_id})")
@@ -84,6 +78,10 @@ class ConnectionManager:
         """연결 여부 확인"""
         return user_id in self._connections
 
+    def local_user_ids(self) -> set[int]:
+        """이 워커에 연결된 유저 — 버스가 수신자 목록과 교집합을 구한다"""
+        return set(self._connections)
+
     async def send_personal(self, user_id: int, message: dict):
         """특정 유저에게 메시지 전송"""
         conn = self._connections.get(user_id)
@@ -92,109 +90,18 @@ class ConnectionManager:
                 await conn.websocket.send_json(message)
             except Exception as e:
                 logger.warning(f"Failed to send message to {user_id}: {e}")
-                await self.disconnect(user_id)
-
-    async def send_to_game(self, game_id: str, message: dict, exclude_user: Optional[int] = None):
-        """게임 참가자들에게 메시지 전송"""
-        if game_id not in self._game_players:
-            return
-
-        for user_id in self._game_players[game_id]:
-            if user_id != exclude_user:
-                await self.send_personal(user_id, message)
-
-    async def send_to_room(self, room_code: str, message: dict, exclude_user: Optional[int] = None):
-        """방 참가자들에게 메시지 전송"""
-        if room_code not in self._room_players:
-            return
-
-        for user_id in self._room_players[room_code]:
-            if user_id != exclude_user:
-                await self.send_personal(user_id, message)
+                await self.disconnect(user_id, conn.websocket)
 
     async def broadcast(self, message: dict):
-        """모든 연결에 메시지 전송"""
+        """이 워커의 모든 연결에 메시지 전송"""
         for user_id in list(self._connections.keys()):
             await self.send_personal(user_id, message)
-
-    # ===== 게임 관리 =====
-
-    def join_game(self, user_id: int, game_id: str):
-        """게임 참가"""
-        if game_id not in self._game_players:
-            self._game_players[game_id] = set()
-        self._game_players[game_id].add(user_id)
-
-        conn = self._connections.get(user_id)
-        if conn:
-            conn.current_game_id = game_id
-
-    async def leave_game(self, user_id: int, game_id: str):
-        """게임 나가기"""
-        if game_id in self._game_players:
-            self._game_players[game_id].discard(user_id)
-            if not self._game_players[game_id]:
-                del self._game_players[game_id]
-
-        conn = self._connections.get(user_id)
-        if conn and conn.current_game_id == game_id:
-            conn.current_game_id = None
-
-    def get_game_players(self, game_id: str) -> Set[int]:
-        """게임 참가자 목록"""
-        return self._game_players.get(game_id, set())
-
-    # ===== 방 관리 =====
-
-    def join_room(self, user_id: int, room_code: str):
-        """방 참가"""
-        if room_code not in self._room_players:
-            self._room_players[room_code] = set()
-        self._room_players[room_code].add(user_id)
-
-        conn = self._connections.get(user_id)
-        if conn:
-            conn.current_room_code = room_code
-
-    async def leave_room(self, user_id: int, room_code: str):
-        """방 나가기"""
-        if room_code in self._room_players:
-            self._room_players[room_code].discard(user_id)
-            if not self._room_players[room_code]:
-                del self._room_players[room_code]
-
-        conn = self._connections.get(user_id)
-        if conn and conn.current_room_code == room_code:
-            conn.current_room_code = None
-
-    def get_room_players(self, room_code: str) -> Set[int]:
-        """방 참가자 목록"""
-        return self._room_players.get(room_code, set())
-
-    # ===== 매칭 큐 =====
-
-    def set_in_queue(self, user_id: int, in_queue: bool):
-        """매칭 큐 상태 설정"""
-        conn = self._connections.get(user_id)
-        if conn:
-            conn.is_in_queue = in_queue
-
-    def is_in_queue(self, user_id: int) -> bool:
-        """매칭 큐 상태 확인"""
-        conn = self._connections.get(user_id)
-        return conn.is_in_queue if conn else False
 
     # ===== 통계 =====
 
     def get_stats(self) -> dict:
-        """연결 통계"""
-        return {
-            "total_connections": len(self._connections),
-            "active_games": len(self._game_players),
-            "active_rooms": len(self._room_players),
-            "players_in_games": sum(len(p) for p in self._game_players.values()),
-            "players_in_rooms": sum(len(p) for p in self._room_players.values()),
-        }
+        """연결 통계 (이 워커만)"""
+        return {"total_connections": len(self._connections)}
 
 
 # 싱글톤 인스턴스
