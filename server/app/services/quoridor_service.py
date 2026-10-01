@@ -133,37 +133,12 @@ class QuoridorService:
                         ai_difficulty=ai_difficulty,
                         game_state=game.to_dict()
                     )
-                    # 초기 상태를 step -1로 저장 (리플레이 시작점)
-                    await repo.add_move(
-                        game_id=game.game_id,
-                        step_no=-1,
-                        player=0,  # 초기 상태는 플레이어 0
-                        action_type="move",  # 더미 타입
-                        row=0,
-                        col=0,
-                        orientation=None,
-                        game_state_snapshot=game.to_dict()
-                    )
                 else:
-                    # 기존 게임 업데이트 + 액션 저장 (단일 트랜잭션)
+                    # 기존 게임 업데이트
                     status = game.status.value
                     winner = game.winner
 
-                    # GameMove 먼저 추가 (같은 세션 내)
-                    if action:
-                        step_no = game.turn_count
-                        await repo.add_move_no_commit(
-                            game_id=game.game_id,
-                            step_no=step_no,
-                            player=action.get("player", 1),
-                            action_type=action.get("type", "move"),
-                            row=action.get("row", 0),
-                            col=action.get("col", 0),
-                            orientation=action.get("orientation"),
-                            game_state_snapshot=game.to_dict()
-                        )
-
-                    # 게임 상태 업데이트 (커밋은 여기서 한 번만)
+                    # 게임 상태 업데이트
                     await repo.update_game_state(
                         game_id=game.game_id,
                         game_state=game.to_dict(),
@@ -473,51 +448,6 @@ class QuoridorService:
             logger.warning(f"Failed to get active sessions: {e}")
             return []
 
-    async def get_game_history(self, game_id: str) -> Optional[list]:
-        """게임 히스토리 조회 (리플레이용) - 기존 JSONB 방식"""
-        if not is_db_available():
-            return [] if game_id in self._games else None
-
-        try:
-            async with get_session_factory()() as session:
-                repo = GameSessionRepository(session)
-                return await repo.get_game_history(game_id)
-        except Exception as e:
-            logger.warning(f"Failed to get game history: {e}")
-            return None
-
-    # ===== 리플레이 시스템 메서드 =====
-
-    async def get_replay_moves(self, game_id: str) -> Optional[list[dict]]:
-        """리플레이용 수 목록 조회 (GameMove 테이블)"""
-        if not is_db_available():
-            return None
-
-        try:
-            async with get_session_factory()() as session:
-                repo = GameSessionRepository(session)
-                moves = await repo.get_moves(game_id)
-                return [move.to_dict() for move in moves]
-        except Exception as e:
-            logger.warning(f"Failed to get replay moves: {e}")
-            return None
-
-    async def get_state_at_step(self, game_id: str, step_no: int) -> Optional[dict]:
-        """특정 스텝에서의 게임 상태 조회 (step -1 = 초기 상태)"""
-        if not is_db_available():
-            return None
-
-        session_factory = get_session_factory()
-        if session_factory is None:
-            return None
-
-        try:
-            async with session_factory() as session:
-                repo = GameSessionRepository(session)
-                return await repo.get_state_at_step(game_id, step_no)
-        except Exception as e:
-            logger.warning(f"Failed to get state at step: {e}")
-            return None
 
     async def get_total_moves(self, game_id: str) -> int:
         """게임의 총 수 개수"""

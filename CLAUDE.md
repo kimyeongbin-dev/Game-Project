@@ -137,6 +137,7 @@ games/ ┘
 - **게임 상태 직렬화**: `GameState.to_dict()` / `from_dict()`로 DB 영속화.
 - **서비스 싱글톤**: `quoridor_service` 인스턴스가 게임 상태를 관리한다.
 - **하드웨어 금고 키 보관**: AES/HMAC 키를 소스에 하드코딩하지 않는다. 앱 최초 실행 시 기기 내부에서 난수 생성해 Keystore/Keychain에만 보관한다 (§3.2).
+- **개수를 박지 않는다**: 인원·게임·모드 수를 코드나 스키마에 고정값으로 쓰지 않는다. 판단 기준은 "인원이 4명이 되면 무엇을 고쳐야 하는가?" — 행 추가 외에 변경이 필요하면 하드코딩이다 (`docs/api/platform.md` §5 확장성 원칙).
 
 ## 진행 상태 — 리팩토링 중
 
@@ -144,7 +145,7 @@ games/ ┘
 | :-- | :-- |
 | 디렉토리 구조 / Docker 환경 | 완료 |
 | `server/app/games/maze/` | 구 Quoridor 구현이 **명칭 그대로** 이동된 상태. 도메인 리네이밍 미적용 |
-| `server/app/api/quoridor.py`, `schemas/quoridor.py`, `services/quoridor_service.py` | 구 REST API. 1인칭 미로 명세(§4.1)로 재설계 예정 |
+| `server/app/api/quoridor.py`, `schemas/quoridor.py`, `services/quoridor_service.py` | 구 REST API 9개. 1인칭 미로 명세(§4.1)로 재설계 예정. 리플레이·히스토리 5개는 폐기 완료 |
 | `server/app/core/` | `config.py`(환경변수 단일 진입점), `time.py`(표준 utcnow) |
 | Redis | 연결 계층(`app/db/redis.py`) + lifespan 배선 완료. graceful degradation |
 | 레이트 리미터 | **배선 완료** — Redis 저장소, 커스텀 429, `main.py` 등록. 테스트 10건 |

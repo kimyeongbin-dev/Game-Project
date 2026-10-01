@@ -10,7 +10,7 @@ from .config import (
     is_db_available,
     DATABASE_URL
 )
-from .models import GameSession, GameStatus, GameMode, GameMove, ActionType
+from .models import GameSession, GameStatus, GameMode
 
 __all__ = [
     "async_session_factory",
@@ -23,7 +23,5 @@ __all__ = [
     "DATABASE_URL",
     "GameSession",
     "GameStatus",
-    "GameMode",
-    "GameMove",
-    "ActionType"
+    "GameMode"
 ]

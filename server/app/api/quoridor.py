@@ -16,9 +16,6 @@ from app.schemas.quoridor import (
     GameStateSchema,
     ErrorResponse,
     ActiveSessionsResponse,
-    GameHistoryResponse,
-    ReplayMovesResponse,
-    ReplayStateResponse,
 )
 from app.services.quoridor_service import quoridor_service
 
@@ -99,24 +96,6 @@ async def recover_game(game_id: str):
         )
 
     return game.to_dict()
-
-
-@router.get(
-    "/games/{game_id}/history",
-    response_model=GameHistoryResponse,
-    summary="게임 히스토리 조회",
-    description="리플레이를 위한 게임의 모든 수 기록을 조회합니다.",
-)
-async def get_game_history(game_id: str):
-    """게임 히스토리 조회"""
-    history = await quoridor_service.get_game_history(game_id)
-    if history is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={"error": "game_not_found", "message": "Game not found"}
-        )
-
-    return GameHistoryResponse(game_id=game_id, history=history, total_moves=len(history))
 
 
 @router.post(
@@ -271,59 +250,3 @@ async def delete_game(game_id: str):
     return None
 
 
-# ===== 리플레이 시스템 엔드포인트 =====
-
-@router.get(
-    "/games/{game_id}/replay/moves",
-    response_model=ReplayMovesResponse,
-    summary="리플레이 수 목록 조회",
-    description="GameMove 테이블에서 게임의 모든 수를 조회합니다. step_no 순서로 정렬됩니다.",
-)
-async def get_replay_moves(game_id: str):
-    """리플레이용 수 목록 조회"""
-    moves = await quoridor_service.get_replay_moves(game_id)
-    if moves is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={"error": "game_not_found", "message": "Game not found or no moves recorded"}
-        )
-
-    return ReplayMovesResponse(
-        game_id=game_id,
-        moves=moves,
-        total_moves=len(moves)
-    )
-
-
-@router.get(
-    "/games/{game_id}/replay/state/{step_no}",
-    response_model=ReplayStateResponse,
-    summary="특정 스텝의 게임 상태 조회",
-    description="특정 스텝에서의 게임 상태 스냅샷을 조회합니다. step_no=-1이면 초기 상태를 반환합니다.",
-)
-async def get_replay_state(game_id: str, step_no: int):
-    """리플레이용 특정 스텝 상태 조회"""
-    game_state = await quoridor_service.get_state_at_step(game_id, step_no)
-    if game_state is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={"error": "state_not_found", "message": f"Game state at step {step_no} not found"}
-        )
-
-    return ReplayStateResponse(
-        game_id=game_id,
-        step_no=step_no,
-        game_state=game_state,
-        is_initial=(step_no < 0)
-    )
-
-
-@router.get(
-    "/games/{game_id}/replay/total",
-    summary="게임 총 수 개수 조회",
-    description="게임의 총 수(move) 개수를 조회합니다.",
-)
-async def get_total_moves(game_id: str):
-    """게임 총 수 개수 조회"""
-    total = await quoridor_service.get_total_moves(game_id)
-    return {"game_id": game_id, "total_moves": total}

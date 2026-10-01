@@ -65,8 +65,24 @@
 1. 매치메이킹 큐·방 상태를 Redis로 이전
 2. 워커 간 브로드캐스트를 Redis Pub/Sub으로 (WebSocket 객체 자체는 본질적으로
    프로세스 내에 남는다 — 연결 맵은 그대로 두고 메시지 전달만 Pub/Sub)
-3. **1:1:1 지원** — `app/ws/matchmaking.py:144`의 `len(self._queue) < 2` 하드코딩 제거.
-   3인 턴 순서·승패 판정·3자 MMR 반영 규칙이 필요하다 (설계서에서 확정)
+3. **1:1:1 지원 — 게임 엔진 N인 일반화**
+
+   `len(self._queue) < 2` 하나를 고치는 문제가 아니다. **엔진 전반이 2인 전제**다.
+   설계 원칙은 [`api/platform.md`](api/platform.md) §5 "확장성 원칙" 참조.
+
+   | 파일 | 대상 |
+   | :--- | :--- |
+   | `core/board.py` | `PLAYER1_START`/`PLAYER2_START`, `PLAYER1_GOAL_ROW`/`PLAYER2_GOAL_ROW` → 좌석별 시작·목표 테이블 |
+   | `core/player.py` | `player_id not in (1,2)` 예외, `create_player1`/`create_player2`, `goal_row` 단일 축 → `seat_no` + 목표(축+값) |
+   | `core/game_state.py` | `player1`/`player2` 속성 → 좌석 목록, `current_turn = 2 if … == 1 else 1` → 순환, `PLAYER1_WIN`/`PLAYER2_WIN` → `winner_seat_no`, `to_dict()` 의 `"player1"`/`"player2"` 키 |
+   | `core/move_validator.py` | 단일 `opponent: Player` → 상대 **목록** (점프 규칙이 3인에서 달라진다) |
+   | `core/pathfinder.py` | `player1_pos`/`player1_goal` 2인 전용 서명 → 참가자 목록 |
+   | `ai/simple_ai.py` | `game_state.opponent_player` 단일 상대 전제 |
+   | `serializers/game_serializer.py` | `player1_name`/`player2_name` |
+   | `db/models.py` | `player1_*`/`player2_*` → `game_participants` + `seat_no` |
+
+   > 판단 기준: **"인원이 4명이 되면 무엇을 고쳐야 하는가?"** 행 추가 외에
+   > 스키마·코드 변경이 필요하면 아직 하드코딩이 남은 것이다.
 4. `match_queue`·`game_rooms` **테이블**과 in-process dataclass의 권위 경계 정리.
    현재 같은 개념이 두 곳에 병존한다 (`app/db/models.py:115,150` vs
    `app/ws/room_manager.py:37,80`)
@@ -116,6 +132,10 @@
 - **데일리 점수·시즌 랭킹** — 랭킹을 MMR 하나로 단순화하면서 일일 리셋 점수판과
   `daily_champions`를 폐기했다. 가벼운 경쟁 요소가 필요해지면 MMR 기록의
   시간축을 활용해 다시 얹는다
+- **리플레이·수 기록** — 2026-10-01에 폐기했다(엔드포인트 5개, `game_moves`,
+  `game_state_snapshot`, `game_sessions.game_history`, `GameSerializer`의 리플레이
+  부분, 테스트 11개). 복원이 필요하면 **커밋 `2a56fa9` 에서 꺼낸다.**
+  재도입 시 Fog of War 정책(전체 공개 vs 플레이어 시점 재생)을 함께 설계한다
 - 나머지 5종 게임 API — `docs/api/games/`에 `maze.md`와 동일한 틀로 추가
 
 ---

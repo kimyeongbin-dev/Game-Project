@@ -473,29 +473,67 @@ GET /api/v1/nicknames/availability?nickname=미로장인
 
 ### §4.2 MMR 산정
 
+#### 분리 단위 — `(game, mode)`
+
+MMR 풀을 **게임과 플레이 방식(모드)의 조합**으로 분리한다.
+
+| 게임 | 모드 | MMR 풀 |
+| :--- | :--- | :--- |
+| `maze_1p` | `duel` (1:1) | 독립 |
+| `maze_1p` | `trio` (1:1:1) | 독립 |
+| `gomoku_renju` | `duel` | 독립 |
+
+같은 미로라도 1:1과 1:1:1은 **플레이 방식이 아예 다르다.** 1:1은 상대 하나를
+읽는 게임이고, 1:1:1은 두 상대의 상호작용과 어부지리가 개입한다. 한 풀에 두면
+한쪽 실력이 다른 쪽 매칭 품질을 망친다.
+
+게임별 분리와 모드별 분리를 **같은 메커니즘**으로 처리한다 — 키가
+`(user_id, game, mode)` 하나뿐이므로 게임이 늘어도 모드가 늘어도 스키마·API가
+그대로다. 일관성과 모듈화를 동시에 얻는다.
+
+> 새 게임·새 모드를 추가할 때 코드 변경 없이 행만 늘어난다. 모드를 열거형으로
+> 하드코딩하지 않는다 (§5 확장성 원칙).
+
+#### 산정식
+
 Elo 기반.
 
 | 항목 | 값 |
 | :--- | :--- |
 | 초기값 | 1000 |
 | 배치(placement) | 최초 10판 |
-| K 계수 | 배치 중 40, 이후 24 |
 | 하한 | 100 (그 이하로 내려가지 않음) |
-
-2인 대전의 기대 승률과 변동:
+| **K 계수** | **모드별 파라미터** (아래) |
 
 ```
 E_a = 1 / (1 + 10^((R_b - R_a) / 400))
-R_a' = R_a + K * (S_a - E_a)          # S_a: 승 1, 패 0
+R_a' = R_a + K * (S_a - E_a)          # S_a: 승 1, 무 0.5, 패 0
 ```
 
-**3인전(1:1:1)의 결과 매핑은 게임별 문서에서 정의한다** — 순위를 어떻게 쌍별
-결과로 분해할지는 게임 규칙에 달렸다. 1인칭 미로는
-[`games/maze.md`](games/maze.md) 참조.
+#### K 계수를 모드별로 둔다
 
-> **판단 필요:** 게임별로 MMR을 분리할지(미로 MMR, 오목 MMR) 하나로 합칠지.
-> 오목이 추가되는 시점에 결정한다. 지금은 **게임별 분리**를 전제로 스키마를
-> 설계한다 (합치는 것보다 나누는 쪽이 나중에 되돌리기 쉽다).
+| 모드 | 배치 중 | 배치 후 |
+| :--- | :--- | :--- |
+| `duel` | 40 | 24 |
+| `trio` | 32 | 16 |
+
+`trio`의 K가 낮은 이유: 3인 결과는 쌍별로 분해되어 **한 경기에서 2개의 쌍 결과**가
+나오므로, 같은 K를 쓰면 1경기당 변동폭이 `duel`의 약 2배가 된다.
+
+> 초판 설계는 변동량을 **2로 나누어** 정규화했다. 그 조치는 duel과 trio가 같은
+> 풀을 공유할 때만 의미가 있다. 풀을 분리한 지금은 **정규화를 삭제하고 K로
+> 조절한다** — 모드마다 독립 튜닝이 가능해 더 모듈화된다.
+
+#### 다자전 결과의 Elo 변환
+
+순위를 쌍별 결과로 분해하는 방식은 유지한다. 3인 결과 → 3개 쌍
+`(1위,2위) (1위,3위) (2위,3위)` 각각에 위 식을 적용하고, 한 플레이어의 변동은
+그가 참여한 쌍들의 변동을 **합산**한다 (나누지 않는다).
+
+공동 순위는 해당 쌍을 무승부(`S=0.5`)로 처리한다.
+
+게임별 순위 판정 규칙(무엇이 1위인가, 동점 처리)은 게임 문서에서 정의한다 —
+1인칭 미로는 [`games/maze.md`](games/maze.md) §11.
 
 ### §4.3 내 전적
 
@@ -507,26 +545,32 @@ GET /api/v1/me/stats
 {
   "success": true,
   "data": {
-    "games": [
-      { "game": "maze_1p", "mmr": 1042, "wins": 13, "losses": 9, "games": 22,
-        "placement_remaining": 0, "rank": 128 }
+    "stats": [
+      { "game": "maze_1p", "mode": "duel", "mmr": 1042, "wins": 13, "losses": 9,
+        "games": 22, "placement_remaining": 0, "rank": 128 },
+      { "game": "maze_1p", "mode": "trio", "mmr": 980, "wins": 3, "losses": 5,
+        "games": 8, "placement_remaining": 2, "rank": null }
     ]
   }
 }
 ```
 
-`rank`는 조회 시점의 순위이며 실시간으로 변한다.
+- 항목은 `(game, mode)` 단위다. 플레이한 조합만 반환한다
+- 배치 미완료(`placement_remaining > 0`)면 `rank`는 `null`이다
+- `rank`는 조회 시점 값이며 실시간으로 변한다
 
 ### §4.4 리더보드
 
 ```
-GET /api/v1/leaderboard?game=maze_1p&limit=20&cursor=<opaque>
+GET /api/v1/leaderboard?game=maze_1p&mode=duel&limit=20&cursor=<opaque>
 ```
 
 ```json
 {
   "success": true,
   "data": {
+    "game": "maze_1p",
+    "mode": "duel",
     "items": [
       { "rank": 1, "nickname": "미로장인", "mmr": 1820, "wins": 204, "losses": 96 }
     ],
@@ -536,7 +580,8 @@ GET /api/v1/leaderboard?game=maze_1p&limit=20&cursor=<opaque>
 }
 ```
 
-- `game`은 필수다. 게임별 MMR이므로 전체 통합 리더보드는 의미가 없다
+- **`game`과 `mode` 모두 필수다.** MMR 풀이 조합 단위이므로 통합 리더보드는
+  의미가 없다. 둘 중 하나라도 없으면 `invalid_request`(400)
 - 배치를 마치지 않은 계정은 노출하지 않는다
 - 인증 없이 조회 가능하다 (공개 정보). 단 레이트 리미트는 적용된다
 
@@ -552,6 +597,27 @@ GET /api/v1/leaderboard?game=maze_1p&limit=20&cursor=<opaque>
 
 > **권위:** 데이터 모델의 정본은 이 절과 `server/app/db/models.py`뿐이다.
 > `docs/db_design.md`는 구식이며 폐기되었다. 제3의 장소에 또 기술하지 않는다.
+
+### 확장성 원칙 — 개수를 코드·스키마에 박지 않는다
+
+**인원 수·게임 수·모드 수를 고정값으로 쓰지 않는다.** 1:1:1 지원이 막힌 원인이
+정확히 이것이었다.
+
+| 금지 | 대신 |
+| :--- | :--- |
+| `player1_*` / `player2_*` 컬럼 | `game_participants` + `seat_no` (행으로 표현) |
+| `player` 값이 `1 또는 2`라는 전제 | `seat_no` 는 1..N |
+| `GameStatus.PLAYER1_WIN` / `PLAYER2_WIN` | 승자는 `winner_seat_no`, 참가자별 `result` |
+| `goal_row` 단일 축 | 목표를 **축 + 값**으로 (3번 좌석은 열이 목표다) |
+| `game`·`mode` 를 DB ENUM 으로 | 문자열 컬럼. 값 추가에 마이그레이션이 불필요하다 |
+| 단일 `opponent` 전제 | 상대는 **목록**이다 |
+
+이 원칙은 **DB뿐 아니라 게임 엔진에도 적용된다.** 현재
+`app/games/maze/core/` 전반이 2인 전제이며, 일반화 작업 목록은
+[`../ROADMAP.md`](../ROADMAP.md) M3에 있다.
+
+> 판단 기준: "인원이 4명이 되면 무엇을 고쳐야 하는가?"를 물었을 때
+> **행 추가 외에 스키마·코드 변경이 필요하면 하드코딩이다.**
 
 ### `users` — 변경
 
@@ -592,17 +658,23 @@ GET /api/v1/leaderboard?game=maze_1p&limit=20&cursor=<opaque>
 
 ### `user_game_stats` — 신규
 
-게임별 MMR·전적(§4.2). `users`에서 분리하는 이유는 게임이 6종이고 게임별 MMR을
-전제하기 때문이다.
+`(game, mode)` 조합별 MMR·전적(§4.2).
 
 | 컬럼 | 타입 | 비고 |
 | :--- | :--- | :--- |
-| `user_id` | `Integer` FK, PK 일부 | |
-| `game` | `String` , PK 일부 | `maze_1p`, `gomoku_renju`, … |
+| `user_id` | `Integer` FK, **PK 일부** | |
+| `game` | `String`, **PK 일부** | `maze_1p`, `gomoku_renju`, … |
+| `mode` | `String`, **PK 일부** | `duel`, `trio`, … |
 | `mmr` | `Integer` default 1000 | |
 | `wins`, `losses` | `Integer` default 0 | |
 | `games_played` | `Integer` default 0 | 배치 판정용 |
 | `updated_at` | `DateTime` | |
+
+복합 PK `(user_id, game, mode)`. 게임이 늘어도 모드가 늘어도 **행만 늘고
+스키마는 그대로다.** `game`·`mode`를 DB 열거형(ENUM)으로 만들지 않는다 —
+값을 추가할 때마다 마이그레이션이 필요해진다 (아래 확장성 원칙).
+
+리더보드 조회를 위해 `(game, mode, mmr DESC)` 인덱스가 필요하다.
 
 ### `solo_progress` — 신규
 
@@ -647,12 +719,21 @@ GET /api/v1/leaderboard?game=maze_1p&limit=20&cursor=<opaque>
 
 > 대안으로 `player3_*` 컬럼을 추가하는 방법이 있으나 택하지 않는다 — 인원이
 > 늘 때마다 스키마가 바뀌고, 3인 중 2명만 채워진 상태를 표현하기 어렵다.
+> 위 확장성 원칙에 정면으로 위배된다.
 
-### `game_moves` — 변경 (⚠️ 1:1:1 차단 요인)
+### `game_moves`, `ActionType`(DB), `game_sessions.game_history` — 폐기 완료
 
-| 컬럼 | 현재 | 변경 |
-| :--- | :--- | :--- |
-| `player` | `Integer` — 주석에 **"1 또는 2"** (`models.py:264`) | **`seat_no`로 개칭**하고 3 이상을 허용 |
+리플레이 기능을 폐기하면서 함께 제거했다. 수 단위 기록을 저장하지 않는다.
+
+| 대상 | 비고 |
+| :--- | :--- |
+| `game_moves` 테이블 | `game_state_snapshot`(수마다 전체 상태) 포함 |
+| DB `ActionType` enum | `app/games/maze/core/game_state.py`의 **엔진 `ActionType`은 유지**된다 (AI가 사용) |
+| `game_sessions.game_history` | 구 JSONB 방식. 이미 갱신이 중단된 죽은 컬럼이었다 |
+| `GameSession.moves` relationship | |
+
+복원이 필요하면 git에서 꺼낸다 — [`../ROADMAP.md`](../ROADMAP.md) 향후 확장에
+복원 지점 커밋이 적혀 있다.
 
 ### `daily_champions` — 폐기
 
@@ -706,8 +787,8 @@ Redis와 이중 기록이 되고 정합성 문제가 생긴다. 방 기록이 �
 
 | 기존 | 대체 |
 | :--- | :--- |
-| `GET /leaderboard` | `GET /api/v1/leaderboard?game=` (MMR 기준, 커서 페이지네이션) |
-| `GET /my-rank` | `GET /api/v1/me/stats` (게임별 `rank` 포함) |
+| `GET /leaderboard` | `GET /api/v1/leaderboard?game=&mode=` (MMR 기준, 커서 페이지네이션) |
+| `GET /my-rank` | `GET /api/v1/me/stats` (`(game, mode)` 별 `rank` 포함) |
 | `GET /champion` | **폐기.** 일일 리셋 개념 제거 |
 | `GET /champions` | **폐기.** 동일 |
 
@@ -724,30 +805,33 @@ Redis와 이중 기록이 되고 정합성 문제가 생긴다. 방 기록이 �
 | `POST /games/{id}/abandon` | WS `surrender` |
 | `POST /games/{id}/recover` | WS 재접속 흐름 ([`games/maze.md`](games/maze.md)) |
 | `GET /games/{id}/valid-moves` | **폐기.** 서버가 유효 수 목록을 주면 Fog of War가 무너진다 — 시야 밖 정보가 드러난다. 클라이언트가 자신의 시야 내에서 계산한다 |
-| `GET /games/{id}/history` | **판단 필요** (아래) |
-| `GET /games/{id}/replay/moves` | **판단 필요** (아래) |
-| `GET /games/{id}/replay/state/{step_no}` | **판단 필요** (아래) |
-| `GET /games/{id}/replay/total` | **판단 필요** (아래) |
+| `GET /games/{id}/history` | **폐기 완료.** 리플레이 기능 제거 (아래) |
+| `GET /games/{id}/replay/moves` | **폐기 완료.** 리플레이 기능 제거 (아래) |
+| `GET /games/{id}/replay/state/{step_no}` | **폐기 완료.** 리플레이 기능 제거 (아래) |
+| `GET /games/{id}/replay/total` | **폐기 완료.** 리플레이 기능 제거 (아래) |
 | `GET /sessions` | **폐기.** 진행 중 세션 목록은 접속 시 WS가 통보한다 |
 
-**리플레이·히스토리 4개 — 대체 기능이 없다. 명시적 판단이 필요하다.**
+**리플레이·히스토리 5개 — 폐기 완료**
 
-`PLATFORM_ARCHITECTURE.md`에는 리플레이 요구가 없다. 그러나 구현이 이미 존재하고
-(`game_moves` 테이블 + `GameMove.game_state_snapshot`) 테스트도 있다
-(`server/tests/api/test_replay.py`).
+`PLATFORM_ARCHITECTURE.md`에 리플레이 요구가 없고, 구현을 새 구조로 이관하는
+비용과 노이즈가 이득보다 컸다. 다음을 모두 제거했다.
 
-세 가지 선택지:
-
-| 선택 | 결과 |
+| 대상 | 내용 |
 | :--- | :--- |
-| **보존** | 기존 4개를 `/api/v1/games/{id}/...`로 이관. `game_moves`·스냅샷 유지. 단 **Fog of War와 충돌** — 리플레이가 전체 맵을 보여주면 경기 중 얻을 수 없던 정보가 사후에 드러난다. 종료된 경기라 치팅에는 무해하나, 관전·중계로 확장하면 문제가 된다 |
-| **폐기** | 4개 엔드포인트, `game_moves` 테이블, 스냅샷 컬럼, 테스트를 제거. 저장 용량과 쓰기 비용이 줄어든다 |
-| **보류** | 엔드포인트는 폐기하되 `game_moves` 기록은 유지. 나중에 필요하면 API만 다시 만든다 |
+| 엔드포인트 5개 | 리플레이 4 + `history` 1 |
+| `game_moves` 테이블 | `game_state_snapshot` 포함 |
+| DB `ActionType` enum | 엔진 `ActionType`은 유지 (AI 사용) |
+| `game_sessions.game_history` | 이미 갱신 중단된 죽은 컬럼 |
+| `GameSerializer`의 리플레이 부분 | `MoveRecord`, `ReplayData`, `replay_to_json`/`from_json`, `apply_move_to_state`, `reconstruct_state_at_step` — 외부 참조 0건이었다 |
+| repository 메서드 7개 / service 메서드 3개 | |
+| 테스트 11개 | `test_replay.py` 전체 + `TestGameMoves` 클래스 |
 
-> **권장: 보류.** 명세에 없는 기능을 새 구조로 이관하는 비용을 지금 치르지 않고,
-> 데이터는 남겨 되돌릴 수 있게 한다. 리플레이가 제품 요구로 확정되면 그때
-> Fog of War 정책(전체 공개 vs 플레이어 시점 재생)과 함께 설계한다.
-> **최종 결정 필요.**
+`history`가 함께 폐기된 이유: 같은 `game_moves` 테이블에 의존하므로 테이블만
+남기면 노이즈 방지 목적이 무산된다.
+
+**다시 필요해지면 git에서 복원한다.** 복원 지점 커밋은
+[`../ROADMAP.md`](../ROADMAP.md) 향후 확장에 한 줄로 기록되어 있다. 그때
+Fog of War 정책(전체 공개 vs 플레이어 시점 재생)과 함께 재설계한다.
 
 ### `WEBSOCKET /ws/game` (1개) — 재설계
 
@@ -765,9 +849,14 @@ Redis와 이중 기록이 되고 정합성 문제가 생긴다. 방 기록이 �
 
 | # | 항목 | 위치 |
 | :--- | :--- | :--- |
-| 1 | 리플레이·히스토리 4개의 보존/폐기/보류 | §6 |
-| 2 | 솔로 AI를 서버에서 돌릴지 (§1.1은 오프라인 규정) | §6 `ai-move` |
-| 3 | 게임별 MMR 분리 유지 여부 | §4.2 |
-| 4 | 충돌 시 유저 선택 병합 API를 Phase 1에 넣을지 | §2.3 |
-| 5 | `refresh_tokens` 만료 행 정리 방식 | §5 |
-| 6 | 매칭 시도 통계 필요 여부 | §5 |
+| 1 | 솔로 AI를 서버에서 돌릴지 (§1.1은 오프라인 규정) | §6 `ai-move` |
+| 2 | 충돌 시 유저 선택 병합 API를 Phase 1에 넣을지 | §2.3 |
+| 3 | `refresh_tokens` 만료 행 정리 방식 | §5 |
+| 4 | 매칭 시도 통계 필요 여부 | §5 |
+
+### 확정된 항목 (초판에서 미결이었던 것)
+
+| 항목 | 결정 |
+| :--- | :--- |
+| 리플레이·히스토리 | **폐기.** 코드·DB·테스트 제거 완료. git 복원 지점만 기록 (§6) |
+| MMR 분리 단위 | **`(game, mode)` 조합.** 게임별 분리 방식을 모드에도 적용 (§4.2) |

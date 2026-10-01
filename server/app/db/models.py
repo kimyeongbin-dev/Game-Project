@@ -182,7 +182,6 @@ class GameSession(Base):
     게임 세션 테이블
 
     게임의 전체 상태를 JSONB로 저장하여 유연하게 관리
-    game_history는 모든 수의 기록을 배열로 저장하여 리플레이 기능 지원
     """
     __tablename__ = "game_sessions"
 
@@ -222,9 +221,7 @@ class GameSession(Base):
     # 포함 내용: board, players (positions, walls_remaining), walls
     game_state = Column(JsonType, nullable=False)
 
-    # 게임 히스토리 (리플레이용 - 모든 수의 기록)
     # 배열 형태: [{"turn": 1, "player": 1, "action": {...}, "timestamp": "..."}, ...]
-    game_history = Column(JsonType, nullable=False, default=list)
 
     # 타임스탬프
     created_at = Column(DateTime, default=utcnow, nullable=False)
@@ -234,63 +231,8 @@ class GameSession(Base):
     is_deleted = Column(Boolean, default=False, nullable=False)
 
     # 관계: 게임 히스토리 (1:N)
-    moves = relationship("GameMove", back_populates="game_session", order_by="GameMove.step_no")
 
     def __repr__(self):
         return f"<GameSession(game_id={self.game_id}, status={self.status.value})>"
 
 
-class ActionType(enum.Enum):
-    """액션 타입"""
-    MOVE = "move"
-    WALL = "wall"
-
-
-class GameMove(Base):
-    """
-    게임 히스토리 테이블 (개별 수 기록)
-
-    각 이동/벽 설치를 개별 레코드로 저장하여 리플레이 기능 지원
-    """
-    __tablename__ = "game_moves"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    game_id = Column(String(36), ForeignKey("game_sessions.game_id"), nullable=False, index=True)
-
-    # 수 번호 (0부터 시작, 순서대로 증가)
-    step_no = Column(Integer, nullable=False)
-
-    # 플레이어 정보
-    player = Column(Integer, nullable=False)  # 1 또는 2
-
-    # 액션 정보
-    action_type = Column(SQLEnum(ActionType, name="action_type"), nullable=False)
-    row = Column(Integer, nullable=False)
-    col = Column(Integer, nullable=False)
-    orientation = Column(String(20), nullable=True)  # wall일 때만 사용
-
-    # 이 수를 둔 후의 게임 상태 스냅샷 (리플레이용)
-    game_state_snapshot = Column(JsonType, nullable=False)
-
-    # 타임스탬프
-    created_at = Column(DateTime, default=utcnow, nullable=False)
-
-    # 관계
-    game_session = relationship("GameSession", back_populates="moves")
-
-    def __repr__(self):
-        return f"<GameMove(game_id={self.game_id}, step={self.step_no}, {self.action_type.value})>"
-
-    def to_dict(self) -> dict:
-        """딕셔너리로 변환"""
-        result = {
-            "step_no": self.step_no,
-            "player": self.player,
-            "action_type": self.action_type.value,
-            "row": self.row,
-            "col": self.col,
-            "created_at": self.created_at.isoformat() + "Z"
-        }
-        if self.orientation:
-            result["orientation"] = self.orientation
-        return result
