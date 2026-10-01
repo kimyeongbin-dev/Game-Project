@@ -1,25 +1,63 @@
 """
-Game Session Repository
-게임 세션 데이터베이스 CRUD 작업
+Repositories
+게임 기록·유저·랭킹 데이터베이스 CRUD 작업
 """
 
-from datetime import datetime, date
-from typing import Optional
-import secrets
 import re
+import secrets
+from dataclasses import dataclass
+from typing import Optional, Sequence
+
 import bcrypt
-from sqlalchemy import select, update, func, delete, and_, or_
+from sqlalchemy import select, func, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import (
-    GameSession, GameStatus, GameMode,
-    User,
-    utcnow
-)
+from app.core.time import utcnow
+
+from .models import GameParticipant, GameSession, User
+
+
+# ===== 게임 기록 Repository =====
+
+# 문자열 컬럼의 허용 값. DB ENUM·CHECK 를 두지 않으므로 여기서 검증한다
+# (값 추가에 마이그레이션이 필요 없어야 한다 — platform.md §5).
+END_REASONS = ("goal_reached", "last_standing", "server_fault")
+RESULTS = ("win", "lose", "draw", "abandoned", "void")
+ELIMINATION_REASONS = ("surrender", "time_forfeit", "disconnect_forfeit")
+
+
+@dataclass(frozen=True)
+class ParticipantSeed:
+    """게임 시작 시 좌석 하나"""
+    seat_no: int
+    user_id: Optional[int]
+    display_name: str
+    is_ai: bool = False
+
+
+@dataclass(frozen=True)
+class SeatResult:
+    """게임 종료 시 좌석 하나의 결과"""
+    seat_no: int
+    result: str
+    rank: Optional[int]
+    elimination_reason: Optional[str] = None
+    mmr_before: Optional[int] = None
+    mmr_after: Optional[int] = None
+
+
+def _require_seats_1_to_n(seat_nos: Sequence[int]) -> None:
+    """좌석 번호가 1..N 연속·중복 없음인지. N 은 가정하지 않는다"""
+    if sorted(seat_nos) != list(range(1, len(seat_nos) + 1)):
+        raise ValueError(f"seat_no must be 1..N without gaps or duplicates: {sorted(seat_nos)}")
 
 
 class GameSessionRepository:
-    """게임 세션 저장소"""
+    """
+    게임 기록 저장소 — 시작 시 행 생성, 종료 시 결과 기록
+
+    진행 중 상태는 쓰지 않는다 (Redis 권위, maze.md §8).
+    """
 
     def __init__(self, session: AsyncSession):
         self.session = session
@@ -27,128 +65,130 @@ class GameSessionRepository:
     async def create(
         self,
         game_id: str,
-        player1_name: str,
-        player2_name: str,
-        game_mode: str,
-        ai_difficulty: Optional[str],
-        game_state: dict
+        *,
+        game: str,
+        mode: str,
+        is_ranked: bool,
+        participants: Sequence[ParticipantSeed],
     ) -> GameSession:
-        """새 게임 세션 생성"""
+        """게임 시작 기록. 좌석은 1..N 이어야 한다"""
+        if len(participants) < 2:
+            raise ValueError("a game needs at least 2 participants")
+        _require_seats_1_to_n([p.seat_no for p in participants])
+
         game_session = GameSession(
             game_id=game_id,
-            player1_name=player1_name,
-            player2_name=player2_name,
-            game_mode=GameMode(game_mode),
-            ai_difficulty=ai_difficulty if game_mode == "vs_ai" else None,
-            game_state=game_state,
-            status=GameStatus.IN_PROGRESS,
-            current_turn=1,
-            turn_count=0
+            game=game,
+            mode=mode,
+            is_ranked=is_ranked,
+            status="in_progress",
+            participants=[
+                GameParticipant(
+                    seat_no=p.seat_no,
+                    user_id=p.user_id,
+                    display_name=p.display_name,
+                    is_ai=p.is_ai,
+                )
+                for p in participants
+            ],
         )
         self.session.add(game_session)
         await self.session.commit()
-        await self.session.refresh(game_session)
-        return game_session
+        return await self.get_by_id(game_id)
 
     async def get_by_id(self, game_id: str) -> Optional[GameSession]:
-        """게임 ID로 세션 조회"""
+        """게임 기록 조회 (participants 는 seat_no 순)"""
         result = await self.session.execute(
-            select(GameSession).where(
-                GameSession.game_id == game_id,
-                GameSession.is_deleted == False
-            )
+            select(GameSession)
+            .where(GameSession.game_id == game_id)
+            .execution_options(populate_existing=True)
         )
         return result.scalar_one_or_none()
 
-    async def update_game_state(
+    async def record_result(
         self,
         game_id: str,
-        game_state: dict,
-        status: Optional[str] = None,
-        winner: Optional[int] = None
+        *,
+        end_reason: str,
+        winner_seat_no: Optional[int],
+        turn_count: int,
+        results: Sequence[SeatResult],
     ) -> Optional[GameSession]:
         """
-        게임 상태 업데이트
+        게임 종료 기록. 좌석 전원의 결과가 있어야 하고, 종료는 한 번뿐이다
 
-        Args:
-            game_id: 게임 ID
-            game_state: 새 게임 상태
-            status: 게임 상태 (in_progress, finished)
-            winner: 승자 (1 또는 2)
+        server_fault 무효 처리는 void() 를 쓴다.
+        """
+        if end_reason not in END_REASONS or end_reason == "server_fault":
+            raise ValueError(f"Invalid end_reason: {end_reason}")
+        for r in results:
+            if r.result not in RESULTS:
+                raise ValueError(f"Invalid result: {r.result}")
+            if r.elimination_reason is not None and r.elimination_reason not in ELIMINATION_REASONS:
+                raise ValueError(f"Invalid elimination_reason: {r.elimination_reason}")
+
+        game_session = await self.get_by_id(game_id)
+        if not game_session:
+            return None
+        if game_session.status != "in_progress":
+            raise ValueError(f"Game {game_id} already ended ({game_session.status})")
+
+        by_seat = {r.seat_no: r for r in results}
+        if len(by_seat) != len(results) or set(by_seat) != {p.seat_no for p in game_session.participants}:
+            raise ValueError("results must cover every seat exactly once")
+        if winner_seat_no is not None and winner_seat_no not in by_seat:
+            raise ValueError(f"Invalid winner_seat_no: {winner_seat_no}")
+
+        for participant in game_session.participants:
+            r = by_seat[participant.seat_no]
+            participant.result = r.result
+            participant.rank = r.rank
+            participant.elimination_reason = r.elimination_reason
+            participant.mmr_before = r.mmr_before
+            participant.mmr_after = r.mmr_after
+
+        game_session.status = "finished"
+        game_session.end_reason = end_reason
+        game_session.winner_seat_no = winner_seat_no
+        game_session.turn_count = turn_count
+        game_session.ended_at = utcnow()
+
+        await self.session.commit()
+        return await self.get_by_id(game_id)
+
+    async def void(self, game_id: str) -> Optional[GameSession]:
+        """
+        서버 장애 무효 처리 (maze.md §8) — 전원 result=void, MMR 변동 없음
         """
         game_session = await self.get_by_id(game_id)
         if not game_session:
             return None
+        if game_session.status != "in_progress":
+            raise ValueError(f"Game {game_id} already ended ({game_session.status})")
 
-        # 게임 상태 업데이트
-        game_session.game_state = game_state
-        game_session.current_turn = game_state.get("current_turn", 1)
-        game_session.turn_count = game_state.get("turn_count", 0)
-        game_session.updated_at = utcnow()
+        for participant in game_session.participants:
+            participant.result = "void"
+            participant.rank = None
+            participant.mmr_before = None
+            participant.mmr_after = None
 
-        # 상태 업데이트
-        if status:
-            game_session.status = GameStatus(status)
-
-        # 승자 업데이트
-        if winner is not None:
-            game_session.winner = winner
-
+        game_session.status = "void"
+        game_session.end_reason = "server_fault"
+        game_session.winner_seat_no = None
+        game_session.ended_at = utcnow()
 
         await self.session.commit()
-        await self.session.refresh(game_session)
-        return game_session
+        return await self.get_by_id(game_id)
 
-    async def get_active_sessions(self, limit: int = 50) -> list[GameSession]:
-        """진행 중인 게임 세션 목록 조회"""
+    async def list_in_progress(self, limit: int = 100) -> list[GameSession]:
+        """진행 중으로 기록된 게임 (오래된 순) — §8 fail-safe 점검용"""
         result = await self.session.execute(
             select(GameSession)
-            .where(
-                GameSession.status == GameStatus.IN_PROGRESS,
-                GameSession.is_deleted == False
-            )
-            .order_by(GameSession.updated_at.desc())
+            .where(GameSession.status == "in_progress")
+            .order_by(GameSession.started_at)
             .limit(limit)
         )
         return list(result.scalars().all())
-
-    async def get_recent_sessions(
-        self,
-        limit: int = 20,
-        include_finished: bool = True
-    ) -> list[GameSession]:
-        """최근 게임 세션 목록 조회"""
-        query = select(GameSession).where(GameSession.is_deleted == False)
-
-        if not include_finished:
-            query = query.where(GameSession.status == GameStatus.IN_PROGRESS)
-
-        query = query.order_by(GameSession.updated_at.desc()).limit(limit)
-        result = await self.session.execute(query)
-        return list(result.scalars().all())
-
-    async def abandon_game(self, game_id: str) -> bool:
-        """게임 포기 (기록은 보존, 활성 목록에서만 제외)"""
-        game_session = await self.get_by_id(game_id)
-        if not game_session:
-            return False
-
-        game_session.status = GameStatus.ABANDONED
-        game_session.updated_at = utcnow()
-        await self.session.commit()
-        return True
-
-    async def hard_delete(self, game_id: str) -> bool:
-        """게임 완전 삭제 (기록도 숨김)"""
-        game_session = await self.get_by_id(game_id)
-        if not game_session:
-            return False
-
-        game_session.status = GameStatus.ABANDONED
-        game_session.is_deleted = True
-        game_session.updated_at = utcnow()
-        await self.session.commit()
-        return True
 
 
 # ===== 유저 관련 Repository =====

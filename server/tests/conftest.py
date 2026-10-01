@@ -71,33 +71,3 @@ async def user_repository(async_session) -> UserRepository:
 async def ranking_repository(async_session) -> RankingRepository:
     """테스트용 랭킹 리포지토리"""
     return RankingRepository(async_session)
-
-
-@pytest.fixture
-def sample_game_state():
-    """샘플 게임 상태"""
-    return {
-        "game_id": "test-game-123",
-        "status": "in_progress",
-        "game_mode": "vs_ai",
-        "current_turn": 1,
-        "turn_count": 0,
-        "players": {
-            "player1": {
-                "name": "Player 1",
-                "position": {"row": 8, "col": 4},
-                "walls_remaining": 10,
-                "goal_row": 0
-            },
-            "player2": {
-                "name": "AI",
-                "position": {"row": 0, "col": 4},
-                "walls_remaining": 10,
-                "goal_row": 8
-            }
-        },
-        "walls": [],
-        "winner": None,
-        "created_at": "2024-01-01T00:00:00Z",
-        "updated_at": "2024-01-01T00:00:00Z"
-    }

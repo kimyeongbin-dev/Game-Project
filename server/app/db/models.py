@@ -1,44 +1,18 @@
 """
 Database Models
 SQLAlchemy 모델 정의
+
+정본은 docs/api/platform.md §5 와 이 파일뿐이다.
+인원·게임·모드 수를 스키마에 박지 않는다 — 좌석은 행으로, game·mode·status 는
+DB ENUM 이 아닌 문자열로 둔다. 값 추가에 마이그레이션이 필요 없어야 한다.
 """
 
-from datetime import datetime, date, timezone
-from sqlalchemy import Column, String, DateTime, Date, Boolean, Integer, Float, Enum as SQLEnum, ForeignKey, JSON
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import Column, String, DateTime, Boolean, Integer, Float, ForeignKey
 from sqlalchemy.orm import relationship
-import enum
 
-
-# PostgreSQL에서는 JSONB 사용, 다른 DB에서는 JSON 사용
-JsonType = JSON().with_variant(JSONB(), 'postgresql')
-
-
-def utcnow() -> datetime:
-    """timezone-naive UTC 현재 시각.
-
-    datetime.utcnow() 는 Python 3.12+ 에서 deprecated 이지만,
-    DateTime 컬럼과 to_dict()의 isoformat() + "Z" 직렬화가 naive UTC를 전제하므로
-    tzinfo 를 떼어내 기존 동작을 그대로 유지한다.
-    """
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+from app.core.time import utcnow
 
 from .config import Base
-
-
-class GameStatus(enum.Enum):
-    """게임 상태"""
-    IN_PROGRESS = "in_progress"
-    PLAYER1_WIN = "player1_win"    # Player 1 승리
-    PLAYER2_WIN = "player2_win"    # Player 2 / AI 승리
-    ABANDONED = "abandoned"
-
-
-class GameMode(enum.Enum):
-    """게임 모드"""
-    VS_AI = "vs_ai"
-    LOCAL_2P = "local_2p"
-    ONLINE_2P = "online_2p"  # 온라인 2P 대전
 
 
 # ===== 유저 및 랭킹 관련 모델 =====
@@ -74,165 +48,71 @@ class User(Base):
         return f"<User(id={self.id}, nickname={self.nickname}, score={self.score})>"
 
 
-class DailyChampion(Base):
-    """
-    일일 챔피언 기록 테이블
-    - 매일 KST 09:00 리셋 시 1위 기록 저장
-    """
-    __tablename__ = "daily_champions"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-
-    # 챔피언 정보 (리셋 시점 스냅샷)
-    nickname = Column(String(20), nullable=False)
-    score = Column(Float, nullable=False)
-    wins = Column(Integer, nullable=False)
-    losses = Column(Integer, default=0, nullable=False)
-    best_turn_count = Column(Integer, nullable=True)
-
-    # 날짜 정보
-    champion_date = Column(Date, nullable=False, index=True)  # 챔피언이 된 날짜
-    reset_at = Column(DateTime, nullable=False)  # 리셋 시각
-
-    # 다음날 유지된 유저 ID (리셋 후에도 유지)
-    preserved_user_id = Column(Integer, nullable=True)
-
-    created_at = Column(DateTime, default=utcnow, nullable=False)
-
-    def __repr__(self):
-        return f"<DailyChampion(date={self.champion_date}, nickname={self.nickname}, score={self.score})>"
-
-
-# ===== 온라인 2P 매칭 관련 모델 =====
-
-class MatchQueueStatus(enum.Enum):
-    """매칭 대기열 상태"""
-    WAITING = "waiting"
-    MATCHED = "matched"
-    CANCELLED = "cancelled"
-
-
-class MatchQueue(Base):
-    """
-    자동 매칭 대기열
-    """
-    __tablename__ = "match_queue"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-
-    status = Column(
-        SQLEnum(MatchQueueStatus, name="match_queue_status"),
-        default=MatchQueueStatus.WAITING,
-        nullable=False
-    )
-    matched_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    matched_game_id = Column(String(36), nullable=True)
-
-    joined_at = Column(DateTime, default=utcnow, nullable=False)
-    matched_at = Column(DateTime, nullable=True)
-
-    # 관계
-    user = relationship("User", foreign_keys=[user_id], backref="queue_entries")
-
-    def __repr__(self):
-        return f"<MatchQueue(user_id={self.user_id}, status={self.status.value})>"
-
-
-class RoomStatus(enum.Enum):
-    """방 상태"""
-    WAITING = "waiting"   # 호스트만 있음
-    READY = "ready"       # 게스트 입장
-    PLAYING = "playing"   # 게임 진행 중
-    CLOSED = "closed"     # 방 닫힘
-
-
-class GameRoom(Base):
-    """
-    방 코드 기반 대기실
-    """
-    __tablename__ = "game_rooms"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    room_code = Column(String(6), unique=True, nullable=False, index=True)
-
-    host_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    guest_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-
-    status = Column(
-        SQLEnum(RoomStatus, name="room_status"),
-        default=RoomStatus.WAITING,
-        nullable=False
-    )
-    game_id = Column(String(36), nullable=True)  # 게임 시작 시 연결
-
-    created_at = Column(DateTime, default=utcnow, nullable=False)
-    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
-
-    # 관계
-    host = relationship("User", foreign_keys=[host_user_id], backref="hosted_rooms")
-    guest = relationship("User", foreign_keys=[guest_user_id], backref="joined_rooms")
-
-    def __repr__(self):
-        return f"<GameRoom(code={self.room_code}, status={self.status.value})>"
-
+# ===== 게임 기록 =====
 
 class GameSession(Base):
     """
-    게임 세션 테이블
+    게임 한 판의 시작·종료 기록
 
-    게임의 전체 상태를 JSONB로 저장하여 유연하게 관리
+    진행 중 상태(좌석 위치·벽·차례)는 담지 않는다 — 권위는 Redis
+    `game:<id>:state` 다 (docs/api/games/maze.md §8). DB 는 시작 시 행을 만들고
+    종료 시 결과를 채운다. `status == "in_progress"` 인 행은 §8 fail-safe 가
+    "Redis 상태가 사라진 진행 중 게임"을 찾는 기준이다.
     """
     __tablename__ = "game_sessions"
 
-    # 기본 키: 게임 ID (UUID 문자열)
-    game_id = Column(String(36), primary_key=True, index=True)
+    game_id = Column(String(36), primary_key=True)
 
-    # 게임 메타 정보
-    status = Column(
-        SQLEnum(GameStatus, name="game_status"),
-        default=GameStatus.IN_PROGRESS,
-        nullable=False
-    )
-    game_mode = Column(
-        SQLEnum(GameMode, name="game_mode"),
-        default=GameMode.VS_AI,
-        nullable=False
-    )
-
-    # 플레이어 정보
-    player1_name = Column(String(50), nullable=False, default="Player")
-    player2_name = Column(String(50), nullable=False, default="AI")
-
-    # 게임 진행 정보
-    current_turn = Column(Integer, default=1, nullable=False)
-    turn_count = Column(Integer, default=0, nullable=False)
-    winner = Column(Integer, nullable=True)
-
-    # AI 설정 (vs_ai 모드일 때만 사용)
-    ai_difficulty = Column(String(20), nullable=True)
-
-    # 랭킹전 관련
+    game = Column(String(32), nullable=False)          # maze_1p, …
+    mode = Column(String(16), nullable=False)          # duel, trio, …
     is_ranked = Column(Boolean, default=False, nullable=False)
-    player1_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    player2_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # 온라인 2P일 때
 
-    # 게임 상태 (전체 상태를 JSON으로 저장)
-    # 포함 내용: board, players (positions, walls_remaining), walls
-    game_state = Column(JsonType, nullable=False)
+    status = Column(String(16), default="in_progress", nullable=False, index=True)
+    end_reason = Column(String(16), nullable=True)     # goal_reached | last_standing | server_fault
+    winner_seat_no = Column(Integer, nullable=True)
+    turn_count = Column(Integer, default=0, nullable=False)
 
-    # 배열 형태: [{"turn": 1, "player": 1, "action": {...}, "timestamp": "..."}, ...]
+    started_at = Column(DateTime, default=utcnow, nullable=False)
+    ended_at = Column(DateTime, nullable=True)
 
-    # 타임스탬프
-    created_at = Column(DateTime, default=utcnow, nullable=False)
-    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
-
-    # 삭제 여부 (소프트 삭제)
-    is_deleted = Column(Boolean, default=False, nullable=False)
-
-    # 관계: 게임 히스토리 (1:N)
+    participants = relationship(
+        "GameParticipant",
+        back_populates="session",
+        order_by="GameParticipant.seat_no",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",  # async 세션은 지연 로딩을 못 한다
+    )
 
     def __repr__(self):
-        return f"<GameSession(game_id={self.game_id}, status={self.status.value})>"
+        return f"<GameSession(game_id={self.game_id}, status={self.status})>"
 
 
+class GameParticipant(Base):
+    """
+    좌석 하나 = 행 하나. 인원이 늘어도 행만 는다 (platform.md §5)
+    """
+    __tablename__ = "game_participants"
+
+    game_id = Column(
+        String(36),
+        ForeignKey("game_sessions.game_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    seat_no = Column(Integer, primary_key=True)        # 1..N
+
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)  # AI 면 null
+    display_name = Column(String(50), nullable=False)
+    is_ai = Column(Boolean, default=False, nullable=False)
+
+    # 종료 시 기록
+    result = Column(String(16), nullable=True)         # win | lose | draw | abandoned | void
+    rank = Column(Integer, nullable=True)
+    elimination_reason = Column(String(32), nullable=True)
+    mmr_before = Column(Integer, nullable=True)        # 랭크전만
+    mmr_after = Column(Integer, nullable=True)
+
+    session = relationship("GameSession", back_populates="participants")
+
+    def __repr__(self):
+        return f"<GameParticipant(game_id={self.game_id}, seat_no={self.seat_no})>"

@@ -9,8 +9,5 @@ def utcnow() -> datetime:
     datetime.utcnow() 는 Python 3.12+ 에서 deprecated 이며 제거 예정이다.
     다만 DB의 DateTime 컬럼과 to_dict() 의 isoformat() + "Z" 직렬화가
     naive UTC 를 전제하므로, tzinfo 를 떼어내 기존 동작을 그대로 유지한다.
-
-    NOTE: app/db/models.py 에 동일한 로컬 헬퍼가 남아 있다. M3 2단계에서
-          models.py 를 다시 쓸 때 이 모듈로 일원화한다.
     """
     return datetime.now(timezone.utc).replace(tzinfo=None)
