@@ -17,7 +17,12 @@ from app.services.maze_game import GAME, MazeGameService, SeatPlayer
 from app.services.rooms import Rooms
 
 # hint 에 있으면 §6 위반인 키 — 좌표·벽·게임 상태
-FORBIDDEN_HINT_KEYS = {"position", "row", "col", "walls", "board", "state", "goals"}
+FORBIDDEN_HINT_KEYS = {
+    "position", "row", "col", "walls", "board", "state", "goals",
+    # 시야 (M3 5단계) — 채널은 모든 워커에 간다
+    "edges", "discovered_edges", "visible_edges", "visible_players", "last_seen_players",
+    "vision", "spectator",
+}
 
 
 class RecordingPublisher:

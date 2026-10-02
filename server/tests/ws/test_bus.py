@@ -122,8 +122,10 @@ async def test_cross_worker_delivery_per_seat(workers, games, seat_mode):
         assert sent[2]["payload"]["last_action"] == {"seat_no": 1, "kind": "move"}
         view = sent[3]["payload"]
         assert view["me"]["seat_no"] == seat_no and view["turn_count"] == 1
-        # §6 — 남의 좌표는 어디에도 없다
-        assert positions_in(view) == [view["me"]["position"]]
+        # §6 — 시작 배치에서는 서로 3×3 밖이라 남의 좌표가 어디에도 없다 (변 좌표는 칸 기준이라 제외)
+        assert view["visible_players"] == [] and view["last_seen_players"] == []
+        no_edges = {k: v for k, v in view.items() if not k.endswith("_edges")}
+        assert positions_in(no_edges) == [view["me"]["position"]]
         assert positions_in(sent[2]["payload"]) == []
 
 
