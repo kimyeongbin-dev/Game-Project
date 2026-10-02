@@ -8,6 +8,8 @@ docs/api/games/maze.md §8: 게임 상태의 권위는 Redis `game:<id>:state` �
 - 엔진(`app.games.maze`)은 저장소·유저를 모른다. 유저 ↔ 좌석 매핑은 `game:<id>:meta` 몫이다
 - 시작 시 DB 에 진행 중 행을 먼저 쓴다. §8 fail-safe 는 "DB 에는 진행 중인데 Redis 상태가
   없다"를 유실 판정 기준으로 쓴다
+- 좌석별 누적 시야(`game:<id>:vision:<seat_no>`, maze.md §6)는 수락된 행동마다 생존 좌석 전원을
+  다시 관측해 state 와 **같은 펜싱 쓰기 한 번**으로 기록한다. 탈락 좌석은 탈락 직전 관측으로 동결된다
 - 상태를 쓴 직후(락 안에서) 이벤트를 발행만 한다(`app/services/events.py`). 소켓 전송은 ws 계층
   구독 버스가 한다. 거절은 발행하지 않는다 — 행동한 사람에게만 응답한다(핸들러, 7단계)
 """
@@ -26,7 +28,7 @@ from app.db import redis_keys as keys
 from app.db.config import get_session_factory, is_db_available
 from app.db.redis_lock import (
     LockTimeout,
-    fenced_set,
+    fenced_mset,
     redis_lock,
     require_redis,
     store_errors,
@@ -35,6 +37,7 @@ from app.db.repository import GameSessionRepository, ParticipantSeed, SeatResult
 from app.games.maze import GameState
 from app.games.maze.core.game_state import SCHEMA_VERSION
 from app.games.maze.core.layouts import get_layout
+from app.games.maze.core.vision import SeatMemory, game_sight
 from app.services import activity, events
 from app.services.activity import MultiplayerError
 from app.services.events import Publisher, redis_publisher
@@ -75,6 +78,8 @@ class GameMeta:
     room_code: Optional[str]
     created_at: str
     players: tuple[SeatPlayer, ...]
+    # 친구 방 설정 — 탈락자가 관전 패킷(전체 판 + 생존자 시야)을 받는다. 랭크는 항상 False
+    spectate_on_elimination: bool = False
 
     def seat_of(self, user_id: int) -> Optional[int]:
         for p in self.players:
@@ -120,6 +125,27 @@ def _decode_state(raw: str) -> GameState:
     return GameState.from_dict(data)
 
 
+def _decode_memory(raw: Optional[str]) -> SeatMemory:
+    """저장된 좌석 관측. 없으면 빈 기억, 버전이 다르면 StateVersionMismatch"""
+    if raw is None:
+        return SeatMemory()
+    try:
+        return SeatMemory.from_dict(json.loads(raw))
+    except ValueError as exc:
+        raise StateVersionMismatch(str(exc)) from exc
+
+
+def _encode_memory(memory: SeatMemory) -> str:
+    return json.dumps(memory.to_dict())
+
+
+def _observe(state: GameState, seat_no: int, memory: SeatMemory) -> SeatMemory:
+    """생존 좌석은 지금 시야를 더한다. 탈락 좌석은 눈을 감는다 — 그대로 둔다(계획서 판단 3)"""
+    if state.seat(seat_no).is_eliminated:
+        return memory
+    return memory.observe(game_sight(state, seat_no), state.turn_count)
+
+
 def seat_results(state: GameState) -> list[SeatResult]:
     """엔진 standings() → DB 좌석 결과
 
@@ -162,8 +188,11 @@ class MazeGameService:
         players: Sequence[SeatPlayer],
         room_code: Optional[str] = None,
         rng: Optional[random.Random] = None,
+        spectate_on_elimination: bool = False,
     ) -> GameState:
         """게임 시작. 좌석은 배치 테이블 정원 1..N 을 정확히 채워야 한다
+
+        spectate_on_elimination 은 친구 방 설정이다. 랭크 게임에서는 켤 수 없다.
 
         사람 좌석의 activity 를 game:<id> 로 덮어쓴다. 호출자(매치·방)가 그 유저들의
         이전 활동을 쥐고 있는 상태에서 부른다.
@@ -171,6 +200,8 @@ class MazeGameService:
         seats = self.seats(mode)
         if sorted(p.seat_no for p in players) != list(range(1, seats + 1)):
             raise ValueError(f"mode {mode} needs seats 1..{seats}, got {[p.seat_no for p in players]}")
+        if is_ranked and spectate_on_elimination:
+            raise ValueError("ranked games never allow spectating on elimination")
 
         redis = require_redis()
         state = GameState(mode, rng=rng)
@@ -182,6 +213,7 @@ class MazeGameService:
             room_code=room_code,
             created_at=utcnow().isoformat() + "Z",
             players=tuple(sorted(players, key=lambda p: p.seat_no)),
+            spectate_on_elimination=spectate_on_elimination,
         )
 
         factory = self._session_factory()
@@ -203,6 +235,9 @@ class MazeGameService:
                 async with redis.pipeline(transaction=True) as pipe:
                     pipe.set(keys.game_state(state.game_id), json.dumps(state.to_dict()))
                     pipe.set(keys.game_meta(state.game_id), meta.to_json())
+                    for p in state.seats:  # 초기 관측 (turn 0)
+                        pipe.set(keys.game_vision(state.game_id, p.seat_no),
+                                 _encode_memory(_observe(state, p.seat_no, SeatMemory())))
                     for user_id in meta.human_user_ids:
                         pipe.set(keys.user_activity(user_id), keys.activity_game(state.game_id))
                     await pipe.execute()
@@ -219,6 +254,21 @@ class MazeGameService:
         async with store_errors():
             raw = await redis.get(keys.game_state(game_id))
         return _decode_state(raw) if raw is not None else None
+
+    async def load_with_vision(
+        self, game_id: str, seat_nos: Sequence[int]
+    ) -> tuple[Optional[GameState], dict[int, SeatMemory]]:
+        """state 와 지정한 좌석들의 누적 관측을 MGET 한 번으로 — 찢어진 읽기가 없는 스냅샷"""
+        redis = require_redis()
+        async with store_errors():
+            raw_state, *raw_vision = await redis.mget(
+                keys.game_state(game_id), *(keys.game_vision(game_id, s) for s in seat_nos)
+            )
+        if raw_state is None:
+            return None, {}
+        return _decode_state(raw_state), {
+            s: _decode_memory(raw) for s, raw in zip(seat_nos, raw_vision)
+        }
 
     async def get_meta(self, game_id: str) -> Optional[GameMeta]:
         redis = require_redis()
@@ -270,7 +320,10 @@ class MazeGameService:
             for user_id in meta.human_user_ids:
                 await activity.release(redis, user_id, keys.activity_game(game_id))
             async with store_errors():
-                await redis.delete(keys.game_meta(game_id), keys.game_state(game_id))
+                await redis.delete(
+                    keys.game_meta(game_id), keys.game_state(game_id),
+                    *(keys.game_vision(game_id, p.seat_no) for p in meta.players),
+                )
 
     # ----- 내부 -----
 
@@ -284,7 +337,7 @@ class MazeGameService:
         reason: Optional[str] = None,
         seat_no: Optional[int] = None,
     ) -> ActionOutcome:
-        """락 → 읽기 → 판정 → 펜싱 저장 → (종료 시) 기록 → 발행
+        """락 → 읽기 → 판정 → (수락이면) 좌석 전원 관측 → 펜싱 저장 → (종료 시) 기록 → 발행
 
         user_id=None 은 서버 행위이고 그때는 seat_no 로 대상 좌석을 받는다.
         action·reason 은 발행할 last_action 에만 쓴다 (좌표는 싣지 않는다).
@@ -311,12 +364,14 @@ class MazeGameService:
                 rejection = apply(state, seat_no)
                 ended = state.is_finished and not was_finished
 
-                # 거절도 저장한다 — 벽 거절은 wall_rejections 를 바꾼다 (§7)
+                # 거절도 저장한다 — 벽 거절은 wall_rejections 를 바꾼다 (§7). 시야는 그대로다
+                items = {keys.game_state(game_id): json.dumps(state.to_dict())}
+                if rejection is None:
+                    # 남의 행동도 내 시야를 바꾼다 — 좌석 전원을 state 와 한 번에 쓴다.
+                    # 동결된 좌석도 다시 써서 종료 TTL 을 같이 받는다
+                    items.update(await self._observe_all(redis, state))
                 ttl = settings.game_finished_ttl_sec if state.is_finished else None
-                written = await fenced_set(
-                    redis, lock_key, token, keys.game_state(game_id),
-                    json.dumps(state.to_dict()), ex=ttl,
-                )
+                written = await fenced_mset(redis, lock_key, token, items, ex=ttl)
                 if not written:
                     raise GameBusy(f"lost lock on {game_id} before write")
 
@@ -330,6 +385,16 @@ class MazeGameService:
                 return ActionOutcome(rejection.value if rejection else None, state, ended)
         except LockTimeout as exc:
             raise GameBusy(str(exc)) from exc
+
+    async def _observe_all(self, redis, state: GameState) -> dict[str, str]:
+        """좌석 전원의 vision 키 → 갱신된 관측 JSON (락 안에서 부른다)"""
+        vision_keys = [keys.game_vision(state.game_id, p.seat_no) for p in state.seats]
+        async with store_errors():
+            raws = await redis.mget(*vision_keys)
+        return {
+            key: _encode_memory(_observe(state, p.seat_no, _decode_memory(raw)))
+            for key, p, raw in zip(vision_keys, state.seats, raws)
+        }
 
     async def _finalize(self, redis, state: GameState, meta: GameMeta) -> None:
         """종료 처리 — meta 보존 기한 설정, activity 해제, DB 결과 기록

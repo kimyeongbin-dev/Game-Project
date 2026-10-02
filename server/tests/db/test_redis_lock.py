@@ -8,7 +8,14 @@ import asyncio
 
 import pytest
 
-from app.db.redis_lock import LockTimeout, StoreUnavailable, fenced_set, redis_lock, require_redis
+from app.db.redis_lock import (
+    LockTimeout,
+    StoreUnavailable,
+    fenced_mset,
+    fenced_set,
+    redis_lock,
+    require_redis,
+)
 
 KEY = "game:test-lock:lock"
 TARGET = "game:test-lock:state"
@@ -81,6 +88,38 @@ async def test_fenced_set_rejects_after_lock_lost(redis_client):
             assert await fenced_set(redis_client, KEY, fresh_token, TARGET, "fresh") is True
             assert await fenced_set(redis_client, KEY, stale_token, TARGET, "stale") is False
     assert await redis_client.get(TARGET) == "fresh"
+
+
+TARGETS = {"game:test-lock:state": "s", "game:test-lock:vision:1": "v1", "game:test-lock:vision:2": "v2"}
+
+
+async def test_fenced_mset_writes_all_keys_with_same_ttl(redis_client):
+    async with redis_lock(redis_client, KEY) as token:
+        assert await fenced_mset(redis_client, KEY, token, TARGETS, ex=30) is True
+    assert await redis_client.mget(*TARGETS) == list(TARGETS.values())
+    for key in TARGETS:
+        assert 0 < await redis_client.ttl(key) <= 30
+
+
+async def test_fenced_mset_without_ttl(redis_client):
+    async with redis_lock(redis_client, KEY) as token:
+        assert await fenced_mset(redis_client, KEY, token, TARGETS) is True
+    for key in TARGETS:
+        assert await redis_client.ttl(key) == -1
+
+
+async def test_fenced_mset_writes_nothing_after_lock_lost(redis_client):
+    """state 와 시야는 전부 또는 전무 — 락을 잃은 쪽은 어느 키도 건드리지 못한다"""
+    async with redis_lock(redis_client, KEY, ttl_ms=50) as stale_token:
+        await asyncio.sleep(0.08)
+        async with redis_lock(redis_client, KEY, wait_ms=0):
+            assert await fenced_mset(redis_client, KEY, stale_token, TARGETS) is False
+    assert await redis_client.mget(*TARGETS) == [None] * len(TARGETS)
+
+
+async def test_fenced_mset_needs_a_key(redis_client):
+    with pytest.raises(ValueError):
+        await fenced_mset(redis_client, KEY, "t", {})
 
 
 async def test_require_redis_raises_when_unavailable(monkeypatch):

@@ -7,7 +7,7 @@ Redis 락과 펜싱 쓰기 — 멀티플레이 상태의 직렬화.
 - 획득: `SET key token NX PX ttl`. 실패하면 짧게 쉬며 `wait_ms` 까지 재시도한다
 - 해제: 토큰이 아직 내 것일 때만 지운다 — TTL 로 풀린 뒤 남이 잡은 락을 지우지 않는다
 - 펜싱 쓰기: 락 토큰이 아직 내 것일 때만 쓴다. 락 TTL 을 넘긴 행동이 다음 행동의
-  결과를 덮어쓰지 못한다
+  결과를 덮어쓰지 못한다. 여러 키(게임 상태 + 좌석별 시야)는 한 번에 전부 또는 전무로 쓴다
 
 `is_redis_available()` 는 기동 시 한 번 정해지는 값이라 런타임 장애를 잡지 못한다
 (실측 E7). 그래서 `RedisError` 를 `StoreUnavailable` 로 바꾸는 `store_errors()` 를
@@ -18,7 +18,7 @@ import asyncio
 import logging
 import secrets
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Mapping, Optional
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
@@ -37,15 +37,18 @@ end
 return 0
 """
 
-# KEYS[1]=락, KEYS[2]=대상 / ARGV[1]=토큰, ARGV[2]=값, ARGV[3]=EX 초('' 이면 없음)
-_FENCED_SET_LUA = """
+# KEYS[1]=락, KEYS[2..]=대상 / ARGV[1]=토큰, ARGV[2]=EX 초('' 이면 없음), ARGV[3..]=값
+# 스크립트 하나라 원자적이다 — 토큰이 내 것이면 대상 전부를, 아니면 아무것도 쓰지 않는다
+_FENCED_MSET_LUA = """
 if redis.call('GET', KEYS[1]) ~= ARGV[1] then
     return 0
 end
-if ARGV[3] == '' then
-    redis.call('SET', KEYS[2], ARGV[2])
-else
-    redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[3])
+for i = 2, #KEYS do
+    if ARGV[2] == '' then
+        redis.call('SET', KEYS[i], ARGV[i + 1])
+    else
+        redis.call('SET', KEYS[i], ARGV[i + 1], 'EX', ARGV[2])
+    end
 end
 return 1
 """
@@ -118,8 +121,23 @@ async def fenced_set(
     ex: Optional[int] = None,
 ) -> bool:
     """락 토큰이 아직 내 것일 때만 key 에 쓴다. 썼으면 True"""
+    return await fenced_mset(redis, lock_key, token, {key: value}, ex=ex)
+
+
+async def fenced_mset(
+    redis: Redis,
+    lock_key: str,
+    token: str,
+    items: Mapping[str, str],
+    *,
+    ex: Optional[int] = None,
+) -> bool:
+    """락 토큰이 아직 내 것일 때만 items 전부를 같은 EX 로 쓴다(전부 또는 전무). 썼으면 True"""
+    if not items:
+        raise ValueError("fenced_mset needs at least one key")
     async with store_errors():
         written = await redis.eval(
-            _FENCED_SET_LUA, 2, lock_key, key, token, value, "" if ex is None else str(ex)
+            _FENCED_MSET_LUA, 1 + len(items), lock_key, *items.keys(),
+            token, "" if ex is None else str(ex), *items.values(),
         )
     return bool(written)

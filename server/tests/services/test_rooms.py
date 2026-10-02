@@ -147,6 +147,23 @@ async def test_all_ready_starts_unranked_game(rooms, games_no_db, redis_client, 
     assert exc.value.code == "not_in_room"
 
 
+@pytest.mark.parametrize("allow", [False, True])
+async def test_spectate_setting_is_copied_to_game(rooms, games_no_db, allow):
+    """방 설정 allow_spectate → 게임 meta 의 불변 플래그 (maze.md §9 관전 전환)"""
+    room = await rooms.create_room(GAME, "duel", 1, "host", allow_spectate=allow)
+    assert room.allow_spectate is allow
+    assert (await rooms.get_room(room.code)).allow_spectate is allow
+    await rooms.join_room(room.code, 2, "guest")
+    await rooms.set_ready(1)
+    state = await rooms.set_ready(2)
+    assert (await games_no_db.get_meta(state.game_id)).spectate_on_elimination is allow
+
+
+async def test_spectate_defaults_off(rooms):
+    room = await rooms.create_room(GAME, "duel", 1, "host")
+    assert room.allow_spectate is False
+
+
 async def test_ready_before_full_does_not_start(rooms):
     room = await rooms.create_room(GAME, "trio", 1, "host")
     await rooms.join_room(room.code, 2, "g")

@@ -61,7 +61,8 @@ class GameService(Protocol):
 
     async def create_game(self, *, mode: str, is_ranked: bool, players: Sequence[SeatPlayer],
                           room_code: Optional[str] = None,
-                          rng: Optional[random.Random] = None) -> GameState: ...
+                          rng: Optional[random.Random] = None,
+                          spectate_on_elimination: bool = False) -> GameState: ...
 
 
 @dataclass(frozen=True)

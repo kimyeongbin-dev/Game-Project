@@ -9,8 +9,7 @@ docs/api/platform.md "Redis 키 스키마" 표가 정본이다.
 
 Pub/Sub 채널(4단계)도 여기서 만든다. 키가 아니라 채널이다 — 아래 "이벤트 채널" 절.
 
-예약(아직 만들지 않음): `game:{id}:vision:{seat_no}`(5단계 시야),
-`game:{id}:clocks`·`{game}:deadlines`(6단계 시간 체계).
+예약(아직 만들지 않음): `game:{id}:clocks`·`{game}:deadlines`(6단계 시간 체계).
 """
 
 from app.core.config import settings
@@ -34,6 +33,11 @@ def game_meta(game_id: str) -> str:
 def game_lock(game_id: str) -> str:
     """STRING — 게임별 락 토큰"""
     return f"game:{game_id}:lock"
+
+
+def game_vision(game_id: str, seat_no: int) -> str:
+    """STRING — 좌석의 누적 관측 SeatMemory.to_dict() JSON (발견 맵·마지막 목격, maze.md §6)"""
+    return f"game:{game_id}:vision:{seat_no}"
 
 
 # ----- 매치메이킹 -----

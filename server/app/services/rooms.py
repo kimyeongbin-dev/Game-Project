@@ -56,6 +56,8 @@ class Room:
     game_id: Optional[str]
     created_at: str
     players: tuple[RoomPlayer, ...]
+    # 방 설정 — 탈락자가 관전 패킷을 받는다 (maze.md §9). 게임 시작 시 meta 로 복사된다
+    allow_spectate: bool = False
 
     @property
     def user_ids(self) -> list[int]:
@@ -116,7 +118,9 @@ class Rooms:
 
     # ----- 변경 -----
 
-    async def create_room(self, game: str, mode: str, user_id: int, nickname: str) -> Room:
+    async def create_room(
+        self, game: str, mode: str, user_id: int, nickname: str, *, allow_spectate: bool = False
+    ) -> Room:
         capacity = self._service(game).seats(mode)
         redis = require_redis()
         host = RoomPlayer(seat_no=1, user_id=user_id, nickname=nickname, is_host=True)
@@ -125,7 +129,7 @@ class Rooms:
             room = Room(
                 code=self._code_factory(), game=game, mode=mode, capacity=capacity,
                 status=WAITING, game_id=None, created_at=utcnow().isoformat() + "Z",
-                players=(host,),
+                players=(host,), allow_spectate=allow_spectate,
             )
             async with store_errors():
                 if await redis.set(keys.room(room.code), room.to_json(), nx=True,
@@ -220,6 +224,7 @@ class Rooms:
                 is_ranked=False,
                 players=[SeatPlayer(p.seat_no, p.user_id, p.nickname) for p in room.players],
                 room_code=room.code,
+                spectate_on_elimination=room.allow_spectate,
             )
             room = replace(room, status=PLAYING, game_id=state.game_id)
             await self._save(redis, room, refresh_members=False)  # 활동은 이제 game 이다

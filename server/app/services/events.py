@@ -201,6 +201,7 @@ def room_snapshot(room: "Room") -> dict:
         "mode": room.mode,
         "capacity": room.capacity,
         "status": room.status,
+        "allow_spectate": room.allow_spectate,
         "players": [
             {"seat_no": p.seat_no, "user_id": p.user_id, "nickname": p.nickname,
              "is_host": p.is_host, "is_ready": p.is_ready}
