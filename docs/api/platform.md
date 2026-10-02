@@ -831,7 +831,7 @@ Redis와 이중 기록이 되고 정합성 문제가 생긴다. 방 기록이 �
 | `{ns}:game:{id}:events` | Pub/Sub 채널 | 이벤트 JSON `{kind, scope, scope_id, recipients, hint, seq}` — 권위 없음 | — | 게임 서비스(상태를 쓴 직후, 락 안) | 워커별 구독 버스 |
 | `{ns}:match:{id}:events` | Pub/Sub 채널 | 〃 | — | 매치메이킹 | 〃 |
 | `{ns}:room:{code}:events` | Pub/Sub 채널 | 〃 | — | 방 서비스 | 〃 |
-| `game:{id}:vision:{seat_no}` | — | 발견 맵 | — | **5단계에서 신설** | |
+| `game:{id}:vision:{seat_no}` | STRING | 좌석의 누적 관측 `{v, edges:[[row, col, "h"\|"v", wall]…], last_seen:[{seat_no, row, col, turn}…]}` ([`games/maze.md`](games/maze.md) §6) | state 와 같다 | 게임 서비스 — 생성 시 MULTI, 수락된 행동마다 **state 와 같은 펜싱 쓰기 한 번**(M3 5단계) | 좌석별 화면(자기 좌석 키만), 탈락자 관전 패킷 |
 | `game:{id}:clocks`, `{game}:deadlines` | — | 시계, 데드라인 ZSET | — | **6단계에서 신설** | |
 
 **설계 근거**
@@ -840,6 +840,10 @@ Redis와 이중 기록이 되고 정합성 문제가 생긴다. 방 기록이 �
 - **거절도 저장한다.** 벽 거절은 `wall_rejections` 를 바꾼다([`games/maze.md`](games/maze.md) §7)
 - **펜싱 쓰기.** state 는 "락 토큰이 아직 내 것일 때만 SET" 하는 Lua 로 쓴다. 락 TTL 을 넘긴 행동이
   다음 행동의 결과를 덮어쓰지 못한다
+- **시야는 state 와 한 번에 쓴다 (M3 5단계).** 수락된 행동마다 좌석 전원을 다시 관측하고(남의 이동이 내 시야를
+  바꾼다) state + 좌석별 vision 을 Lua 한 번(`fenced_mset`)으로 같은 EX 와 함께 쓴다 — 전부 또는 전무. 나눠 쓰면 그 사이
+  장애로 state 는 다음 턴인데 발견 맵은 이전 턴이 되고, 그 턴의 목격이 영구히 사라진다. 탈락 좌석은 탈락 직전 관측으로
+  동결되지만 종료 TTL 은 함께 받는다. **좌석별 키**로 나눈 것은 플레이어 화면이 자기 좌석 키만 읽게 하기 위해서다
 - **활동 키 하나로 배타성을 보장한다.** "동시에 하나의 큐에만"과 큐·방 동시 참가 금지가 `SET NX` 하나로
   원자적으로 성립한다. 같은 키가 재접속 시 진행 중 게임을 찾는 색인이다. 다른 활동 중이면 그 종류에 맞는
   §13 코드(`already_in_queue`·`already_in_room`·`already_in_game`)로 거절한다

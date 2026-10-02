@@ -137,7 +137,7 @@ games/ ┘
 ### 알아둘 설계 패턴
 - **Graceful Degradation**: DB 연결 실패 시 서버는 메모리 전용 모드로 계속 동작한다. DB 작업 전에 `is_db_available()`을 확인한다.
 - **게임 상태 직렬화**: `GameState.to_dict()` / `from_dict()` 가 Redis `game:<id>:state` 값 전체다(M3 3단계에서 저장). `schema_version` 이 다르면 복원을 거부한다.
-- **멀티플레이 상태는 Redis 에만**: `services/maze_game.py`(게임 상태·락·종료 기록), `services/matchmaking.py`(큐), `services/rooms.py`(방), `services/activity.py`(유저당 활동 하나). 서비스 인스턴스는 상태를 갖지 않는다. 상태를 쓴 직후 `services/events.py` 로 이벤트를 **발행만** 하고(권위 없음, at-most-once), 워커마다 `ws/bus.py` 가 구독해 자기 소켓에만 보낸다. 키는 `app/db/redis_keys.py` 에서만 만들고, 스키마 표는 `docs/api/platform.md` "Redis 키 스키마"에 있다.
+- **멀티플레이 상태는 Redis 에만**: `services/maze_game.py`(게임 상태·락·종료 기록), `services/matchmaking.py`(큐), `services/rooms.py`(방), `services/activity.py`(유저당 활동 하나). 서비스 인스턴스는 상태를 갖지 않는다. 상태를 쓴 직후 `services/events.py` 로 이벤트를 **발행만** 하고(권위 없음, at-most-once), 워커마다 `ws/bus.py` 가 구독해 자기 소켓에만 보낸다. 좌석별 누적 시야(`game:{id}:vision:{seat_no}`)는 수락된 행동마다 state 와 **같은 락 토큰의 펜싱 쓰기 한 번**(`fenced_mset`)으로 기록하고, 화면(`services/maze_view.py`)은 자기 좌석 관측만 읽는다. 키는 `app/db/redis_keys.py` 에서만 만들고, 스키마 표는 `docs/api/platform.md` "Redis 키 스키마"에 있다.
 - **하드웨어 금고 키 보관**: AES/HMAC 키를 소스에 하드코딩하지 않는다. 앱 최초 실행 시 기기 내부에서 난수 생성해 Keystore/Keychain에만 보관한다 (§3.2).
 - **개수를 박지 않는다**: 인원·게임·모드 수를 코드나 스키마에 고정값으로 쓰지 않는다. 판단 기준은 "인원이 4명이 되면 무엇을 고쳐야 하는가?" — 행 추가 외에 변경이 필요하면 하드코딩이다 (`docs/api/platform.md` §5 확장성 원칙).
 
@@ -146,7 +146,7 @@ games/ ┘
 | 영역 | 상태 |
 | :-- | :-- |
 | 디렉토리 구조 / Docker 환경 | 완료 |
-| `server/app/games/maze/` | **N인 좌석 모델로 일반화 완료**(M3 1단계) — 모드별 배치 테이블 `core/layouts.py`, 점프 제거, 탈락·`last_standing`·순위·턴당 거절 카운터. 2·3·4좌석 파라미터화 테스트(`test_seat_scaling.py`). 도메인 리네이밍 미적용 |
+| `server/app/games/maze/` | **N인 좌석 모델로 일반화 완료**(M3 1단계) — 모드별 배치 테이블 `core/layouts.py`, 점프 제거, 탈락·`last_standing`·순위·턴당 거절 카운터. 2·3·4좌석 파라미터화 테스트(`test_seat_scaling.py`). **시야 엔진 완료**(M3 5단계) — `core/vision.py`(3×3 + 벽 차폐, 단위 변, 누적 관측). 도메인 리네이밍 미적용 |
 | 구 REST `/api/v1/quoridor/*` | **폐기 완료**(M3 1단계). shim `quoridor_service` 도 3단계에서 삭제 |
 | 큐·방·게임 상태 | **Redis 이전 완료**(M3 3단계) — 게임별 락 + 펜싱 쓰기, Lua 원자 매칭, N인 좌석. 종료 시 `game_sessions` 기록. 2·3·4좌석 파라미터화 테스트 |
 | `server/app/db/` | **2인 전제 제거 완료**(M3 2단계) — `game_sessions` 는 시작·종료 기록만, 좌석은 `game_participants` 행. `match_queue`·`game_rooms`·`daily_champions`·스케줄러 폐기. 마이그레이션 도구 없음(`create_all`) — Alembic 은 첫 운영 배포 전 |
