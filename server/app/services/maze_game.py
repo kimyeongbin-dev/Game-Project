@@ -12,23 +12,26 @@ docs/api/games/maze.md §8: 게임 상태의 권위는 Redis `game:<id>:state` �
   다시 관측해 state 와 **같은 펜싱 쓰기 한 번**으로 기록한다. 탈락 좌석은 탈락 직전 관측으로 동결된다
 - 상태를 쓴 직후(락 안에서) 이벤트를 발행만 한다(`app/services/events.py`). 소켓 전송은 ws 계층
   구독 버스가 한다. 거절은 발행하지 않는다 — 행동한 사람에게만 응답한다(핸들러, 7단계)
+- 시간 체계(maze.md §8·§9, M3 6단계): 좌석별 게임 시계·접속 시계(`game:<id>:clocks`, 계산은
+  `maze_clock.py`)와 데드라인 색인(`deadlines:<game>`)을 state 와 **같은 펜싱 쓰기 한 번**으로 기록한다.
+  시각은 Redis TIME(주입 가능). 모든 처리는 맨 앞에서 소진된 시계를 먼저 탈락 처리한다(지연 보정)
 """
 
 import json
 import logging
 import random
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Callable, Optional, Sequence
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.core.config import settings
-from app.core.time import utcnow
+from app.core.time import Clock, redis_clock, utcnow
 from app.db import redis_keys as keys
 from app.db.config import get_session_factory, is_db_available
 from app.db.redis_lock import (
     LockTimeout,
-    fenced_mset,
+    fenced_write,
     redis_lock,
     require_redis,
     store_errors,
@@ -38,9 +41,10 @@ from app.games.maze import GameState
 from app.games.maze.core.game_state import SCHEMA_VERSION
 from app.games.maze.core.layouts import get_layout
 from app.games.maze.core.vision import SeatMemory, game_sight
-from app.services import activity, events
+from app.services import activity, events, outages
 from app.services.activity import MultiplayerError
 from app.services.events import Publisher, redis_publisher
+from app.services.maze_clock import GameClocks, Interval
 
 logger = logging.getLogger(__name__)
 
@@ -162,16 +166,80 @@ def seat_results(state: GameState) -> list[SeatResult]:
     ]
 
 
+@dataclass(frozen=True)
+class Disconnection:
+    """mark_disconnected 결과 — 서버 유예 소급(apply_server_grace)이 이 시각으로 같은 끊김인지 확인한다"""
+    seat_no: int
+    disconnected_at_ms: int
+    grace_remaining_ms: int
+
+
+@dataclass(frozen=True)
+class GraceEntry:
+    """서버 유예 후보 — 이 워커가 기록한 끊김 하나 (app/ws/server_grace.py)"""
+    game_id: str
+    user_id: int
+    disconnected_at_ms: int
+
+
+@dataclass
+class _Tx:
+    """게임 락 안의 처리 한 번 — 읽은 것, 바꾼 것, 나갈 이벤트"""
+    state: GameState
+    meta: GameMeta
+    clocks: GameClocks
+    now: int
+    outages: list[Interval]
+    outbox: list[events.Event] = field(default_factory=list)
+    expired: list[tuple[int, str]] = field(default_factory=list)
+    observe: bool = False
+
+    @property
+    def current(self) -> Optional[int]:
+        return None if self.state.is_finished else self.state.current_seat_no
+
+
+def _decode_clocks(raw: Optional[str]) -> GameClocks:
+    if raw is None:
+        raise StateVersionMismatch("clocks missing")
+    try:
+        return GameClocks.from_dict(json.loads(raw))
+    except ValueError as exc:
+        raise StateVersionMismatch(str(exc)) from exc
+
+
+def deadline_ops(state: GameState, clocks: GameClocks,
+                 outage_list: Sequence[Interval] = ()) -> tuple[dict[str, int], list[str]]:
+    """이 게임의 데드라인 member → (ZADD 할 것, ZREM 할 것). 좌석 목록에서 만든다 — 인원 수 무관"""
+    gid = state.game_id
+    due = clocks.deadlines(None if state.is_finished else state.current_seat_no, outage_list)
+    zadd: dict[str, int] = {}
+    zrem: list[str] = []
+    if due.clock_at is not None:
+        zadd[keys.deadline_clock(gid)] = due.clock_at
+    else:
+        zrem.append(keys.deadline_clock(gid))
+    for p in state.seats:
+        member = keys.deadline_grace(gid, p.seat_no)
+        if p.seat_no in due.grace_at:
+            zadd[member] = due.grace_at[p.seat_no]
+        else:
+            zrem.append(member)
+    return zadd, zrem
+
+
 class MazeGameService:
-    """상태는 Redis·DB 에만 있다. 인스턴스는 의존성(DB 세션 팩토리)만 들고 있다"""
+    """상태는 Redis·DB 에만 있다. 인스턴스는 의존성(DB 세션 팩토리·발행·시계)만 들고 있다"""
 
     def __init__(
         self,
         session_factory: SessionFactoryProvider = _app_session_factory,
         publisher: Publisher = redis_publisher,
+        clock: Clock = redis_clock,
     ):
         self._session_factory = session_factory
         self._publisher = publisher
+        self._clock = clock
 
     # ----- 생성·조회 -----
 
@@ -231,15 +299,23 @@ class MazeGameService:
                 )
 
         try:
+            now = await self._clock.now_ms()
+            clocks = GameClocks.start(
+                [p.seat_no for p in state.seats], now,
+                initial_ms=settings.clock_initial_ms, budget_ms=settings.connection_budget_ms,
+            )
+            zadd, _ = deadline_ops(state, clocks)
             async with store_errors():
                 async with redis.pipeline(transaction=True) as pipe:
                     pipe.set(keys.game_state(state.game_id), json.dumps(state.to_dict()))
                     pipe.set(keys.game_meta(state.game_id), meta.to_json())
+                    pipe.set(keys.game_clocks(state.game_id), json.dumps(clocks.to_dict()))
                     for p in state.seats:  # 초기 관측 (turn 0)
                         pipe.set(keys.game_vision(state.game_id, p.seat_no),
                                  _encode_memory(_observe(state, p.seat_no, SeatMemory())))
                     for user_id in meta.human_user_ids:
                         pipe.set(keys.user_activity(user_id), keys.activity_game(state.game_id))
+                    pipe.zadd(keys.deadlines(GAME), zadd)
                     await pipe.execute()
         except Exception:
             # Redis 에 상태가 없으면 이 게임은 진행할 수 없다 — DB 행을 무효로 닫는다
@@ -270,121 +346,230 @@ class MazeGameService:
             s: _decode_memory(raw) for s, raw in zip(seat_nos, raw_vision)
         }
 
+    async def load_clocks(self, game_id: str) -> Optional[GameClocks]:
+        """시계 스냅샷 (락 없음). 없으면 None"""
+        redis = require_redis()
+        async with store_errors():
+            raw = await redis.get(keys.game_clocks(game_id))
+        return _decode_clocks(raw) if raw is not None else None
+
     async def get_meta(self, game_id: str) -> Optional[GameMeta]:
         redis = require_redis()
         async with store_errors():
             raw = await redis.get(keys.game_meta(game_id))
         return GameMeta.from_json(raw) if raw is not None else None
 
-    # ----- 행동 -----
+    # ----- 행동 (클라이언트 — 좌석·시각을 받지 않는다) -----
 
     async def move(self, game_id: str, user_id: int, row: int, col: int) -> ActionOutcome:
-        return await self._act(
+        return await self._player_action(
             game_id, user_id, events.ACTION_MOVE, lambda s, seat: s.move(seat, row, col)
         )
 
     async def place_wall(
         self, game_id: str, user_id: int, row: int, col: int, orientation: str
     ) -> ActionOutcome:
-        return await self._act(
+        return await self._player_action(
             game_id, user_id, events.ACTION_WALL,
             lambda s, seat: s.place_wall(seat, row, col, orientation),
         )
 
     async def surrender(self, game_id: str, user_id: int) -> ActionOutcome:
         """즉시 탈락 (§9). 게임이 끝나는지는 엔진의 종료 조건이 정한다"""
-        return await self._act(
-            game_id, user_id, events.ACTION_ELIMINATED,
-            lambda s, seat: s.eliminate(seat, "surrender"), reason="surrender",
-        )
+        return await self._player_action(game_id, user_id, events.ACTION_ELIMINATED, None)
+
+    # ----- 연결 (7단계 핸들러가 부른다 — user_id 는 인증된 연결에서만) -----
+
+    async def mark_disconnected(self, game_id: str, user_id: int) -> Optional[Disconnection]:
+        """끊김 — 그 좌석의 접속 시계가 흐르기 시작한다 (§8·§9)
+
+        이미 끊김이면 처음 끊긴 시각을 그대로 둔다. 좌석이 아니거나 탈락·종료면 None.
+        """
+        def step(tx: _Tx) -> Optional[Disconnection]:
+            seat_no = tx.meta.seat_of(user_id)
+            if seat_no is None or tx.state.is_finished or tx.state.seat(seat_no).is_eliminated:
+                return None
+            fresh = tx.clocks.disconnect(seat_no, tx.now)
+            seat = tx.clocks.seat(seat_no)
+            remaining = max(0, tx.clocks.conn_remaining(seat_no, tx.now, tx.outages))
+            if fresh:
+                tx.outbox.append(events.seat_disconnected(tx.meta, seat_no, remaining, tx.state.turn_count))
+            return Disconnection(seat_no, seat.disconnected_at_ms, remaining)
+
+        result, _, _ = await self._run(game_id, step)
+        return result
+
+    async def mark_connected(self, game_id: str, user_id: int) -> bool:
+        """재접속 — 끊긴 구간을 접속 시계에서 차감한다(리셋 없음). 끊김 상태였으면 True"""
+        def step(tx: _Tx) -> bool:
+            seat_no = tx.meta.seat_of(user_id)
+            if seat_no is None or tx.state.seat(seat_no).is_eliminated:
+                return False
+            return self._reconnect(tx, seat_no)
+
+        result, _, _ = await self._run(game_id, step)
+        return result
+
+    # ----- 서버 행위 (스위퍼·운영 — 소켓 메시지에 연결하지 않는다) -----
 
     async def eliminate(self, game_id: str, seat_no: int, reason: str) -> ActionOutcome:
-        """서버 사유 탈락 — 6단계 스위퍼가 time_forfeit / disconnect_forfeit 로 부른다"""
-        return await self._act(
-            game_id, None, events.ACTION_ELIMINATED,
-            lambda s, _: s.eliminate(seat_no, reason), reason=reason, seat_no=seat_no,
-        )
+        """서버 사유 탈락. 이미 탈락한 좌석이면 not_in_game"""
+        def step(tx: _Tx):
+            if tx.state.seat(seat_no).is_eliminated:
+                return "not_in_game"
+            rejection = self._eliminate(tx, seat_no, reason)
+            return rejection.value if rejection else None
 
-    async def void_lost_game(self, game_id: str) -> None:
-        """Redis 상태를 잃은 게임을 무효로 닫는다 (§8 fail-safe — 감지는 6단계)
+        rejection, tx, ended = await self._run(game_id, step)
+        return ActionOutcome(rejection, tx.state, ended)
 
-        DB 는 전원 void, MMR 변동 없음. 남은 meta·activity 를 정리한다.
+    async def expire(self, game_id: str) -> list[tuple[int, str]]:
+        """만료 정산만 — 스위퍼가 부른다. 이번에 탈락시킨 (좌석, 사유) 목록
+
+        정산은 락 안에서 저장된 시계로 다시 계산한다. 데드라인 점수가 낡았어도 결과가 틀리지 않고,
+        올바른 점수로 다시 적힌다. 같은 만료를 두 번 불러도 두 번째는 빈 목록이다.
         """
-        await self._void_record(game_id)
-        redis = require_redis()
-        async with store_errors():
-            raw_meta = await redis.get(keys.game_meta(game_id))
-        if raw_meta is not None:
-            meta = GameMeta.from_json(raw_meta)
-            await self._publisher.publish(events.game_voided(meta))
-            for user_id in meta.human_user_ids:
-                await activity.release(redis, user_id, keys.activity_game(game_id))
-            async with store_errors():
-                await redis.delete(
-                    keys.game_meta(game_id), keys.game_state(game_id),
-                    *(keys.game_vision(game_id, p.seat_no) for p in meta.players),
-                )
+        _, tx, _ = await self._run(game_id, lambda tx: None)
+        return tx.expired
+
+    async def void_lost_game(self, game_id: str) -> bool:
+        """Redis 상태를 잃은 게임을 무효로 닫는다 (§8 fail-safe). 실제로 닫았으면 True
+
+        state 가 아직 있으면 아무것도 하지 않는다. 여러 번·여러 워커가 불러도 통지는 한 번이다.
+        """
+        return await self._void(game_id, lost=True)
+
+    async def void_game(self, game_id: str, *, started_before_ms: Optional[int] = None) -> bool:
+        """진행 중인 게임을 무효로 닫는다 — 긴 Redis 장애 (§8). 실제로 닫았으면 True
+
+        started_before_ms 가 있으면 그 전에 시작한 게임만 (장애 뒤에 생긴 게임은 건드리지 않는다).
+        """
+        return await self._void(game_id, lost=False, started_before_ms=started_before_ms)
 
     # ----- 내부 -----
 
-    async def _act(
-        self,
-        game_id: str,
-        user_id: Optional[int],
-        action: str,
-        apply,
-        *,
-        reason: Optional[str] = None,
-        seat_no: Optional[int] = None,
-    ) -> ActionOutcome:
-        """락 → 읽기 → 판정 → (수락이면) 좌석 전원 관측 → 펜싱 저장 → (종료 시) 기록 → 발행
+    async def _player_action(self, game_id: str, user_id: int, action: str, apply) -> ActionOutcome:
+        def step(tx: _Tx):
+            seat_no = tx.meta.seat_of(user_id)
+            # 정산으로 방금 탈락했을 수도 있다 (§8 지연 보정 — 만료를 먼저 처리한다)
+            if seat_no is None or tx.state.seat(seat_no).is_eliminated:
+                return "not_in_game"
+            self._reconnect(tx, seat_no)  # 행동을 보냈다는 것이 연결의 증거다
+            if apply is None:
+                rejection = self._eliminate(tx, seat_no, "surrender")
+                return rejection.value if rejection else None
 
-        user_id=None 은 서버 행위이고 그때는 seat_no 로 대상 좌석을 받는다.
-        action·reason 은 발행할 last_action 에만 쓴다 (좌표는 싣지 않는다).
+            rejection = apply(tx.state, seat_no)
+            if rejection is not None:
+                return rejection.value  # 거절은 시계를 건드리지 않는다 — 차례는 계속 흐른다
+            tx.clocks.close_turn(seat_no, tx.now, tx.outages, increment_ms=settings.clock_increment_ms)
+            if tx.state.is_finished:
+                tx.clocks.stop(tx.now, tx.outages)
+            tx.observe = True
+            tx.outbox.append(events.game_updated(
+                tx.meta, tx.state, seat_no=seat_no, action=action, ended=tx.state.is_finished,
+            ))
+            return None
+
+        rejection, tx, ended = await self._run(game_id, step)
+        return ActionOutcome(rejection, tx.state, ended)
+
+    async def _run(self, game_id: str, step):
+        """락 → 읽기(state·meta·clocks) → 시각 → 만료 정산 → step → 펜싱 쓰기 한 번 → (종료 시) 기록 → 발행
+
+        모든 경로(행동·항복·스위퍼·끊김·재접속)가 여기를 지난다. 그래서 만료는 언제나 다른 무엇보다
+        먼저 처리되고, 시계·시야·데드라인이 state 와 같은 토큰으로 한 번에 기록된다.
+        반환: (step 결과, 처리 맥락, 이번에 종료됐는지)
         """
         redis = require_redis()
         lock_key = keys.game_lock(game_id)
         try:
             async with redis_lock(redis, lock_key) as token:
                 async with store_errors():
-                    raw_state, raw_meta = await redis.mget(
-                        keys.game_state(game_id), keys.game_meta(game_id)
+                    raw_state, raw_meta, raw_clocks = await redis.mget(
+                        keys.game_state(game_id), keys.game_meta(game_id), keys.game_clocks(game_id)
                     )
                 if raw_state is None or raw_meta is None:
                     raise GameNotFound(game_id)
                 state = _decode_state(raw_state)
-                meta = GameMeta.from_json(raw_meta)
-
-                if user_id is not None:
-                    seat_no = meta.seat_of(user_id)
-                    if seat_no is None or state.seat(seat_no).is_eliminated:
-                        return ActionOutcome("not_in_game", state, ended=False)
-
+                clocks = _decode_clocks(raw_clocks)
+                tx = _Tx(
+                    state=state,
+                    meta=GameMeta.from_json(raw_meta),
+                    clocks=clocks,
+                    now=await self._clock.now_ms(),
+                    outages=await outages.read(redis, clocks.open_since()),
+                )
                 was_finished = state.is_finished
-                rejection = apply(state, seat_no)
+                self._settle(tx)
+                result = step(tx)
                 ended = state.is_finished and not was_finished
 
-                # 거절도 저장한다 — 벽 거절은 wall_rejections 를 바꾼다 (§7). 시야는 그대로다
-                items = {keys.game_state(game_id): json.dumps(state.to_dict())}
-                if rejection is None:
-                    # 남의 행동도 내 시야를 바꾼다 — 좌석 전원을 state 와 한 번에 쓴다.
-                    # 동결된 좌석도 다시 써서 종료 TTL 을 같이 받는다
-                    items.update(await self._observe_all(redis, state))
-                ttl = settings.game_finished_ttl_sec if state.is_finished else None
-                written = await fenced_mset(redis, lock_key, token, items, ex=ttl)
-                if not written:
-                    raise GameBusy(f"lost lock on {game_id} before write")
-
+                await self._commit(redis, lock_key, token, tx)
                 if ended:
-                    await self._finalize(redis, state, meta)
-                if rejection is None:
-                    # 락 안에서 발행한다 — 같은 게임의 이벤트가 상태 순서대로 나간다
-                    await self._publisher.publish(events.game_updated(
-                        meta, state, seat_no=seat_no, action=action, reason=reason, ended=ended,
-                    ))
-                return ActionOutcome(rejection.value if rejection else None, state, ended)
+                    await self._finalize(redis, state, tx.meta)
+                # 락 안에서 발행한다 — 같은 게임의 이벤트가 상태 순서대로 나간다
+                for event in tx.outbox:
+                    await self._publisher.publish(event)
+                return result, tx, ended
         except LockTimeout as exc:
             raise GameBusy(str(exc)) from exc
+
+    def _settle(self, tx: _Tx) -> None:
+        """지금 소진된 시계를 소진 시각 순으로 탈락 처리한다 (탈락 순번 = 순위 근거)"""
+        for expiry in tx.clocks.settle(tx.current, tx.now, tx.outages):
+            if tx.state.is_finished:
+                break
+            if tx.state.seat(expiry.seat_no).is_eliminated:
+                continue
+            self._eliminate(tx, expiry.seat_no, expiry.reason)
+            tx.expired.append((expiry.seat_no, expiry.reason))
+
+    def _eliminate(self, tx: _Tx, seat_no: int, reason: str):
+        """좌석 탈락 + 시계 (§9 탈락 처리 3·5번). 현재 차례였으면 다음 생존자는 지금부터"""
+        was_current = tx.current == seat_no
+        rejection = tx.state.eliminate(seat_no, reason)
+        if rejection is not None:
+            return rejection
+        if was_current:
+            tx.clocks.close_turn(seat_no, tx.now, tx.outages)  # 증분 없음
+        tx.clocks.freeze(seat_no, tx.now, tx.outages)
+        if tx.state.is_finished:
+            tx.clocks.stop(tx.now, tx.outages)
+        elif was_current:
+            tx.clocks.begin_turn(tx.now)
+        tx.observe = True
+        tx.outbox.append(events.game_updated(
+            tx.meta, tx.state, seat_no=seat_no, action=events.ACTION_ELIMINATED,
+            reason=reason, ended=tx.state.is_finished,
+        ))
+        return None
+
+    def _reconnect(self, tx: _Tx, seat_no: int) -> bool:
+        if not tx.clocks.reconnect(seat_no, tx.current, tx.now, tx.outages):
+            return False
+        tx.outbox.append(events.seat_reconnected(tx.meta, seat_no, tx.state.turn_count))
+        return True
+
+    async def _commit(self, redis, lock_key: str, token: str, tx: _Tx) -> None:
+        """state·clocks(·vision)·데드라인을 같은 토큰으로 한 번에 — 전부 또는 전무"""
+        gid = tx.state.game_id
+        items = {
+            keys.game_state(gid): json.dumps(tx.state.to_dict()),
+            keys.game_clocks(gid): json.dumps(tx.clocks.to_dict()),
+        }
+        if tx.observe:
+            # 남의 행동도 내 시야를 바꾼다 — 좌석 전원을 state 와 한 번에 쓴다.
+            # 동결된 좌석도 다시 써서 종료 TTL 을 같이 받는다
+            items.update(await self._observe_all(redis, tx.state))
+        zadd, zrem = deadline_ops(tx.state, tx.clocks, tx.outages)
+        ttl = settings.game_finished_ttl_sec if tx.state.is_finished else None
+        written = await fenced_write(
+            redis, lock_key, token, items, ex=ttl,
+            zset=keys.deadlines(GAME), zadd=zadd, zrem=zrem,
+        )
+        if not written:
+            raise GameBusy(f"lost lock on {gid} before write")
 
     async def _observe_all(self, redis, state: GameState) -> dict[str, str]:
         """좌석 전원의 vision 키 → 갱신된 관측 JSON (락 안에서 부른다)"""
@@ -395,6 +580,45 @@ class MazeGameService:
             key: _encode_memory(_observe(state, p.seat_no, _decode_memory(raw)))
             for key, p, raw in zip(vision_keys, state.seats, raws)
         }
+
+    async def _void(self, game_id: str, *, lost: bool, started_before_ms: Optional[int] = None) -> bool:
+        """무효 처리 공통 — 락 안에서 조건을 다시 확인하고, 키를 실제로 지운 쪽만 통지한다"""
+        redis = require_redis()
+        try:
+            async with redis_lock(redis, keys.game_lock(game_id)):
+                async with store_errors():
+                    raw_state, raw_meta, raw_clocks = await redis.mget(
+                        keys.game_state(game_id), keys.game_meta(game_id), keys.game_clocks(game_id)
+                    )
+                if lost and raw_state is not None:
+                    return False
+                if not lost:
+                    if raw_state is None or _decode_state(raw_state).is_finished:
+                        return False
+                    if (started_before_ms is not None and raw_clocks is not None
+                            and _decode_clocks(raw_clocks).started_at_ms >= started_before_ms):
+                        return False
+                meta = GameMeta.from_json(raw_meta) if raw_meta is not None else None
+                seat_nos = [p.seat_no for p in meta.players] if meta is not None else []
+                async with store_errors():
+                    async with redis.pipeline(transaction=True) as pipe:
+                        pipe.delete(
+                            keys.game_state(game_id), keys.game_meta(game_id), keys.game_clocks(game_id),
+                            *(keys.game_vision(game_id, s) for s in seat_nos),
+                        )
+                        pipe.zrem(keys.deadlines(GAME), keys.deadline_clock(game_id),
+                                  *(keys.deadline_grace(game_id, s) for s in seat_nos))
+                        deleted, _ = await pipe.execute()
+        except LockTimeout as exc:
+            raise GameBusy(str(exc)) from exc
+
+        claimed = deleted > 0
+        recorded = await self._void_record(game_id)
+        if meta is not None and claimed:
+            await self._publisher.publish(events.game_voided(meta))
+            for user_id in meta.human_user_ids:
+                await activity.release(redis, user_id, keys.activity_game(game_id))
+        return claimed or recorded
 
     async def _finalize(self, redis, state: GameState, meta: GameMeta) -> None:
         """종료 처리 — meta 보존 기한 설정, activity 해제, DB 결과 기록
@@ -421,15 +645,19 @@ class MazeGameService:
         except Exception:
             logger.exception("Failed to record result of game %s", state.game_id)
 
-    async def _void_record(self, game_id: str) -> None:
+    async def _void_record(self, game_id: str) -> bool:
+        """DB 행을 void 로. 실제로 바꿨으면 True (이미 종료·없음·DB 없음이면 False)"""
         factory = self._session_factory()
         if factory is None:
-            return
+            return False
         try:
             async with factory() as session:
-                await GameSessionRepository(session).void(game_id)
+                return await GameSessionRepository(session).void(game_id) is not None
+        except ValueError:
+            return False  # 이미 종료된 행 — 다른 워커가 먼저 닫았다
         except Exception:
             logger.exception("Failed to void game %s", game_id)
+            return False
 
 
 maze_games = MazeGameService()
@@ -437,6 +665,8 @@ maze_games = MazeGameService()
 __all__ = [
     "GAME",
     "ActionOutcome",
+    "Disconnection",
+    "GraceEntry",
     "GameBusy",
     "GameMeta",
     "GameNotFound",
@@ -444,6 +674,7 @@ __all__ = [
     "MultiplayerError",
     "SeatPlayer",
     "StateVersionMismatch",
+    "deadline_ops",
     "maze_games",
     "seat_results",
 ]

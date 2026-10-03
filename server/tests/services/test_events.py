@@ -12,7 +12,7 @@ import pytest
 from app.db import redis_keys as keys
 from app.services import events
 from app.services.events import Event, RedisPublisher
-from app.services.matchmaking import Matchmaking
+from app.services.matchmaking import READY_DEADLINE_SEC, Matchmaking
 from app.services.maze_game import GAME, MazeGameService, SeatPlayer
 from app.services.rooms import Rooms
 
@@ -164,8 +164,23 @@ async def test_server_elimination_names_the_seat(games, pub):
     assert pub.events[-1].hint["last_action"] == {"seat_no": 2, "kind": "eliminated", "reason": "time_forfeit"}
 
 
-async def test_void_publishes(games, pub):
+async def test_connection_events_are_public(games, pub, seat_mode):
+    """끊김·재접속 통지는 좌석·남은 접속 시계만 — 좌표·벽·시야 없음 (M3 6단계)"""
+    mode, seats = seat_mode
+    state, users = await start(games, mode, seats)
+    await games.mark_disconnected(state.game_id, users[-1])
+    await games.mark_connected(state.game_id, users[-1])
+    gone, back = pub.events[-2:]
+    assert (gone.kind, back.kind) == (events.SEAT_DISCONNECTED, events.SEAT_RECONNECTED)
+    assert set(gone.hint) == {"seat_no", "grace_remaining_ms"} and back.hint == {"seat_no": seats}
+    for e in (gone, back):
+        assert_public(e.hint)
+        assert e.recipients == tuple(users)
+
+
+async def test_void_publishes(games, pub, redis_client):
     state, users = await start(games, "duel", 2)
+    await redis_client.delete(keys.game_state(state.game_id))  # 유실된 게임만 무효로 닫는다
     await games.void_lost_game(state.game_id)
     assert pub.events[-1].kind == events.GAME_VOIDED
     assert pub.events[-1].recipients == tuple(users)
@@ -191,8 +206,8 @@ async def test_publish_failure_does_not_fail_action(redis_client, monkeypatch):
 # ----- 매치 -----
 
 @pytest.fixture
-def mm(games, pub) -> Matchmaking:
-    return Matchmaking(games={GAME: games}, rng_factory=lambda: random.Random(7), publisher=pub)
+def mm(games, pub, fake_clock) -> Matchmaking:
+    return Matchmaking(games={GAME: games}, rng_factory=lambda: random.Random(7), publisher=pub, clock=fake_clock)
 
 
 async def test_matched_reaches_every_seat(mm, pub, seat_mode):
@@ -223,12 +238,12 @@ async def test_ready_then_game_started_once(mm, pub, seat_mode):
     assert pub.kinds()[-1] == events.GAME_STARTED
 
 
-async def test_expire_notifies_requeued_and_dropped(mm, pub):
+async def test_expire_notifies_requeued_and_dropped(mm, pub, fake_clock):
     users = [1, 2]
     for uid in users:
         result = await mm.join(GAME, "duel", uid, f"n{uid}", 1000)
     await mm.mark_ready(result.match.match_id, 1)
-
+    fake_clock.advance(READY_DEADLINE_SEC * 1000)
     await mm.expire_match(result.match.match_id)
     e = pub.events[-1]
     assert e.kind == events.MATCH_EXPIRED

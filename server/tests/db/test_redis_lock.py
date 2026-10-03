@@ -12,6 +12,7 @@ from app.db.redis_lock import (
     LockTimeout,
     StoreUnavailable,
     fenced_mset,
+    fenced_write,
     fenced_set,
     redis_lock,
     require_redis,
@@ -120,6 +121,44 @@ async def test_fenced_mset_writes_nothing_after_lock_lost(redis_client):
 async def test_fenced_mset_needs_a_key(redis_client):
     with pytest.raises(ValueError):
         await fenced_mset(redis_client, KEY, "t", {})
+
+
+ZSET = "deadlines:test-lock"
+
+
+async def test_fenced_write_updates_strings_and_zset_together(redis_client):
+    """시계·데드라인 색인은 state 와 같은 Lua 한 번 (M3 6단계 판단 4)"""
+    await redis_client.zadd(ZSET, {"old": 1, "keep": 2})
+    async with redis_lock(redis_client, KEY) as token:
+        assert await fenced_write(
+            redis_client, KEY, token, TARGETS, zset=ZSET, zadd={"new": 30, "keep": 20}, zrem=["old"],
+        ) is True
+    assert await redis_client.mget(*TARGETS) == list(TARGETS.values())
+    assert await redis_client.zrange(ZSET, 0, -1, withscores=True) == [("keep", 20.0), ("new", 30.0)]
+
+
+async def test_fenced_write_zadd_wins_over_zrem_of_same_member(redis_client):
+    async with redis_lock(redis_client, KEY) as token:
+        await fenced_write(redis_client, KEY, token, TARGETS, zset=ZSET, zadd={"m": 5}, zrem=["m"])
+    assert await redis_client.zscore(ZSET, "m") == 5
+
+
+async def test_fenced_write_touches_nothing_after_lock_lost(redis_client):
+    """락을 잃은 쪽은 문자열도 ZSET 도 바꾸지 못한다 — 데드라인이 상태와 어긋나지 않는다"""
+    await redis_client.zadd(ZSET, {"old": 1})
+    async with redis_lock(redis_client, KEY, ttl_ms=50) as stale_token:
+        await asyncio.sleep(0.08)
+        async with redis_lock(redis_client, KEY, wait_ms=0):
+            assert await fenced_write(
+                redis_client, KEY, stale_token, TARGETS, zset=ZSET, zadd={"new": 9}, zrem=["old"],
+            ) is False
+    assert await redis_client.mget(*TARGETS) == [None] * len(TARGETS)
+    assert await redis_client.zrange(ZSET, 0, -1, withscores=True) == [("old", 1.0)]
+
+
+async def test_fenced_write_needs_zset_for_zset_ops(redis_client):
+    with pytest.raises(ValueError):
+        await fenced_write(redis_client, KEY, "t", TARGETS, zadd={"m": 1})
 
 
 async def test_require_redis_raises_when_unavailable(monkeypatch):

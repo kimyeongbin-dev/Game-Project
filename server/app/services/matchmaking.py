@@ -5,8 +5,9 @@ docs/api/games/maze.md §3. 게임 무관하다 — `game` 인자로 큐가 갈�
 서비스의 `seats(mode)`(미로는 배치 테이블)가 정한다. 인원 수를 이 모듈은 모른다.
 
 흐름: join → (정원 도달 시) 매칭 성사 = PendingMatch → 전원 ready → 게임 생성.
-ready 기한 만료 감지는 6단계 스위퍼가 하고, 처리는 `expire_match` 가 한다 — 응답한
-쪽만 **원래 입장 시각으로** 큐에 복귀한다.
+ready 기한은 데드라인 ZSET(`deadlines:{game}` 의 `ready:<id>`)에 매치와 함께 적고, 만료 감지는
+스위퍼(app/services/sweeper.py), 처리는 `expire_match` 가 한다 — 응답한 쪽만 **원래 입장 시각으로**
+큐에 복귀한다. 기한은 Redis TIME 기준(주입 가능한 시계)이다 — 스위퍼와 같은 시계로 비교한다.
 
 Phase 1 은 MMR 필터 없이 FIFO 다. 그래서 주기 매칭 루프가 없고 입장할 때마다 매칭을
 시도한다. 범위 확장 규칙은 `mmr_window` 로 보존만 한다 (§3 "지우지 말고 비활성화").
@@ -21,6 +22,7 @@ from dataclasses import asdict, dataclass, replace
 from typing import Callable, Mapping, Optional, Protocol, Sequence, Union
 
 from app.core.config import settings
+from app.core.time import Clock, redis_clock
 from app.db import redis_keys as keys
 from app.db.redis_lock import LockTimeout, redis_lock, require_redis, store_errors
 from app.games.maze import GameState
@@ -140,10 +142,12 @@ class Matchmaking:
         games: Optional[Mapping[str, GameService]] = None,
         rng_factory: Callable[[], random.Random] = random.Random,
         publisher: Publisher = redis_publisher,
+        clock: Clock = redis_clock,
     ):
         self._games = dict(games) if games is not None else {MAZE: maze_games}
         self._rng_factory = rng_factory
         self._publisher = publisher
+        self._clock = clock
 
     def _seats(self, game: str, mode: str) -> int:
         service = self._games.get(game)
@@ -218,7 +222,7 @@ class Matchmaking:
             match_id=str(uuid.uuid4()),
             game=game,
             mode=mode,
-            ready_deadline_ms=_now_ms() + READY_DEADLINE_SEC * 1000,
+            ready_deadline_ms=await self._clock.now_ms() + READY_DEADLINE_SEC * 1000,
             players=tuple(
                 MatchPlayer(
                     seat_no=i + 1,
@@ -231,7 +235,10 @@ class Matchmaking:
             ),
         )
         async with store_errors():
-            await redis.set(keys.match(match.match_id), match.to_json(), ex=settings.match_record_ttl_sec)
+            async with redis.pipeline(transaction=True) as pipe:  # 매치와 기한 색인은 함께
+                pipe.set(keys.match(match.match_id), match.to_json(), ex=settings.match_record_ttl_sec)
+                pipe.zadd(keys.deadlines(game), {keys.deadline_ready(match.match_id): match.ready_deadline_ms})
+                await pipe.execute()
         for p in match.players:
             moved = await activity.transition(
                 redis, p.user_id, keys.activity_queue(game, mode), keys.activity_match(match.match_id),
@@ -273,7 +280,10 @@ class Matchmaking:
                     players=[SeatPlayer(p.seat_no, p.user_id, p.nickname) for p in match.players],
                 )
                 async with store_errors():
-                    await redis.delete(keys.match(match_id))
+                    async with redis.pipeline(transaction=True) as pipe:
+                        pipe.delete(keys.match(match_id))
+                        pipe.zrem(keys.deadlines(match.game), keys.deadline_ready(match_id))
+                        await pipe.execute()
                 return state
         except LockTimeout as exc:
             raise GameBusy(str(exc)) from exc
@@ -281,17 +291,26 @@ class Matchmaking:
     async def expire_match(self, match_id: str) -> ExpireResult:
         """ready 기한 만료 처리 — 응답한 쪽만 원래 입장 시각으로 큐에 복귀한다 (§3)
 
-        기한 감지는 6단계 스위퍼 몫이다. 이미 게임이 시작됐거나 처리된 매치면 빈 결과.
+        스위퍼가 부른다. 이미 게임이 시작됐거나 처리된 매치면 빈 결과. 기한이 아직이면(낡은 색인)
+        아무것도 하지 않고 실제 기한으로 색인을 다시 적는다 — 기한 판단은 색인이 아니라 매치 기록이 한다.
         """
         redis = require_redis()
         try:
             async with redis_lock(redis, keys.match_lock(match_id)):
                 async with store_errors():
                     raw = await redis.get(keys.match(match_id))
-                    if raw is None:
-                        return ExpireResult([], [], None)
-                    await redis.delete(keys.match(match_id))
+                if raw is None:
+                    return ExpireResult([], [], None)
                 match = PendingMatch.from_json(raw)
+                ready_key = keys.deadline_ready(match_id)
+                async with store_errors():
+                    if match.ready_deadline_ms > await self._clock.now_ms():
+                        await redis.zadd(keys.deadlines(match.game), {ready_key: match.ready_deadline_ms})
+                        return ExpireResult([], [], None)
+                    async with redis.pipeline(transaction=True) as pipe:
+                        pipe.delete(keys.match(match_id))
+                        pipe.zrem(keys.deadlines(match.game), ready_key)
+                        await pipe.execute()
         except LockTimeout as exc:
             raise GameBusy(str(exc)) from exc
 

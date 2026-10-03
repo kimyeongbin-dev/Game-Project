@@ -9,13 +9,14 @@ docs/api/platform.md "Redis 키 스키마" 표가 정본이다.
 
 Pub/Sub 채널(4단계)도 여기서 만든다. 키가 아니라 채널이다 — 아래 "이벤트 채널" 절.
 
-예약(아직 만들지 않음): `game:{id}:clocks`·`{game}:deadlines`(6단계 시간 체계).
+시간 체계(6단계): `game:{id}:clocks`(좌석별 두 시계), `deadlines:{game}`(만료 색인 ZSET — member 는
+`clock:`·`grace:`·`ready:`), `store:outages`(기록된 Redis 장애 구간).
 """
 
 from app.core.config import settings
 
 # 테스트 픽스처가 정리할 접두어. 리미터 키(같은 테스트 DB)는 여기 없다
-PREFIXES = ("game:", "queue:", "match:", "room:", "user:")
+PREFIXES = ("game:", "queue:", "match:", "room:", "user:", "deadlines:", "store:")
 
 
 # ----- 게임 -----
@@ -38,6 +39,56 @@ def game_lock(game_id: str) -> str:
 def game_vision(game_id: str, seat_no: int) -> str:
     """STRING — 좌석의 누적 관측 SeatMemory.to_dict() JSON (발견 맵·마지막 목격, maze.md §6)"""
     return f"game:{game_id}:vision:{seat_no}"
+
+
+def game_clocks(game_id: str) -> str:
+    """STRING — GameClocks.to_dict() JSON (게임 시계·접속 시계, maze.md §8)"""
+    return f"game:{game_id}:clocks"
+
+
+# ----- 데드라인 (시간 체계) -----
+# 게임 시계·접속 시계·매치 ready 기한을 하나의 ZSET 에 담고 워커마다 스위퍼가 훑는다(maze.md §8).
+# score 는 소진 예정 시각(epoch ms, Redis TIME 기준)이고 **힌트일 뿐이다** — 처리는 락 안에서 다시 계산한다.
+
+DEADLINE_CLOCK = "clock"
+DEADLINE_GRACE = "grace"
+DEADLINE_READY = "ready"
+
+
+def deadlines(game: str) -> str:
+    """ZSET — member = 아래 deadline_* , score = 소진 예정 시각(epoch ms)"""
+    return f"deadlines:{game}"
+
+
+def deadlines_scan_lock(game: str) -> str:
+    """STRING — 상태 유실 점검을 한 워커만 하도록 잡는 락"""
+    return f"deadlines:{game}:scan"
+
+
+def deadline_clock(game_id: str) -> str:
+    """현재 차례 좌석의 게임 시계 — 게임당 하나"""
+    return f"{DEADLINE_CLOCK}:{game_id}"
+
+
+def deadline_grace(game_id: str, seat_no: int) -> str:
+    """끊긴 생존 좌석의 접속 시계"""
+    return f"{DEADLINE_GRACE}:{game_id}:{seat_no}"
+
+
+def deadline_ready(match_id: str) -> str:
+    """매치 ready 응답 기한"""
+    return f"{DEADLINE_READY}:{match_id}"
+
+
+def parse_deadline(member: str) -> tuple[str, str]:
+    """member → (종류, 대상 id). grace 는 좌석을 버리고 게임 id 만 — 게임 단위로 한 번에 정산한다"""
+    kind, _, rest = member.partition(":")
+    return kind, rest.split(":", 1)[0]
+
+
+def store_outages() -> str:
+    """ZSET — member = "<시작ms>-<끝ms>", score = 끝ms. 워커가 관측한 Redis 장애 구간 (시계 면제)"""
+    return "store:outages"
 
 
 # ----- 매치메이킹 -----

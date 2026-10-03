@@ -37,6 +37,8 @@ logger = logging.getLogger(__name__)
 GAME_STARTED = "game_started"
 GAME_UPDATED = "game_updated"
 GAME_VOIDED = "game_voided"
+SEAT_DISCONNECTED = "seat_disconnected"
+SEAT_RECONNECTED = "seat_reconnected"
 MATCHED = "matched"
 MATCH_READY = "match_ready"
 MATCH_EXPIRED = "match_expired"
@@ -144,6 +146,29 @@ def game_voided(meta: "GameMeta") -> Event:
         scope="game",
         scope_id=meta.game_id,
         recipients=_unique(meta.human_user_ids),
+    )
+
+
+def seat_disconnected(meta: "GameMeta", seat_no: int, grace_remaining_ms: int, turn_count: int) -> Event:
+    """접속 시계가 흐르기 시작했다 (§9 `player_left state=reconnecting`). 남은 접속 시계는 공개 정보다(§8)"""
+    return Event(
+        kind=SEAT_DISCONNECTED,
+        scope="game",
+        scope_id=meta.game_id,
+        recipients=_unique(meta.human_user_ids),
+        hint={"seat_no": seat_no, "grace_remaining_ms": grace_remaining_ms},
+        seq=turn_count,
+    )
+
+
+def seat_reconnected(meta: "GameMeta", seat_no: int, turn_count: int) -> Event:
+    return Event(
+        kind=SEAT_RECONNECTED,
+        scope="game",
+        scope_id=meta.game_id,
+        recipients=_unique(meta.human_user_ids),
+        hint={"seat_no": seat_no},
+        seq=turn_count,
     )
 
 

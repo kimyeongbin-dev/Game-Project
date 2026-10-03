@@ -13,6 +13,7 @@ from app.db import redis_keys as keys
 from app.games.maze import GameState
 from app.services.activity import MultiplayerError
 from app.services.matchmaking import (
+    READY_DEADLINE_SEC,
     MMR_WINDOW_CAP,
     Matchmaking,
     PendingMatch,
@@ -24,8 +25,8 @@ SEED = 7
 
 
 @pytest.fixture
-def mm(games_no_db) -> Matchmaking:
-    return Matchmaking(games={GAME: games_no_db}, rng_factory=lambda: random.Random(SEED))
+def mm(games_no_db, fake_clock) -> Matchmaking:
+    return Matchmaking(games={GAME: games_no_db}, rng_factory=lambda: random.Random(SEED), clock=fake_clock)
 
 
 async def fill(mm, mode, user_ids):
@@ -176,13 +177,16 @@ async def test_ranked_game_is_recorded(games, make_users, session_factory):
     assert record.status == "in_progress"
 
 
-# ----- 기한 만료 (감지는 6단계) -----
+# ----- 기한 만료 (감지는 스위퍼, 6단계) -----
 
-async def test_expire_requeues_only_ready_with_original_time(mm, redis_client):
+PAST_DEADLINE_MS = READY_DEADLINE_SEC * 1000
+
+async def test_expire_requeues_only_ready_with_original_time(mm, redis_client, fake_clock):
     match = (await fill(mm, "duel", [1, 2])).match
     ready = match.players[0]
     absent = match.players[1]
     await mm.mark_ready(match.match_id, ready.user_id)
+    fake_clock.advance(PAST_DEADLINE_MS)
 
     result = await mm.expire_match(match.match_id)
     assert result.requeued == [ready.user_id]
@@ -194,26 +198,53 @@ async def test_expire_requeues_only_ready_with_original_time(mm, redis_client):
     assert await redis_client.get(keys.user_activity(ready.user_id)) == keys.activity_queue(GAME, "duel")
     assert await redis_client.get(keys.user_activity(absent.user_id)) is None
     assert await redis_client.get(keys.match(match.match_id)) is None
+    assert await redis_client.zscore(keys.deadlines(GAME), keys.deadline_ready(match.match_id)) is None
 
 
-async def test_requeued_player_keeps_priority(mm):
+async def test_requeued_player_keeps_priority(mm, fake_clock):
     """복귀자는 원래 입장 시각이라 나중에 온 사람보다 앞이다"""
     match = (await fill(mm, "duel", [1, 2])).match
     await mm.mark_ready(match.match_id, match.players[0].user_id)
     await mm.join(GAME, "trio", 3, "c", 1000)  # 다른 큐 — 영향 없음
     await mm.join(GAME, "duel", 4, "d", 1000)  # 만료 전 새 입장자
+    fake_clock.advance(PAST_DEADLINE_MS)
 
     result = await mm.expire_match(match.match_id)
     assert result.match is not None  # 복귀자 + 대기자로 즉시 성사
     assert sorted(p.user_id for p in result.match.players) == sorted([match.players[0].user_id, 4])
 
 
-async def test_expire_after_start_is_noop(mm):
+async def test_expire_after_start_is_noop(mm, redis_client, fake_clock):
     match = (await fill(mm, "duel", [1, 2])).match
     for p in match.players:
         await mm.mark_ready(match.match_id, p.user_id)
+    # 게임이 시작되면 기한 색인도 사라진다
+    assert await redis_client.zscore(keys.deadlines(GAME), keys.deadline_ready(match.match_id)) is None
+    fake_clock.advance(PAST_DEADLINE_MS)
     result = await mm.expire_match(match.match_id)
     assert (result.requeued, result.dropped, result.match) == ([], [], None)
+
+
+async def test_match_registers_ready_deadline(mm, redis_client, fake_clock):
+    """매치와 기한 색인은 함께 생긴다 — 기한은 주입 시계(Redis TIME) 기준"""
+    start = fake_clock.ms
+    match = (await fill(mm, "duel", [1, 2])).match
+    assert match.ready_deadline_ms == start + PAST_DEADLINE_MS
+    score = await redis_client.zscore(keys.deadlines(GAME), keys.deadline_ready(match.match_id))
+    assert int(score) == match.ready_deadline_ms
+
+
+async def test_expire_before_deadline_is_noop_and_reregisters(mm, redis_client, fake_clock):
+    """낡은 색인(점수가 과거)으로 불려도 매치 기록의 기한이 판단한다"""
+    match = (await fill(mm, "duel", [1, 2])).match
+    member = keys.deadline_ready(match.match_id)
+    await redis_client.zadd(keys.deadlines(GAME), {member: 0})
+    fake_clock.advance(PAST_DEADLINE_MS - 1)
+
+    result = await mm.expire_match(match.match_id)
+    assert (result.requeued, result.dropped, result.match) == ([], [], None)
+    assert await redis_client.get(keys.match(match.match_id)) is not None
+    assert int(await redis_client.zscore(keys.deadlines(GAME), member)) == match.ready_deadline_ms
 
 
 # ----- MMR 범위 (비활성) -----

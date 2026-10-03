@@ -121,6 +121,7 @@ class GameClocks:
     turn_started_at_ms: int
     seats: list[SeatClock]
     stopped_at_ms: Optional[int] = None
+    started_at_ms: int = 0                 # 게임 시작 — 장기 장애 무효 대상 판정에 쓴다
 
     # ----- 생성·조회 -----
 
@@ -129,6 +130,7 @@ class GameClocks:
         return cls(
             turn_started_at_ms=now,
             seats=[SeatClock(s, initial_ms, budget_ms) for s in sorted(seat_nos)],
+            started_at_ms=now,
         )
 
     def seat(self, seat_no: int) -> SeatClock:
@@ -140,6 +142,12 @@ class GameClocks:
     @property
     def stopped(self) -> bool:
         return self.stopped_at_ms is not None
+
+    def open_since(self) -> int:
+        """아직 정산되지 않은 구간의 가장 이른 시작 — 이보다 먼저 끝난 장애 구간은 읽을 필요가 없다"""
+        starts = [self.turn_started_at_ms]
+        starts += [s.disconnected_at_ms for s in self.seats if not s.frozen and not s.connected]
+        return min(starts)
 
     def exempt(self, seat_no: int, outages: Sequence[Interval]) -> list[Interval]:
         return merge([*self.seat(seat_no).grace, *outages])
@@ -292,6 +300,7 @@ class GameClocks:
             "v": CLOCKS_SCHEMA_VERSION,
             "turn_started_at_ms": self.turn_started_at_ms,
             "stopped_at_ms": self.stopped_at_ms,
+            "started_at_ms": self.started_at_ms,
             "seats": [s.to_dict() for s in self.seats],
         }
 
@@ -303,4 +312,5 @@ class GameClocks:
             turn_started_at_ms=data["turn_started_at_ms"],
             seats=[SeatClock.from_dict(s) for s in data["seats"]],
             stopped_at_ms=data["stopped_at_ms"],
+            started_at_ms=data["started_at_ms"],
         )
