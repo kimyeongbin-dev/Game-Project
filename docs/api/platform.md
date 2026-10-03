@@ -832,7 +832,10 @@ Redis와 이중 기록이 되고 정합성 문제가 생긴다. 방 기록이 �
 | `{ns}:match:{id}:events` | Pub/Sub 채널 | 〃 | — | 매치메이킹 | 〃 |
 | `{ns}:room:{code}:events` | Pub/Sub 채널 | 〃 | — | 방 서비스 | 〃 |
 | `game:{id}:vision:{seat_no}` | STRING | 좌석의 누적 관측 `{v, edges:[[row, col, "h"\|"v", wall]…], last_seen:[{seat_no, row, col, turn}…]}` ([`games/maze.md`](games/maze.md) §6) | state 와 같다 | 게임 서비스 — 생성 시 MULTI, 수락된 행동마다 **state 와 같은 펜싱 쓰기 한 번**(M3 5단계) | 좌석별 화면(자기 좌석 키만), 탈락자 관전 패킷 |
-| `game:{id}:clocks`, `{game}:deadlines` | — | 시계, 데드라인 ZSET | — | **6단계에서 신설** | |
+| `game:{id}:clocks` | STRING | `{v, turn_started_at_ms, stopped_at_ms, started_at_ms, seats:[{seat_no, remaining_ms, conn_remaining_ms, disconnected_at_ms, grace:[[from, until]…], frozen}]}` — 마지막 정산 시점의 두 시계 ([`games/maze.md`](games/maze.md) §8) | state 와 같다 | 게임 서비스 — 생성 시 MULTI, 이후 **state 와 같은 펜싱 쓰기 한 번**(M3 6단계) | 게임 서비스, 좌석별 화면(공개 잔량) |
+| `deadlines:{game}` | ZSET | member=`clock:<game_id>` \| `grace:<game_id>:<seat_no>` \| `ready:<match_id>`, score=소진 예정 시각(epoch ms, Redis TIME) | 없음 | 게임 서비스(펜싱 쓰기 Lua 안), 매치메이킹(매치 기록과 MULTI), 스위퍼(리스 클레임) | 스위퍼 |
+| `deadlines:{game}:scan` | STRING | 토큰 — 상태 유실 점검을 주기마다 한 워커만 | `PX lost_scan_interval_sec` | 스위퍼 | 스위퍼 |
+| `store:outages` | ZSET | member=`"<start_ms>-<end_ms>"`, score=end_ms — 스위퍼가 관측한 Redis 장애 구간 | 원소별 `outage_retention_sec`(86400) 뒤 정리 | 스위퍼 | 시계 정산(면제 구간) |
 
 **설계 근거**
 
@@ -840,6 +843,10 @@ Redis와 이중 기록이 되고 정합성 문제가 생긴다. 방 기록이 �
 - **거절도 저장한다.** 벽 거절은 `wall_rejections` 를 바꾼다([`games/maze.md`](games/maze.md) §7)
 - **펜싱 쓰기.** state 는 "락 토큰이 아직 내 것일 때만 SET" 하는 Lua 로 쓴다. 락 TTL 을 넘긴 행동이
   다음 행동의 결과를 덮어쓰지 못한다
+- **시계와 데드라인도 state 와 한 번에 쓴다 (M3 6단계).** `fenced_write` 가 문자열(state·vision·clocks)과 `deadlines:{game}` 의
+  `ZADD`/`ZREM` 을 Lua 한 번으로 — 나눠 쓰면 "턴은 바뀌었는데 데드라인이 없다"가 남아 그 게임이 영원히 만료되지 않는다.
+  데드라인 점수는 **힌트**다: 스위퍼는 빌려 간(리스) 뒤 게임 락 안에서 저장된 시계로 다시 계산하고, 시각은 워커 벽시계가 아니라
+  Redis `TIME` 이다. 키 이름은 예약했던 `{game}:deadlines` 대신 `deadlines:{game}` — 다른 키와 같은 "종류:식별자" 형태이고 테스트 정리 접두어에 들어간다
 - **시야는 state 와 한 번에 쓴다 (M3 5단계).** 수락된 행동마다 좌석 전원을 다시 관측하고(남의 이동이 내 시야를
   바꾼다) state + 좌석별 vision 을 Lua 한 번(`fenced_mset`)으로 같은 EX 와 함께 쓴다 — 전부 또는 전무. 나눠 쓰면 그 사이
   장애로 state 는 다음 턴인데 발견 맵은 이전 턴이 되고, 그 턴의 목격이 영구히 사라진다. 탈락 좌석은 탈락 직전 관측으로

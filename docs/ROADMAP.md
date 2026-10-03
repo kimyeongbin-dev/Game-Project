@@ -18,7 +18,7 @@
 | **인프라** | `M1`~`M4` | 이 문서 | 개발·배포 기반 정비 |
 
 두 축은 독립이다. 현재 위치는 **출시 `Phase 1`(Android) 진행 중 + 인프라
-`M2` 완료 + `M3` 5단계(시야 엔진) 완료**다.
+`M2` 완료 + `M3` 6단계(시간 체계) 완료**다.
 
 > ⚠️ **git log 읽을 때 주의:** 커밋 `f831c0b`·`e189199`의 제목은 각각
 > "Phase 1"·"Phase 2"로 적혀 있다. 이 표기가 굳기 전에 작성된 것이며,
@@ -111,7 +111,7 @@
 | 3 ✅ | 큐·방·게임 상태를 Redis로 — 처음부터 `players[]`/`seat_no` 스키마. 구 `ws_game`·`room_manager`·`matchmaking`·`quoridor_service` 삭제 | 1 | 0, 1, 2 |
 | 4 ✅ | 워커 간 전달을 Pub/Sub으로 — 서비스가 상태를 쓴 직후 발행, 워커당 패턴 구독 1개 + 재구독 후 재동기화, `connection_manager` 는 연결 맵만 | 2 | 3 |
 | 5 ✅ | 시야 엔진 — 3×3 + 벽 차폐(반지름 1.25 원 모델의 이산화), 변 원소에 `wall` 여부, 좌석별 누적 관측 `game:{id}:vision:{seat_no}` 를 state 와 한 번의 펜싱 쓰기로, 탈락 좌석 동결 + 친구 방 관전 패킷 | 6 | 1, 3 |
-| 6 | 시간 체계 | 7 | 0, 4 |
+| 6 ✅ | 시간 체계 — Fischer 게임 시계·접속 시계 분리(지연 정산, Redis `TIME`), `game:{id}:clocks`·`deadlines:{game}` 을 state 와 한 번의 펜싱 쓰기로, 워커별 스위퍼(리스 클레임 + 락 안 재계산), 서버 유예 소급, Redis 장애 구간 면제·120 s 무효, 상태 유실 점검 | 7 | 0, 4 |
 | 7 | **maze WS 핸들러(§12) 신규 작성**(3단계 서비스 대상) + `main.py` 라우터 등록 + 구독 버스 lifespan 배선 + `--workers 2` 완료 판정. **실제 다중 프로세스 확인 포함** — 4단계는 한 프로세스 안에 버스 2개를 띄워 흉내 냈을 뿐이다. 아래 "완료 판정" 참조 | 5 | 전부 |
 
 > 작업 3(엔진)이 작업 1·4보다 먼저다. 좌석 모델(`seat_no`, `goals[]`, `eliminated`)이
@@ -143,6 +143,7 @@
   (어느 워커에 붙었는지는 E1 처럼 응답의 pid 로 판별한다)
 - 한 워커의 구독 연결만 `CLIENT KILL ID` 로 끊으면, 그 워커만 재구독하고 소켓 전원이 재동기화를 받는다
 - 한 워커를 죽여도 다른 워커에 붙은 좌석의 게임이 이어지고, 재접속하면 상태가 복원된다
+- **스위퍼 이중 처리·누락 없음(실제 워커 2개)** — 같은 만료가 정확히 한 번 처리되고(탈락 이벤트 수 = 만료 수), 한 워커를 클레임 직후 죽여도 리스(`sweeper_claim_lease_ms`) 뒤 다른 워커가 처리한다. 6단계는 한 프로세스 안의 스위퍼 2개로만 확인했다
 
 7단계 핸들러가 지켜야 할 것 — 5단계(시야)가 서비스에 남긴 경계([계획서](plans/2026-10-02-M3-5단계-시야엔진.md) "시야 밖 정보가 새는 경로"):
 
@@ -150,6 +151,9 @@
 - **`ActionOutcome.state` 를 소켓에 보내지 않는다.** 전체 상태다. 응답·브로드캐스트는 `game_view` 로만
 - **예외 문구를 클라이언트에 보내지 않는다.** 엔진 `ValueError` 문구에 좌표가 있다. §13 코드만 보낸다
 - 탈락자의 발신(`chat` 포함) 차단, 탈락 후 나가기(activity 해제 — 결과는 종료 시 그대로 기록), 방장의 시작 전 `allow_spectate` 변경, `game_end.full_board`
+- **끊김·재접속 배선(6단계가 남긴 진입점)** — 소켓 종료·ping 타임아웃에서 `mark_disconnected`, 재접속 수락 직후 `resync` 전에 `mark_connected`. 같은 계정 연결 교체(4000)로 닫히는 옛 소켓은 끊김으로 치지 않는다. 핸들러는 끊김을 워커의 `RecentDisconnects`(`app/ws/server_grace.py`)에도 기록한다
+- **lifespan 배선** — 시작 시 `DeadlineSweeper.start()`, 종료 시 진행 중인 끊김 처리 태스크를 기다린 뒤 Redis 를 닫기 전에 `apply_on_shutdown(recent)` → `DeadlineSweeper.stop()`
+- **§12 와이어 확정** — `turn_change.clocks`·`clock_expires_at`(ISO 문자열), `player_left`(`reconnecting`·`grace_remaining_ms`). 6단계의 `game_state.clocks` 와 이벤트 kind `seat_disconnected`·`seat_reconnected` 는 잠정 이름이다
 
 ### M4 — 리버스 프록시 + E2E 서비스 흐름 검증
 
