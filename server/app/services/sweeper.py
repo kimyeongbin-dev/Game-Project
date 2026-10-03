@@ -63,15 +63,33 @@ return due
 InProgressSource = Callable[[], Awaitable[list[tuple[str, int]]]]
 
 
+IN_PROGRESS_PAGE = 100
+
+
+async def paged(fetch_page: Callable[[int, int], Awaitable[list]], page_size: int = IN_PROGRESS_PAGE) -> list:
+    """페이지를 끝까지 넘긴다 — 진행 중 게임이 몇 개든 전부 본다(검토 M14)"""
+    out: list = []
+    offset = 0
+    while True:
+        page = await fetch_page(page_size, offset)
+        out.extend(page)
+        if len(page) < page_size:
+            return out
+        offset += page_size
+
+
 async def db_in_progress() -> list[tuple[str, int]]:
-    """앱 DB 의 진행 중 게임. DB 를 쓸 수 없으면 빈 목록"""
+    """앱 DB 의 진행 중 게임 전부. DB 를 쓸 수 없으면 빈 목록"""
     if not is_db_available():
         return []
-    async with get_session_factory()() as session:
-        rows = await GameSessionRepository(session).list_in_progress()
+
+    async def fetch(limit: int, offset: int) -> list:
+        async with get_session_factory()() as session:
+            return await GameSessionRepository(session).list_in_progress(limit=limit, offset=offset)
+
     return [
-        (row.id, int(row.started_at.replace(tzinfo=timezone.utc).timestamp() * 1000))
-        for row in rows
+        (row.game_id, int(row.started_at.replace(tzinfo=timezone.utc).timestamp() * 1000))
+        for row in await paged(fetch, IN_PROGRESS_PAGE)
     ]
 
 
@@ -247,6 +265,9 @@ class DeadlineSweeper:
             async with store_errors():
                 present = await redis.exists(keys.game_state(game_id))
             if present:
+                continue
+            # 끝났는데 DB 기록만 실패한 게임 — 무효가 아니라 기록 재시도(검토 H5)
+            if await self._games.retry_result(game_id) is not None:
                 continue
             try:
                 if await self._games.void_lost_game(game_id):

@@ -307,10 +307,7 @@ class MazeGameService:
 
         try:
             now = await self._clock.now_ms()
-            clocks = GameClocks.start(
-                [p.seat_no for p in state.seats], now,
-                initial_ms=settings.clock_initial_ms, budget_ms=settings.connection_budget_ms,
-            )
+            clocks = self._start_clocks(state, now)
             zadd, _ = deadline_ops(state, clocks)
             async with store_errors():
                 async with redis.pipeline(transaction=True) as pipe:
@@ -545,8 +542,12 @@ class MazeGameService:
                 if raw_state is None or raw_meta is None:
                     raise GameNotFound(game_id)
                 state = _decode_state(raw_state)
-                clocks = _decode_clocks(raw_clocks)
                 now = await self._clock.now_ms()
+                if raw_clocks is None:  # 시계 도입 전 게임 — 지금부터 시작한다(검토 M15)
+                    logger.warning("Game %s has no clocks — starting them now", game_id)
+                    clocks = self._start_clocks(state, now)
+                else:
+                    clocks = _decode_clocks(raw_clocks)
                 exempt = merge([
                     *await outages.read(redis, clocks.open_since()),
                     *outages.provisional(raw_alive, now, settings.store_outage_min_ms),
@@ -561,19 +562,30 @@ class MazeGameService:
                 result = step(tx)  # 닫힌 게임이면 step 이 스스로 거절한다(game_already_ended 등)
                 ended = tx.closed and not was_closed
 
-                await self._commit(redis, lock_key, token, tx)
-                if ended and not tx.voided_now:
-                    await self._finalize(redis, state, tx.meta)
-                # 락 안에서 발행한다 — 같은 게임의 이벤트가 상태 순서대로 나간다
+                # 이미 닫힌 게임은 쓰지 않는다 — 바뀔 것이 없고, 쓰면 종료 TTL 이 키마다 엇갈려 연장된다(검토 L22)
+                if not was_closed:
+                    await self._commit(redis, lock_key, token, tx)
+                # 락 안에서 발행한다 — 같은 게임의 이벤트가 상태 순서대로 나간다.
+                # 종료 처리(activity·DB)보다 먼저 — 그것이 실패해도 종료 통지는 나간다(검토 H5)
                 for event in tx.outbox:
                     await self._publisher.publish(event)
         except LockTimeout as exc:
             raise GameBusy(str(exc)) from exc
 
-        if tx.voided_now:  # DB·activity 는 락 밖에서 (게임 락은 짧게)
+        # DB·activity 는 락 밖에서 — DB 지연이 게임 락 TTL 을 넘기지 않게(검토 M16)
+        if tx.voided_now:
             await self._void_record(game_id)
             await self._release_all(redis, tx.meta)
+        elif ended:
+            await self._finalize(redis, state, tx.meta)
         return result, tx, ended
+
+    @staticmethod
+    def _start_clocks(state: GameState, now: int) -> GameClocks:
+        return GameClocks.start(
+            [p.seat_no for p in state.seats], now,
+            initial_ms=settings.clock_initial_ms, budget_ms=settings.connection_budget_ms,
+        )
 
     @staticmethod
     def _void_due(tx: _Tx, void_before_ms: Optional[int]) -> bool:
@@ -679,9 +691,11 @@ class MazeGameService:
         try:
             async with redis_lock(redis, keys.game_lock(game_id)):
                 async with store_errors():
-                    raw_state, raw_meta = await redis.mget(keys.game_state(game_id), keys.game_meta(game_id))
-                if raw_state is not None:
-                    return False
+                    raw_state, raw_meta, raw_result = await redis.mget(
+                        keys.game_state(game_id), keys.game_meta(game_id), keys.game_result(game_id)
+                    )
+                if raw_state is not None or raw_result is not None:
+                    return False  # 살아 있거나, 끝났는데 DB 기록만 밀린 게임 — 무효가 아니다
                 meta = GameMeta.from_json(raw_meta) if raw_meta is not None else None
                 seat_nos = [p.seat_no for p in meta.players] if meta is not None else []
                 async with store_errors():
@@ -716,29 +730,65 @@ class MazeGameService:
             await activity.release(redis, user_id, keys.activity_game(meta.game_id))
 
     async def _finalize(self, redis, state: GameState, meta: GameMeta) -> None:
-        """종료 처리 — meta 보존 기한 설정, activity 해제, DB 결과 기록
+        """종료 처리(락 밖) — activity 해제, DB 결과 기록. 종료 자체는 이미 기록·통지됐다
 
-        DB 기록이 실패해도 게임 종료는 확정이다(로그만 남긴다). 재시도는 범위 밖.
+        여기서 실패해도 게임 종료는 뒤집히지 않는다. DB 기록에 실패하면 결과를 `game:<id>:result` 에 남기고,
+        유실 점검이 그 게임을 무효로 닫는 대신 기록을 다시 시도한다(검토 H5).
         """
-        async with store_errors():
-            await redis.expire(keys.game_meta(state.game_id), settings.game_finished_ttl_sec)
-        for user_id in meta.human_user_ids:
-            await activity.release(redis, user_id, keys.activity_game(state.game_id))
+        try:
+            await self._release_all(redis, meta)
+        except Exception:
+            logger.exception("Failed to release activities of finished game %s", state.game_id)
 
+        record = {
+            "end_reason": state.end_reason.value,
+            "winner_seat_no": state.winner_seat_no,
+            "turn_count": state.turn_count,
+            "results": [asdict(r) for r in seat_results(state)],
+        }
+        if await self._record_result(state.game_id, record):
+            return
+        try:
+            async with store_errors():
+                await redis.set(keys.game_result(state.game_id), json.dumps(record))
+        except Exception:
+            logger.exception("Failed to keep pending result of game %s", state.game_id)
+
+    async def retry_result(self, game_id: str) -> Optional[bool]:
+        """DB 기록이 밀린 종료 결과를 다시 기록한다. 밀린 결과가 없으면 None, 기록했으면 True, 또 실패하면 False"""
+        redis = require_redis()
+        async with store_errors():
+            raw = await redis.get(keys.game_result(game_id))
+        if raw is None:
+            return None
+        if not await self._record_result(game_id, json.loads(raw)):
+            return False
+        async with store_errors():
+            await redis.delete(keys.game_result(game_id))
+        return True
+
+    async def _record_result(self, game_id: str, record: dict) -> bool:
+        """DB 에 종료 결과를 쓴다. DB 를 쓰지 않는 구성이면 기록할 것이 없다(True)"""
         factory = self._session_factory()
         if factory is None:
-            return
+            return True
         try:
             async with factory() as session:
                 await GameSessionRepository(session).record_result(
-                    state.game_id,
-                    end_reason=state.end_reason.value,
-                    winner_seat_no=state.winner_seat_no,
-                    turn_count=state.turn_count,
-                    results=seat_results(state),
+                    game_id,
+                    end_reason=record["end_reason"],
+                    winner_seat_no=record["winner_seat_no"],
+                    turn_count=record["turn_count"],
+                    results=[SeatResult(**r) for r in record["results"]],
                 )
+            return True
+        except ValueError as exc:
+            # 이미 종료로 기록된 행(재시도가 겹쳤다) 또는 결과 검증 실패 — 다시 시도해도 같다. 밀린 결과로 남기지 않는다
+            logger.warning("Result of game %s not recorded: %s", game_id, exc)
+            return True
         except Exception:
-            logger.exception("Failed to record result of game %s", state.game_id)
+            logger.exception("Failed to record result of game %s", game_id)
+            return False
 
     async def _void_record(self, game_id: str) -> Optional[list[int]]:
         """DB 행을 in_progress → void 로. 바꿨으면 사람 참가자 user_id 목록, 아니면 None

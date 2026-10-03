@@ -180,13 +180,14 @@ class GameSessionRepository:
         await self.session.commit()
         return await self.get_by_id(game_id)
 
-    async def list_in_progress(self, limit: int = 100) -> list[GameSession]:
-        """진행 중으로 기록된 게임 (오래된 순) — §8 fail-safe 점검용"""
+    async def list_in_progress(self, limit: int = 100, offset: int = 0) -> list[GameSession]:
+        """진행 중으로 기록된 게임 (오래된 순, 페이지) — §8 fail-safe 점검용"""
         result = await self.session.execute(
             select(GameSession)
             .where(GameSession.status == "in_progress")
-            .order_by(GameSession.started_at)
+            .order_by(GameSession.started_at, GameSession.game_id)
             .limit(limit)
+            .offset(offset)
         )
         return list(result.scalars().all())
 

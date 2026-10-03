@@ -41,6 +41,11 @@ def game_vision(game_id: str, seat_no: int) -> str:
     return f"game:{game_id}:vision:{seat_no}"
 
 
+def game_result(game_id: str) -> str:
+    """STRING — DB 기록에 실패한 종료 결과(재시도 대기). 유실 점검이 무효 대신 기록을 다시 시도한다. TTL 없음"""
+    return f"game:{game_id}:result"
+
+
 def game_clocks(game_id: str) -> str:
     """STRING — GameClocks.to_dict() JSON (게임 시계·접속 시계, maze.md §8)"""
     return f"game:{game_id}:clocks"
