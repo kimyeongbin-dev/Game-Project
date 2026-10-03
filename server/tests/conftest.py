@@ -109,6 +109,31 @@ async def redis_client():
     await close_redis()
 
 
+# ----- 시계 (M3 6단계) -----
+
+class FakeClock:
+    """app.core.time.Clock 의 테스트 구현 — 만료를 실제 sleep 으로 기다리지 않는다"""
+
+    def __init__(self, start_ms: int = 1_759_000_000_000):
+        self.ms = start_ms
+
+    async def now_ms(self) -> int:
+        return self.ms
+
+    def advance(self, ms: int) -> int:
+        self.ms += ms
+        return self.ms
+
+    def set(self, ms: int) -> int:
+        self.ms = ms
+        return self.ms
+
+
+@pytest.fixture
+def fake_clock() -> FakeClock:
+    return FakeClock()
+
+
 # ----- 좌석 수 파라미터화 -----
 
 # 테스트 전용 4인 배치. 인당 벽 수는 설계서에서 미정(§11 "—")이라 임의값이다

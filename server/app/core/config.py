@@ -85,6 +85,30 @@ class Settings(BaseSettings):
     pubsub_namespace: str = Field(default="app", pattern=r"^[a-z][a-z0-9_-]*$")
 
     # -----------------------------------------------------------------------
+    # 시간 체계 (maze.md §8·§9, M3 6단계) — 숫자만 운영 데이터로 조정한다
+    # -----------------------------------------------------------------------
+    # Fischer 게임 시계 — 초기값과 수락된 행동마다 더하는 증분
+    clock_initial_ms: int = Field(default=300_000, ge=1)
+    clock_increment_ms: int = Field(default=5_000, ge=0)
+    # 접속 시계 — 게임당 누적 총량. 재접속해도 리셋하지 않는다
+    connection_budget_ms: int = Field(default=60_000, ge=1)
+    # 서버 유예(배포) — 두 시계를 멈추는 상한, 그리고 lifespan 종료 직전 몇 ms 안의 끊김을 배포로 볼지
+    server_grace_max_ms: int = Field(default=30_000, ge=0)
+    server_grace_window_ms: int = Field(default=2_000, ge=0)
+    # 데드라인 스위퍼 — 주기, 회차당 최대 처리 수, 클레임 리스(처리 전에 죽으면 이 시간 뒤 재등장)
+    sweeper_interval_ms: int = Field(default=1_000, ge=10)
+    sweeper_batch: int = Field(default=100, ge=1)
+    sweeper_claim_lease_ms: int = Field(default=10_000, ge=100)
+    # Redis 상태 유실 점검 — 주기, 그리고 생성 직후(DB 먼저 → Redis) 오탐을 피하는 최소 나이
+    lost_scan_interval_sec: int = Field(default=30, ge=1)
+    lost_game_min_age_sec: int = Field(default=30, ge=0)
+    # Redis 장애 구간 — 이보다 짧으면 기록하지 않고, 이보다 길면 진행 중 게임을 무효로 닫는다
+    store_outage_min_ms: int = Field(default=3_000, ge=0)
+    store_outage_void_sec: int = Field(default=120, ge=1)
+    # 기록한 장애 구간 보존 기간 (시계 정산에 쓰인다)
+    outage_retention_sec: int = Field(default=86_400, ge=1)
+
+    # -----------------------------------------------------------------------
     # 레이트 리미팅
     # -----------------------------------------------------------------------
     rate_limit_enabled: bool = True
