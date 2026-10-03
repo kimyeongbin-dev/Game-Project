@@ -73,8 +73,10 @@ class SeatClock:
     remaining_ms: int                      # 게임 시계 — 마지막 정산 시점
     conn_remaining_ms: int                 # 접속 시계 — 마지막 정산 시점
     disconnected_at_ms: Optional[int] = None
-    grace: list[Interval] = field(default_factory=list)  # 서버 유예 창들
+    grace: list[Interval] = field(default_factory=list)       # 서버 유예 창 — 접속 시계 면제
+    game_grace: list[Interval] = field(default_factory=list)  # 서버 유예 창 — 게임 시계 면제(더 짧다, 검토 M17)
     frozen: bool = False                   # 탈락 또는 종료 — 두 시계가 더는 흐르지 않는다
+    owner: Optional[str] = None            # 연결을 가진 워커 — 그 워커가 죽으면 끊김으로 본다(검토 H4)
 
     @property
     def connected(self) -> bool:
@@ -87,7 +89,9 @@ class SeatClock:
             "conn_remaining_ms": self.conn_remaining_ms,
             "disconnected_at_ms": self.disconnected_at_ms,
             "grace": [list(i) for i in self.grace],
+            "game_grace": [list(i) for i in self.game_grace],
             "frozen": self.frozen,
+            "owner": self.owner,
         }
 
     @classmethod
@@ -98,7 +102,9 @@ class SeatClock:
             conn_remaining_ms=data["conn_remaining_ms"],
             disconnected_at_ms=data["disconnected_at_ms"],
             grace=[(s, e) for s, e in data["grace"]],
+            game_grace=[(s, e) for s, e in data.get("game_grace", [])],
             frozen=data["frozen"],
+            owner=data.get("owner"),
         )
 
 
@@ -150,8 +156,19 @@ class GameClocks:
         starts += [s.disconnected_at_ms for s in self.seats if not s.frozen and not s.connected]
         return min(starts)
 
+    def latest_ms(self) -> int:
+        """저장된 가장 늦은 시각 — 시각 출처가 뒤로 뛰어도 이보다 이르게 정산하지 않는다(검토 L21)"""
+        stamps = [self.turn_started_at_ms, self.started_at_ms, self.stopped_at_ms or 0]
+        stamps += [s.disconnected_at_ms for s in self.seats if s.disconnected_at_ms is not None]
+        return max(stamps)
+
     def exempt(self, seat_no: int, outages: Sequence[Interval]) -> list[Interval]:
+        """접속 시계의 면제 — 서버 유예 창 ∪ 장애 구간"""
         return merge([*self.seat(seat_no).grace, *outages])
+
+    def game_exempt(self, seat_no: int, outages: Sequence[Interval]) -> list[Interval]:
+        """게임 시계의 면제 — 짧은 서버 유예 창 ∪ 장애 구간"""
+        return merge([*self.seat(seat_no).game_grace, *outages])
 
     def game_remaining(self, seat_no: int, current_seat_no: Optional[int], now: int,
                        outages: Sequence[Interval] = ()) -> int:
@@ -159,7 +176,7 @@ class GameClocks:
         seat = self.seat(seat_no)
         if self.stopped or seat.frozen or seat_no != current_seat_no:
             return seat.remaining_ms
-        return seat.remaining_ms - charged(self.turn_started_at_ms, now, self.exempt(seat_no, outages))
+        return seat.remaining_ms - charged(self.turn_started_at_ms, now, self.game_exempt(seat_no, outages))
 
     def conn_remaining(self, seat_no: int, now: int, outages: Sequence[Interval] = ()) -> int:
         """seat_no 의 접속 시계 잔량 at now. 연결 중이면 흐르지 않는다"""
@@ -176,7 +193,7 @@ class GameClocks:
         if current_seat_no is not None and not self.seat(current_seat_no).frozen:
             seat = self.seat(current_seat_no)
             clock_at = expiry_at(self.turn_started_at_ms, seat.remaining_ms,
-                                 self.exempt(current_seat_no, outages))
+                                 self.game_exempt(current_seat_no, outages))
         grace_at = {
             s.seat_no: expiry_at(s.disconnected_at_ms, s.conn_remaining_ms, self.exempt(s.seat_no, outages))
             for s in self.seats
@@ -206,7 +223,7 @@ class GameClocks:
                    *, increment_ms: int = 0) -> None:
         """seat_no 의 차례를 끝낸다 — 경과를 차감하고 증분을 더한다. 다음 차례는 begin_turn"""
         seat = self.seat(seat_no)
-        seat.remaining_ms -= charged(self.turn_started_at_ms, now, self.exempt(seat_no, outages))
+        seat.remaining_ms -= charged(self.turn_started_at_ms, now, self.game_exempt(seat_no, outages))
         seat.remaining_ms += increment_ms
         self.turn_started_at_ms = now
         self._prune(seat, current=False)
@@ -224,6 +241,8 @@ class GameClocks:
             seat.disconnected_at_ms = None
         seat.frozen = True
         seat.grace = []
+        seat.game_grace = []
+        seat.owner = None
 
     def stop(self, now: int, outages: Sequence[Interval] = ()) -> None:
         """게임 종료 — 남은 좌석을 정산하고 모든 시계를 멈춘다"""
@@ -237,6 +256,15 @@ class GameClocks:
         if self.stopped or seat.frozen or not seat.connected:
             return False
         seat.disconnected_at_ms = now
+        seat.owner = None
+        return True
+
+    def set_owner(self, seat_no: int, worker_id: Optional[str]) -> bool:
+        """연결을 가진 워커를 기록한다(연결 중인 생존 좌석만). 바뀌었으면 True"""
+        seat = self.seat(seat_no)
+        if self.stopped or seat.frozen or not seat.connected or seat.owner == worker_id:
+            return False
+        seat.owner = worker_id
         return True
 
     def reconnect(self, seat_no: int, current_seat_no: Optional[int], now: int,
@@ -248,18 +276,26 @@ class GameClocks:
         seat.conn_remaining_ms -= charged(seat.disconnected_at_ms, now, self.exempt(seat_no, outages))
         seat.disconnected_at_ms = None
         seat.grace = [(s, min(e, now)) for s, e in seat.grace if s < now]
+        seat.game_grace = [(s, min(e, now)) for s, e in seat.game_grace if s < now]
         self._prune(seat, current=seat_no == current_seat_no)
         return True
 
-    def apply_grace(self, seat_no: int, disconnected_at_ms: int, max_ms: int) -> bool:
-        """서버 유예(배포) — 그 좌석이 아직 같은 끊김 상태일 때만 [끊김, 끊김 + max) 를 면제한다"""
+    def apply_grace(self, seat_no: int, disconnected_at_ms: int, max_ms: int,
+                    game_max_ms: Optional[int] = None) -> bool:
+        """서버 유예(배포) — 그 좌석이 아직 같은 끊김 상태일 때만 면제 창을 건다
+
+        접속 시계는 [끊김, 끊김 + max_ms), 게임 시계는 [끊김, 끊김 + game_max_ms) — 게임 시계 창이 더 짧다.
+        재접속을 일부러 늦춰 "끊고 생각하기"로 얻는 시간을 교체 공백 정도로 묶는다(검토 M17).
+        """
         seat = self.seat(seat_no)
         if self.stopped or seat.frozen or seat.disconnected_at_ms != disconnected_at_ms:
             return False
         window = (disconnected_at_ms, disconnected_at_ms + max_ms)
         if window in seat.grace:
             return False
+        game_max_ms = max_ms if game_max_ms is None else min(game_max_ms, max_ms)
         seat.grace = merge([*seat.grace, window])
+        seat.game_grace = merge([*seat.game_grace, (disconnected_at_ms, disconnected_at_ms + game_max_ms)])
         return True
 
     def _prune(self, seat: SeatClock, *, current: bool) -> None:
@@ -271,9 +307,11 @@ class GameClocks:
             open_starts.append(seat.disconnected_at_ms)
         if not open_starts:
             seat.grace = []
+            seat.game_grace = []
             return
         oldest = min(open_starts)
         seat.grace = [(s, e) for s, e in seat.grace if e > oldest]
+        seat.game_grace = [(s, e) for s, e in seat.game_grace if e > oldest]
 
     # ----- 공개 -----
 

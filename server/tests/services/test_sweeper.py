@@ -28,6 +28,7 @@ S = 1000
 INITIAL = settings.clock_initial_ms
 BUDGET = settings.connection_budget_ms
 GRACE = settings.server_grace_max_ms
+GAME_GRACE = settings.server_grace_game_ms
 LEASE = settings.sweeper_claim_lease_ms
 
 
@@ -247,7 +248,8 @@ async def test_ready_member_without_match_is_dropped(sweeper, redis_client):
 
 # ----- 서버 유예 (판단 7) -----
 
-async def test_server_grace_freezes_both_clocks_for_deploy(games, sweeper, clock, redis_client):
+async def test_server_grace_freezes_connection_clock_long_and_game_clock_short(games, sweeper, clock, redis_client):
+    """배포 유예 — 접속 시계는 30 s, 게임 시계는 교체 공백 정도(8 s)만 면제 (검토 M17, 사용자 결정)"""
     state, users = await start(games)
     recent = RecentDisconnects()
     d = (await games.mark_disconnected(state.game_id, users[0])).disconnected_at_ms
@@ -258,7 +260,7 @@ async def test_server_grace_freezes_both_clocks_for_deploy(games, sweeper, clock
     await passes(clock, GRACE - 200)
     c = await clocks_of(redis_client, state.game_id)
     assert c.conn_remaining(1, clock.ms) == BUDGET
-    assert c.game_remaining(1, 1, clock.ms) == INITIAL
+    assert c.game_remaining(1, 1, clock.ms) == INITIAL - (clock.ms - d - GAME_GRACE)
     # 접속 시계 데드라인이 유예만큼 밀렸다
     assert await score(redis_client, keys.deadline_grace(state.game_id, 1)) == d + GRACE + BUDGET
     await passes(clock, 10 * S)                                 # 상한 30 s 이후로는 흐른다
@@ -302,7 +304,7 @@ async def test_reconnected_then_dropped_again_is_not_the_same_disconnection(game
 
 
 async def test_grace_seat_turn_clock_waits_until_window_ends(games, clock, redis_client):
-    """유예 중 남의 행동은 진행되고, 차례가 유예 좌석으로 오면 그 시계는 창 끝까지 멈춘다"""
+    """유예 중 남의 행동은 진행되고, 차례가 유예 좌석으로 오면 그 시계는 게임 시계 창 끝까지만 멈춘다"""
     state, users = await start(games)
     recent = RecentDisconnects()
     d = (await games.mark_disconnected(state.game_id, users[1])).disconnected_at_ms
@@ -311,12 +313,13 @@ async def test_grace_seat_turn_clock_waits_until_window_ends(games, clock, redis
     await passes(clock, 5 * S)
     target = state.get_valid_pawn_moves()[0]
     assert (await games.move(state.game_id, users[0], target.row, target.col)).rejection is None
-    await passes(clock, 15 * S)
+    await passes(clock, 2 * S)                                    # 게임 시계 창(d + 8 s) 안
     c = await clocks_of(redis_client, state.game_id)
     assert c.game_remaining(2, 2, clock.ms) == INITIAL
-    await passes(clock, 20 * S)                                   # 창 끝(d + 30 s) 뒤 10 s
+    await passes(clock, 13 * S)                                   # 창 끝 뒤 12 s
     c = await clocks_of(redis_client, state.game_id)
-    assert c.game_remaining(2, 2, clock.ms) == INITIAL - 10 * S
+    assert c.game_remaining(2, 2, clock.ms) == INITIAL - (clock.ms - d - GAME_GRACE)
+    assert c.conn_remaining(2, clock.ms) == BUDGET                # 접속 시계 창(30 s)은 아직
 
 
 async def test_crash_gets_no_grace(games, sweeper, clock):

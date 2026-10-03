@@ -97,6 +97,25 @@ def store_alive() -> str:
     return "store:alive"
 
 
+def workers() -> str:
+    """ZSET — member = 워커 id, score = 그 워커 스위퍼의 마지막 하트비트(epoch ms). 끊긴 워커의 좌석을 찾는다"""
+    return "store:workers"
+
+
+def worker_seats(worker_id: str) -> str:
+    """ZSET — 그 워커가 연결을 가진 좌석. member = seat_member(), score = 0. 게임 쓰기와 같은 펜싱 쓰기로 갱신"""
+    return f"store:workers:{worker_id}:seats"
+
+
+def seat_member(game_id: str, seat_no: int) -> str:
+    return f"{game_id}:{seat_no}"
+
+
+def parse_seat_member(member: str) -> tuple[str, int]:
+    game_id, _, seat_no = member.rpartition(":")
+    return game_id, int(seat_no)
+
+
 def store_outages() -> str:
     """ZSET — member = "<시작ms>-<끝ms>", score = 끝ms. 워커가 관측한 Redis 장애 구간 (시계 면제)"""
     return "store:outages"

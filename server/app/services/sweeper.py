@@ -32,6 +32,7 @@ from redis.exceptions import RedisError
 
 from app.core.config import settings
 from app.core.time import Clock, redis_clock
+from app.core.worker import WORKER_ID
 from app.db import redis_keys as keys
 from app.db.config import get_session_factory, is_db_available
 from app.db.redis_lock import StoreUnavailable, require_redis, store_errors
@@ -57,6 +58,26 @@ for _, m in ipairs(due) do
     redis.call('ZADD', KEYS[1], 'XX', ARGV[2], m)
 end
 return due
+"""
+
+# KEYS[1]=workers / ARGV[1]=하트비트가 이보다 이르면 죽음, ARGV[2]=리스 끝 점수, ARGV[3]=최대 개수
+# 죽은 워커를 꺼내며 점수를 미룬다(처리 전에 죽으면 리스 뒤 재등장). 반환: {id, 마지막 하트비트, ...}
+_CLAIM_WORKERS_LUA = """
+local dead = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', '(' .. ARGV[1], 'WITHSCORES', 'LIMIT', 0, tonumber(ARGV[3]))
+for i = 1, #dead, 2 do
+    redis.call('ZADD', KEYS[1], 'XX', ARGV[2], dead[i])
+end
+return dead
+"""
+
+# KEYS[1]=workers, KEYS[2]=그 워커의 좌석 색인 / ARGV[1]=워커 id, ARGV[2]=클레임한 점수
+# 좌석을 다 처리했고 그 사이 워커가 되살아나지 않았으면(점수 그대로) 지운다
+_FORGET_WORKER_LUA = """
+if redis.call('ZCARD', KEYS[2]) == 0 and redis.call('ZSCORE', KEYS[1], ARGV[1]) == ARGV[2] then
+    redis.call('ZREM', KEYS[1], ARGV[1])
+    return 1
+end
+return 0
 """
 
 # (game_id, 시작 epoch ms) — DB 에 진행 중으로 기록된 게임
@@ -99,6 +120,7 @@ class TickReport:
     ok: bool = True
     claimed: list[str] = field(default_factory=list)
     expired: list[tuple[str, int, str]] = field(default_factory=list)   # (game_id, seat_no, reason)
+    dropped: list[tuple[str, int]] = field(default_factory=list)          # 죽은 워커의 좌석 → 끊김
     outage: Optional[tuple[int, int]] = None
     voided: list[str] = field(default_factory=list)
 
@@ -112,12 +134,14 @@ class DeadlineSweeper:
         *,
         game: str = GAME,
         in_progress_source: InProgressSource = db_in_progress,
+        worker_id: str = WORKER_ID,
     ):
         self._games = games
         self._matches = matches
         self._clock = clock
         self._game = game
         self._in_progress = in_progress_source
+        self._worker_id = worker_id
         self._next_scan_ms: Optional[int] = None
         self._task: Optional[asyncio.Task] = None
 
@@ -154,6 +178,7 @@ class DeadlineSweeper:
         try:
             now = await self._clock.now_ms()
             report.outage = await self._heartbeat(now, report)
+            await self._reap_dead_workers(now, report)
             report.claimed = await self.claim(now)
             for member in report.claimed:
                 await self._process(member, report)
@@ -221,6 +246,42 @@ class DeadlineSweeper:
         if end - start >= settings.store_outage_void_sec * 1000:
             report.voided += await self._void_running(started_before_ms=start)
         return outage
+
+    async def _reap_dead_workers(self, now: int, report: TickReport) -> None:
+        """내 하트비트를 남기고, 하트비트가 끊긴 워커가 가진 좌석을 끊김으로 처리한다 (검토 H4)
+
+        크래시한 워커의 끊김 핸들러는 아무것도 하지 못한다. 그 좌석은 시계상 "연결 중"으로 남아 접속 시계가
+        흐르지 않는다. 그 워커의 마지막 하트비트 시각부터 끊긴 것으로 본다.
+        """
+        redis = require_redis()
+        timeout = settings.worker_heartbeat_timeout_ms
+        lease_score = now - timeout + settings.sweeper_claim_lease_ms
+        async with store_errors():
+            await redis.zadd(keys.workers(), {self._worker_id: now})
+            flat = await redis.eval(_CLAIM_WORKERS_LUA, 1, keys.workers(),
+                                    now - timeout, lease_score, settings.sweeper_batch)
+        for i in range(0, len(flat), 2):
+            worker, last_beat = flat[i], int(float(flat[i + 1]))
+            if worker == self._worker_id:
+                continue
+            async with store_errors():
+                members = await redis.zrange(keys.worker_seats(worker), 0, -1)
+            for member in members:
+                game_id, seat_no = keys.parse_seat_member(member)
+                try:
+                    if await self._games.drop_seat(game_id, seat_no, owner=worker, at_ms=last_beat):
+                        report.dropped.append((game_id, seat_no))
+                    else:  # 이미 다른 워커로 옮겼거나 끝난 좌석 — 색인에서만 지운다
+                        async with store_errors():
+                            await redis.zrem(keys.worker_seats(worker), member)
+                except GameNotFound:
+                    async with store_errors():
+                        await redis.zrem(keys.worker_seats(worker), member)
+                except GameBusy:
+                    logger.info("Seat %s of dead worker %s busy — retried after lease", member, worker)
+            async with store_errors():
+                await redis.eval(_FORGET_WORKER_LUA, 2, keys.workers(), keys.worker_seats(worker),
+                                 worker, lease_score)
 
     async def _void_running(self, *, started_before_ms: int) -> list[str]:
         """진행 중 게임 = 데드라인 색인의 clock: member 전부 (게임당 하나)"""

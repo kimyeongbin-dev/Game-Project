@@ -262,6 +262,9 @@ class Matchmaking:
                 match = PendingMatch.from_json(raw)
                 if user_id not in {p.user_id for p in match.players}:
                     raise MultiplayerError("not_in_queue")
+                # 기한이 지난 응답은 받지 않는다 — 스위퍼가 아직 처리하지 않았어도(검토 L26)
+                if match.ready_deadline_ms <= await self._clock.now_ms():
+                    raise MultiplayerError("not_in_queue")
 
                 match = replace(match, players=tuple(
                     replace(p, ready=True) if p.user_id == user_id else p for p in match.players

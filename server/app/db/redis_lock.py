@@ -37,9 +37,9 @@ end
 return 0
 """
 
-# KEYS[1]=락, KEYS[2..n+1]=대상, KEYS[n+2]=ZSET(있으면)
-# ARGV[1]=토큰, ARGV[2]=EX 초('' 이면 없음), ARGV[3]=n, ARGV[4..3+n]=값,
-#   이어서 m, (member, score)×m, k, member×k — ZSET 에 ZADD m 개, ZREM k 개
+# KEYS[1]=락, KEYS[2..n+1]=대상 문자열, KEYS[n+2..]=ZSET 들
+# ARGV[1]=토큰, ARGV[2]=EX 초('' 이면 없음), ARGV[3]=n, ARGV[4..3+n]=값, ARGV[4+n]=ZSET 개수 z,
+#   이어서 ZSET 마다: m, (member, score)×m, k, member×k
 # 스크립트 하나라 원자적이다 — 토큰이 내 것이면 전부를, 아니면 아무것도 쓰지 않는다
 _FENCED_WRITE_LUA = """
 if redis.call('GET', KEYS[1]) ~= ARGV[1] then
@@ -54,14 +54,19 @@ for i = 1, n do
     end
 end
 local p = 4 + n
-local m = tonumber(ARGV[p])
-for j = 1, m do
-    redis.call('ZADD', KEYS[n + 2], ARGV[p + 2 * j], ARGV[p + 2 * j - 1])
-end
-p = p + 2 * m + 1
-local k = tonumber(ARGV[p])
-for j = 1, k do
-    redis.call('ZREM', KEYS[n + 2], ARGV[p + j])
+local z = tonumber(ARGV[p])
+for zi = 1, z do
+    local key = KEYS[n + 1 + zi]
+    local m = tonumber(ARGV[p + 1])
+    for j = 1, m do
+        redis.call('ZADD', key, ARGV[p + 1 + 2 * j], ARGV[p + 2 * j])
+    end
+    p = p + 1 + 2 * m
+    local k = tonumber(ARGV[p + 1])
+    for j = 1, k do
+        redis.call('ZREM', key, ARGV[p + 1 + j])
+    end
+    p = p + 1 + k
 end
 return 1
 """
@@ -149,6 +154,9 @@ async def fenced_mset(
     return await fenced_write(redis, lock_key, token, items, ex=ex)
 
 
+ZsetOps = tuple[Mapping[str, int], Sequence[str]]  # (ZADD member→score, ZREM members)
+
+
 async def fenced_write(
     redis: Redis,
     lock_key: str,
@@ -159,23 +167,31 @@ async def fenced_write(
     zset: Optional[str] = None,
     zadd: Optional[Mapping[str, int]] = None,
     zrem: Sequence[str] = (),
+    zsets: Optional[Mapping[str, ZsetOps]] = None,
 ) -> bool:
-    """락 토큰이 아직 내 것일 때만 items 를 쓰고 zset 에 ZADD/ZREM 한다 — 전부 또는 전무. 썼으면 True
+    """락 토큰이 아직 내 것일 때만 items 를 쓰고 ZSET 들에 ZADD/ZREM 한다 — 전부 또는 전무. 썼으면 True
 
-    게임 상태·시야·시계와 데드라인 색인을 한 번에 바꾸려고 둔다(M3 6단계). 나눠 쓰면 그 사이 장애로
-    "턴은 바뀌었는데 데드라인이 없다" 가 남고, 그 게임은 영원히 만료되지 않는다.
+    게임 상태·시야·시계와 색인(데드라인, 워커별 좌석)을 한 번에 바꾸려고 둔다(M3 6단계). 나눠 쓰면 그 사이
+    장애로 "턴은 바뀌었는데 데드라인이 없다" 가 남고, 그 게임은 영원히 만료되지 않는다.
+    ZSET 하나는 zset/zadd/zrem 으로, 여럿은 zsets={key: (zadd, zrem)} 로 넘긴다. 같은 member 를 ZADD 와 ZREM
+    양쪽에 넣으면 ZADD 가 이긴다.
     """
     if not items:
         raise ValueError("fenced_write needs at least one key")
-    zadd = dict(zadd or {})
-    zrem = [m for m in zrem if m not in zadd]
-    if (zadd or zrem) and zset is None:
-        raise ValueError("zadd/zrem need a zset key")
-    keys = [lock_key, *items.keys(), *([zset] if zset is not None else [])]
-    args: list = [token, "" if ex is None else str(ex), len(items), *items.values(), len(zadd)]
-    for member, score in zadd.items():
-        args += [member, score]
-    args += [len(zrem), *zrem]
+    ops: dict[str, ZsetOps] = dict(zsets or {})
+    if zadd or zrem:
+        if zset is None:
+            raise ValueError("zadd/zrem need a zset key")
+        ops[zset] = (zadd or {}, zrem)
+    keys = [lock_key, *items.keys(), *ops.keys()]
+    args: list = [token, "" if ex is None else str(ex), len(items), *items.values(), len(ops)]
+    for adds, rems in ops.values():
+        adds = dict(adds)
+        rems = [m for m in rems if m not in adds]
+        args.append(len(adds))
+        for member, score in adds.items():
+            args += [member, score]
+        args += [len(rems), *rems]
     async with store_errors():
         written = await redis.eval(_FENCED_WRITE_LUA, len(keys), *keys, *args)
     return bool(written)

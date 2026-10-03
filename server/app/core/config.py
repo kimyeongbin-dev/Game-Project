@@ -94,6 +94,10 @@ class Settings(BaseSettings):
     connection_budget_ms: int = Field(default=60_000, ge=1)
     # 서버 유예(배포) — 두 시계를 멈추는 상한, 그리고 lifespan 종료 직전 몇 ms 안의 끊김을 배포로 볼지
     server_grace_max_ms: int = Field(default=30_000, ge=0)
+    # 서버 유예 중 게임 시계 면제 상한 — 교체 공백(실측 ≈7 s) 근처. 재접속을 늦춰 생각하는 이득을 묶는다
+    server_grace_game_ms: int = Field(default=8_000, ge=0)
+    # 워커 하트비트가 이만큼 끊기면 그 워커가 가진 연결을 끊김으로 본다(크래시)
+    worker_heartbeat_timeout_ms: int = Field(default=10_000, ge=100)
     server_grace_window_ms: int = Field(default=2_000, ge=0)
     # 데드라인 스위퍼 — 주기, 회차당 최대 처리 수, 클레임 리스(처리 전에 죽으면 이 시간 뒤 재등장)
     sweeper_interval_ms: int = Field(default=1_000, ge=10)
