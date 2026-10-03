@@ -333,18 +333,28 @@ class MazeGameService:
 
     async def load_with_vision(
         self, game_id: str, seat_nos: Sequence[int]
-    ) -> tuple[Optional[GameState], dict[int, SeatMemory]]:
-        """state 와 지정한 좌석들의 누적 관측을 MGET 한 번으로 — 찢어진 읽기가 없는 스냅샷"""
+    ) -> tuple[Optional[GameState], dict[int, SeatMemory], Optional[GameClocks]]:
+        """state·시계와 지정한 좌석들의 누적 관측을 MGET 한 번으로 — 찢어진 읽기가 없는 스냅샷"""
         redis = require_redis()
         async with store_errors():
-            raw_state, *raw_vision = await redis.mget(
-                keys.game_state(game_id), *(keys.game_vision(game_id, s) for s in seat_nos)
+            raw_state, raw_clocks, *raw_vision = await redis.mget(
+                keys.game_state(game_id), keys.game_clocks(game_id),
+                *(keys.game_vision(game_id, s) for s in seat_nos),
             )
         if raw_state is None:
-            return None, {}
+            return None, {}, None
+        clocks = _decode_clocks(raw_clocks) if raw_clocks is not None else None
         return _decode_state(raw_state), {
             s: _decode_memory(raw) for s, raw in zip(seat_nos, raw_vision)
-        }
+        }, clocks
+
+    async def public_clocks(self, state: GameState, clocks: Optional[GameClocks]) -> Optional[dict]:
+        """전원에게 공개하는 시계 잔량 — 지금 시각(Redis TIME) 기준 지연 정산 값 (§8)"""
+        if clocks is None:
+            return None
+        now = await self._clock.now_ms()
+        outage_list = await outages.read(require_redis(), clocks.open_since())
+        return clocks.public_view(None if state.is_finished else state.current_seat_no, now, outage_list)
 
     async def load_clocks(self, game_id: str) -> Optional[GameClocks]:
         """시계 스냅샷 (락 없음). 없으면 None"""

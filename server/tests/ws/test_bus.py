@@ -272,3 +272,22 @@ async def test_no_bus_connections_leak(redis_client):
     """다른 테스트가 끝난 뒤 버스 연결이 남지 않는다 (픽스처 정리 확인)"""
     names = [c.get("name", "") for c in await redis_client.client_list()]
     assert not [n for n in names if n.startswith(CLIENT_NAME_PREFIX)]
+
+
+# ----- 시간 체계 (M3 6단계) -----
+
+async def test_disconnect_event_reaches_other_worker(workers, games):
+    sockets = {uid: await connect(workers[i][0], uid) for i, uid in enumerate((1, 2))}
+    state = await start_game(games, "duel", [1, 2])
+    await games.mark_disconnected(state.game_id, 2)
+    await eventually(lambda: events.SEAT_DISCONNECTED in types(sockets[1]))
+    msg = next(m for m in sockets[1].sent_messages if m["type"] == events.SEAT_DISCONNECTED)
+    assert msg["payload"]["seat_no"] == 2 and positions_in(msg["payload"]) == []
+
+
+async def test_resync_game_state_carries_clocks(redis_client, games, delivery):
+    state = await start_game(games, "duel", [1, 2])
+    [msg] = await delivery.resync(1)
+    clocks = msg["payload"]["clocks"]
+    assert [c["seat_no"] for c in clocks["seats"]] == [1, 2]
+    assert clocks["current_expires_at_ms"] is not None

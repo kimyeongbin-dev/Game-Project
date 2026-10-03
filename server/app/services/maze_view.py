@@ -11,6 +11,8 @@
 - 친구 방에서 관전을 허용했으면(meta.spectate_on_elimination) 탈락 좌석에게만 `spectator`
   (전체 판 + 생존자별 시야)를 붙인다. 다른 좌석의 관측을 읽는 경로는 이것 하나다
 - 종료 후에도 안개는 유지된다. 전체 판 공개는 `game_end.full_board`(7단계) 몫이다
+- 시계(M3 6단계): 좌석 전원의 게임 시계·접속 시계 잔량은 공개 정보다(§8). 조회 시각 기준 지연 정산 값이고
+  탈락 좌석도 같은 값을 받는다. 위치·벽과 결합되는 값이 없다. 필드 이름은 잠정(§12 확정은 7단계)
 """
 
 from typing import Optional
@@ -71,10 +73,11 @@ def build_view(
     seat_no: int,
     memory: SeatMemory,
     survivors: Optional[dict[int, SeatMemory]] = None,
+    clocks: Optional[dict] = None,
 ) -> dict:
-    """§6 상태 패킷. 내 정보 전체 + 시야 + 남의 공개 정보(닉네임·남은 벽·탈락)만
+    """§6 상태 패킷. 내 정보 전체 + 시야 + 남의 공개 정보(닉네임·남은 벽·탈락·시계)만
 
-    survivors 는 관전 대상일 때만 넘긴다(생존 좌석 → 누적 관측).
+    survivors 는 관전 대상일 때만 넘긴다(생존 좌석 → 누적 관측). clocks 는 공개 시계(§8).
     """
     me = state.seat(seat_no)
     vision = vision_fields(state, seat_no, memory)
@@ -105,6 +108,7 @@ def build_view(
             for p in state.seats
             if p.seat_no != seat_no
         ],
+        "clocks": clocks,
     }
     if survivors is not None and spectating(state, meta, seat_no):
         view["spectator"] = spectator_fields(state, survivors)
@@ -125,18 +129,20 @@ async def game_view(
     seat_no = meta.seat_of(user_id)
     if seat_no is None:
         return None
-    state, memories = await games.load_with_vision(game_id, [seat_no])
+    state, memories, clocks = await games.load_with_vision(game_id, [seat_no])
     if state is None:
         return None
     if not spectating(state, meta, seat_no):
-        return build_view(state, meta, seat_no, memories[seat_no])
+        return build_view(state, meta, seat_no, memories[seat_no],
+                          clocks=await games.public_clocks(state, clocks))
 
     # 관전: 생존자 관측까지 같은 스냅샷으로 다시 읽는다
     survivor_seats = [p.seat_no for p in state.survivors]
-    state, memories = await games.load_with_vision(game_id, [seat_no, *survivor_seats])
+    state, memories, clocks = await games.load_with_vision(game_id, [seat_no, *survivor_seats])
     if state is None:
         return None
     return build_view(
         state, meta, seat_no, memories[seat_no],
         survivors={s: memories[s] for s in survivor_seats},
+        clocks=await games.public_clocks(state, clocks),
     )

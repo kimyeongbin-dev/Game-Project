@@ -23,7 +23,9 @@ from app.ws.delivery import Delivery
 TOP_KEYS = {
     "game_id", "turn_count", "current_seat_no", "finished", "me", "others",
     "discovered_edges", "visible_edges", "visible_players", "last_seen_players",
+    "clocks",
 }
+CLOCK_SEAT_KEYS = {"seat_no", "remaining_ms", "connection_remaining_ms", "connected"}
 ME_KEYS = {"seat_no", "position", "walls_remaining", "goals", "eliminated"}
 OTHER_KEYS = {"seat_no", "nickname", "walls_remaining", "visible", "eliminated"}
 EDGE_KEYS = {"row", "col", "orientation", "wall"}
@@ -31,8 +33,9 @@ SPECTATOR_KEYS = {"walls", "positions", "views"}
 
 
 @pytest.fixture
-def games(redis_client) -> MazeGameService:
-    return MazeGameService(lambda: None)
+def games(redis_client, fake_clock) -> MazeGameService:
+    # 시계 값이 화면에 들어간다 — 같은 시각에 두 번 본 화면이 같도록 가짜 시계
+    return MazeGameService(lambda: None, clock=fake_clock)
 
 
 async def start(games, mode, seats, *, first_user=201, **kwargs):
@@ -72,6 +75,9 @@ def assert_whitelisted(view: dict, *, spectator: bool = False) -> None:
         assert all(set(e) == EDGE_KEYS for e in view[name])
     assert all(set(p) == {"seat_no", "position"} for p in view["visible_players"])
     assert all(set(p) == {"seat_no", "position", "seen_at_turn"} for p in view["last_seen_players"])
+    if view["clocks"] is not None:
+        assert set(view["clocks"]) == {"seats", "current_expires_at_ms"}
+        assert all(set(c) == CLOCK_SEAT_KEYS for c in view["clocks"]["seats"])
 
 
 def as_set(edges: list[dict]) -> set[tuple]:
@@ -282,3 +288,41 @@ async def test_resync_restores_discovered_map(games, redis_client):
     old = (8, 4, "horizontal", False)
     assert old in as_set(view["discovered_edges"])
     assert old not in as_set(view["visible_edges"])
+
+
+# ----- 시계 (M3 6단계) -----
+
+async def test_view_clocks_are_settled_public_values(games, fake_clock, seat_mode):
+    """좌석 전원이 같은 시계를 본다 — 조회 시각 기준 정산 값, 좌표 없음"""
+    from app.core.config import settings
+    mode, seats = seat_mode
+    t0 = fake_clock.ms
+    state, users = await start(games, mode, seats)
+    fake_clock.advance(10_000)
+    await games.mark_disconnected(state.game_id, users[-1])
+    fake_clock.advance(5_000)
+
+    views = [await game_view(state.game_id, uid, games=games) for uid in users]
+    expected = {
+        "seats": [
+            {"seat_no": s, "remaining_ms": settings.clock_initial_ms - (15_000 if s == 1 else 0),
+             "connection_remaining_ms": settings.connection_budget_ms - (5_000 if s == seats else 0),
+             "connected": s != seats}
+            for s in range(1, seats + 1)
+        ],
+        "current_expires_at_ms": t0 + settings.clock_initial_ms,
+    }
+    for view in views:
+        assert_whitelisted(view)
+        assert view["clocks"] == expected
+        assert not {"position", "row", "col"} & set(json.dumps(view["clocks"]).replace('"', " ").split())
+
+
+async def test_eliminated_seat_sees_same_clocks(games, fake_clock):
+    state, users = await start(games, "trio", 3)
+    await games.surrender(state.game_id, users[2])
+    fake_clock.advance(3_000)
+    out = await game_view(state.game_id, users[2], games=games)
+    alive = await game_view(state.game_id, users[0], games=games)
+    assert out["clocks"] == alive["clocks"]
+    assert out["visible_edges"] == [] and out["visible_players"] == []   # 5단계 동결은 그대로
