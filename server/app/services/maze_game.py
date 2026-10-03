@@ -410,6 +410,27 @@ class MazeGameService:
         result, _, _ = await self._run(game_id, step)
         return result
 
+    async def apply_server_grace(self, entries: Sequence[GraceEntry]) -> int:
+        """배포로 끊긴 좌석에 서버 유예를 소급한다 (§8). 적용한 좌석 수
+
+        lifespan shutdown 전용(app/ws/server_grace.py). 좌석이 **아직 같은 끊김**일 때만 —
+        그 사이 재접속했거나 다시 끊겼으면 건드리지 않는다. 데드라인은 같은 쓰기로 다시 적힌다.
+        """
+        applied = 0
+        for entry in entries:
+            def step(tx: _Tx, entry=entry) -> bool:
+                seat_no = tx.meta.seat_of(entry.user_id)
+                if seat_no is None:
+                    return False
+                return tx.clocks.apply_grace(seat_no, entry.disconnected_at_ms, settings.server_grace_max_ms)
+
+            try:
+                ok, _, _ = await self._run(entry.game_id, step)
+            except GameNotFound:
+                continue
+            applied += int(ok)
+        return applied
+
     # ----- 서버 행위 (스위퍼·운영 — 소켓 메시지에 연결하지 않는다) -----
 
     async def eliminate(self, game_id: str, seat_no: int, reason: str) -> ActionOutcome:
