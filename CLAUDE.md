@@ -154,7 +154,7 @@ games/ ┘
 | Redis | 연결 계층(`app/db/redis.py`) + lifespan 배선 완료. graceful degradation |
 | 레이트 리미터 | **배선 완료** — Redis 저장소, 커스텀 429, `main.py` 등록. 테스트 10건 |
 | `server/app/ws/` | **Pub/Sub 전달 완료**(M3 4단계) — `connection_manager`(연결 맵만), `bus`(패턴 구독·재구독·재동기화), `delivery`(좌석별 화면 §6 자리, 시야는 5단계). maze WS 핸들러·lifespan 배선은 7단계 신규 작성 |
-| 시간 체계 | **완료**(M3 6단계) — `services/maze_clock.py`(두 시계 분리, 지연 정산), `services/sweeper.py`(리스 클레임, 장애 구간, 유실 점검), `ws/server_grace.py`(서버 유예 소급). 스위퍼·유예의 lifespan 배선은 7단계 |
+| 시간 체계 | **완료**(M3 6단계) — `services/maze_clock.py`(두 시계 분리, 지연 정산), `services/sweeper.py`(리스 클레임, 장애 구간, 유실 점검), `ws/server_grace.py`(서버 유예 소급). Redis 장애는 전역 하트비트(`store:alive`), 크래시 워커의 좌석은 워커 하트비트(`store:workers`)로 처리. 독립 검토 반영(`docs/research/2026-10-04-M3-6단계-독립검토.md`). 스위퍼·유예의 lifespan 배선은 7단계 |
 | `client/lib/**` | 디렉토리 골격 + 허브 placeholder만 존재 |
 | 나머지 5종 게임 | 미착수 |
 

@@ -154,6 +154,8 @@
 - **끊김·재접속 배선(6단계가 남긴 진입점)** — 소켓 종료·ping 타임아웃에서 `mark_disconnected`, 재접속 수락 직후 `resync` 전에 `mark_connected`. 같은 계정 연결 교체(4000)로 닫히는 옛 소켓은 끊김으로 치지 않는다. 핸들러는 끊김을 워커의 `RecentDisconnects`(`app/ws/server_grace.py`)에도 기록한다
 - **lifespan 배선** — 시작 시 `DeadlineSweeper.start()`, 종료 시 진행 중인 끊김 처리 태스크를 기다린 뒤 Redis 를 닫기 전에 `apply_on_shutdown(recent)` → `DeadlineSweeper.stop()`
 - **§12 와이어 확정** — `turn_change.clocks`·`clock_expires_at`(ISO 문자열), `player_left`(`reconnecting`·`grace_remaining_ms`). 6단계의 `game_state.clocks` 와 이벤트 kind `seat_disconnected`·`seat_reconnected` 는 잠정 이름이다
+- **6단계 독립 검토에서 이관된 것**([검토 보고서](research/2026-10-04-M3-6단계-독립검토.md) 결정표) — ① 연결 수락 시 `mark_connected(worker_id=WORKER_ID)` 로 좌석 소유 워커를 넘기고, 끊김 기록(`mark_disconnected`)이 `GameBusy`·`StoreUnavailable` 로 실패하면 재시도한다(H4 나머지) ② 서버 유예 판별 기준을 lifespan 시각이 아니라 SIGTERM 수신 시각으로(M9) ③ 반개방 끊김은 마지막 pong 시각으로 소급(L19) ④ 이벤트 `seq` 를 게임별 단조 버전으로(L23) ⑤ **WS 메시지 레이트 리밋**(H8 나머지 — 차례 아닌 행동 연타)
+- **실제 장애 검증**(검토 M18-2) — 실제 Redis 연결 끊기(`CLIENT KILL`·재시작)와 uvicorn 워커 2개로 장애 관측·워커 크래시 처리·리스 재클레임을 확인한다. 6단계는 한 프로세스·가짜 시계로만 확인했다
 
 ### M4 — 리버스 프록시 + E2E 서비스 흐름 검증
 

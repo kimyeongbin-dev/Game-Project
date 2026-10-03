@@ -835,6 +835,10 @@ Redis와 이중 기록이 되고 정합성 문제가 생긴다. 방 기록이 �
 | `game:{id}:clocks` | STRING | `{v, turn_started_at_ms, stopped_at_ms, started_at_ms, seats:[{seat_no, remaining_ms, conn_remaining_ms, disconnected_at_ms, grace:[[from, until]…], frozen}]}` — 마지막 정산 시점의 두 시계 ([`games/maze.md`](games/maze.md) §8) | state 와 같다 | 게임 서비스 — 생성 시 MULTI, 이후 **state 와 같은 펜싱 쓰기 한 번**(M3 6단계) | 게임 서비스, 좌석별 화면(공개 잔량) |
 | `deadlines:{game}` | ZSET | member=`clock:<game_id>` \| `grace:<game_id>:<seat_no>` \| `ready:<match_id>`, score=소진 예정 시각(epoch ms, Redis TIME) | 없음 | 게임 서비스(펜싱 쓰기 Lua 안), 매치메이킹(매치 기록과 MULTI), 스위퍼(리스 클레임) | 스위퍼 |
 | `deadlines:{game}:scan` | STRING | 토큰 — 상태 유실 점검을 주기마다 한 워커만 | `PX lost_scan_interval_sec` | 스위퍼 | 스위퍼 |
+| `game:{id}:result` | STRING | 종료 결과 `{end_reason, winner_seat_no, turn_count, results}` — DB 기록에 실패했을 때만 | 없음(기록 재시도 성공 시 삭제) | 게임 서비스(종료 처리) | 스위퍼 유실 점검(무효 대신 재시도) |
+| `store:alive` | STRING | 전역 하트비트 — 어느 워커든 스위퍼 회차가 Redis 에 마지막으로 성공한 시각(epoch ms). 이후 공백 = 장애 | 없음 | 스위퍼(하트비트 Lua — 공백이면 `store:outages` 에 함께 기록) | 시계 정산(잠정 면제) |
+| `store:workers` | ZSET | member=워커 id(`app/core/worker.py`), score=그 워커의 마지막 하트비트 | 없음(다 처리한 죽은 워커는 제거) | 스위퍼(자기 하트비트, 죽은 워커 리스 클레임) | 스위퍼 |
+| `store:workers:{wid}:seats` | ZSET | member=`<game_id>:<seat_no>` — 그 워커가 연결을 가진 좌석 | 없음 | 게임 서비스 — **시계와 같은 펜싱 쓰기**(소유가 바뀐 만큼 이동) | 스위퍼(죽은 워커의 좌석을 끊김으로) |
 | `store:outages` | ZSET | member=`"<start_ms>-<end_ms>"`, score=end_ms — 스위퍼가 관측한 Redis 장애 구간 | 원소별 `outage_retention_sec`(86400) 뒤 정리 | 스위퍼 | 시계 정산(면제 구간) |
 
 **설계 근거**
