@@ -122,6 +122,7 @@ class GameClocks:
     seats: list[SeatClock]
     stopped_at_ms: Optional[int] = None
     started_at_ms: int = 0                 # 게임 시작 — 장기 장애 무효 대상 판정에 쓴다
+    voided: bool = False                   # 장기 장애로 무효 처리됐다 — 상태는 보존, 더 진행하지 않는다
 
     # ----- 생성·조회 -----
 
@@ -291,6 +292,7 @@ class GameClocks:
                 for s in self.seats
             ],
             "current_expires_at_ms": due.clock_at,
+            "voided": self.voided,
         }
 
     # ----- 직렬화 -----
@@ -301,6 +303,7 @@ class GameClocks:
             "turn_started_at_ms": self.turn_started_at_ms,
             "stopped_at_ms": self.stopped_at_ms,
             "started_at_ms": self.started_at_ms,
+            "voided": self.voided,
             "seats": [s.to_dict() for s in self.seats],
         }
 
@@ -313,4 +316,5 @@ class GameClocks:
             seats=[SeatClock.from_dict(s) for s in data["seats"]],
             stopped_at_ms=data["stopped_at_ms"],
             started_at_ms=data["started_at_ms"],
+            voided=data.get("voided", False),
         )

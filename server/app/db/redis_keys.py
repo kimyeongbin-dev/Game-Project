@@ -86,6 +86,12 @@ def parse_deadline(member: str) -> tuple[str, str]:
     return kind, rest.split(":", 1)[0]
 
 
+def store_alive() -> str:
+    """STRING — 전역 하트비트: 어느 워커든 스위퍼 회차가 Redis 에 마지막으로 성공한 시각(epoch ms).
+    이 값 이후의 공백 = 아무 워커도 Redis 에 쓰지 못한 구간 = 장애 (maze.md §8)"""
+    return "store:alive"
+
+
 def store_outages() -> str:
     """ZSET — member = "<시작ms>-<끝ms>", score = 끝ms. 워커가 관측한 Redis 장애 구간 (시계 면제)"""
     return "store:outages"

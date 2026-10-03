@@ -140,12 +140,13 @@ def game_updated(
     )
 
 
-def game_voided(meta: "GameMeta") -> Event:
+def game_voided(game_id: str, recipients: Iterable[Optional[int]]) -> Event:
+    """무효 처리 통지. 수신자는 meta 가 있으면 meta 에서, Redis 를 통째로 잃었으면 DB 참가자에서 온다"""
     return Event(
         kind=GAME_VOIDED,
         scope="game",
-        scope_id=meta.game_id,
-        recipients=_unique(meta.human_user_ids),
+        scope_id=game_id,
+        recipients=_unique(recipients),
     )
 
 

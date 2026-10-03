@@ -76,7 +76,7 @@ def assert_whitelisted(view: dict, *, spectator: bool = False) -> None:
     assert all(set(p) == {"seat_no", "position"} for p in view["visible_players"])
     assert all(set(p) == {"seat_no", "position", "seen_at_turn"} for p in view["last_seen_players"])
     if view["clocks"] is not None:
-        assert set(view["clocks"]) == {"seats", "current_expires_at_ms"}
+        assert set(view["clocks"]) == {"seats", "current_expires_at_ms", "voided"}
         assert all(set(c) == CLOCK_SEAT_KEYS for c in view["clocks"]["seats"])
 
 
@@ -311,6 +311,7 @@ async def test_view_clocks_are_settled_public_values(games, fake_clock, seat_mod
             for s in range(1, seats + 1)
         ],
         "current_expires_at_ms": t0 + settings.clock_initial_ms,
+        "voided": False,
     }
     for view in views:
         assert_whitelisted(view)

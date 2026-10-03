@@ -9,9 +9,11 @@
   (§8 의 "ZREM 선점"은 ZREM 직후 크래시면 그 게임이 영원히 만료되지 않는다)
 - **정확성은 락 안 재계산이 보장한다.** 처리(`expire`·`expire_match`)는 게임·매치 락 안에서 저장된
   시계·기한으로 다시 판단한다. 이미 처리된 것은 아무 일도 없고, 점수만 낡았으면 올바른 점수로 다시 적힌다
-- **Redis 장애 구간을 기록한다.** Redis 호출이 실패한 회차가 있었을 때만(워커 정지와 구분) 복구 후
-  `[마지막 성공 + 첫 실패까지의 단조 시간, 복구 시각]` 을 `store:outages` 에 적는다. 이 구간은 두 시계에서
-  빠진다. `store_outage_void_sec` 이상이면 그 전에 시작한 진행 중 게임을 무효로 닫는다
+- **전역 하트비트를 갱신한다.** 회차마다 `store:alive` 를 지금 시각으로 바꾸고, 직전 값과의 공백이 하한
+  이상이면 그 구간을 `store:outages` 에 적는다(app/services/outages.py, Lua 한 번). 어느 워커든 성공하면
+  갱신되므로 공백은 **전역** 장애(또는 전 워커 정지)뿐이고, 관측 상태가 Redis 안에 있어 재기동해도 잃지 않는다.
+  구간이 `store_outage_void_sec` 이상이면 **장애 시작 전에** 시작한 진행 중 게임을 무효로 닫는다. 이 회차에
+  닫지 못한 게임은 다음 처리 때 스스로 닫힌다(maze_game `_void_due`)
 - **상태 유실을 점검한다.** DB 에 진행 중인데 Redis state 가 없는 게임을 `void_lost_game` 으로 닫는다.
   Redis 가 통째로 비면 ZSET 도 사라지므로 출처는 DB 다. 생성 직후(DB 먼저 → Redis) 오탐을 피하려고
   `lost_game_min_age_sec` 보다 오래된 것만 본다. 점검 락으로 주기마다 한 워커만 한다
@@ -22,7 +24,6 @@ lifespan 배선(start/stop)은 7단계다. 프로세스 로컬 상태는 루프 
 import asyncio
 import logging
 import secrets
-import time
 from dataclasses import dataclass, field
 from datetime import timezone
 from typing import Awaitable, Callable, Optional
@@ -93,18 +94,12 @@ class DeadlineSweeper:
         *,
         game: str = GAME,
         in_progress_source: InProgressSource = db_in_progress,
-        monotonic: Callable[[], float] = time.monotonic,
     ):
         self._games = games
         self._matches = matches
         self._clock = clock
         self._game = game
         self._in_progress = in_progress_source
-        self._monotonic = monotonic
-        # 장애 관측 — 마지막 성공(Redis 시각 + 단조 시각), 그 뒤 첫 실패(단조 시각)
-        self._last_ok_ms: Optional[int] = None
-        self._last_ok_mono: Optional[float] = None
-        self._first_fail_mono: Optional[float] = None
         self._next_scan_ms: Optional[int] = None
         self._task: Optional[asyncio.Task] = None
 
@@ -140,15 +135,13 @@ class DeadlineSweeper:
         report = TickReport()
         try:
             now = await self._clock.now_ms()
-            report.outage = await self._observe_recovery(now, report)
+            report.outage = await self._heartbeat(now, report)
             report.claimed = await self.claim(now)
             for member in report.claimed:
                 await self._process(member, report)
             await self._scan_lost(now, report)
-            self._mark_ok(now)
         except (StoreUnavailable, RedisError) as exc:
             report.ok = False
-            self._mark_failure()
             logger.warning("Sweeper sees store failure: %s", exc)
         return report
 
@@ -197,29 +190,19 @@ class DeadlineSweeper:
 
     # ----- Redis 장애 (판단 8) -----
 
-    def _mark_failure(self) -> None:
-        if self._first_fail_mono is None:
-            self._first_fail_mono = self._monotonic()
-
-    def _mark_ok(self, now: int) -> None:
-        self._last_ok_ms = now
-        self._last_ok_mono = self._monotonic()
-        self._first_fail_mono = None
-
-    async def _observe_recovery(self, now: int, report: TickReport) -> Optional[tuple[int, int]]:
-        """실패 뒤 첫 성공이면 장애 구간을 기록하고, 길면 진행 중 게임을 무효로 닫는다"""
-        if self._first_fail_mono is None or self._last_ok_ms is None:
+    async def _heartbeat(self, now: int, report: TickReport) -> Optional[tuple[int, int]]:
+        """전역 하트비트 갱신. 공백이 기록됐고 길면 그 전에 시작한 진행 중 게임을 무효로 닫는다"""
+        outage = await outages.heartbeat(
+            require_redis(), now,
+            min_ms=settings.store_outage_min_ms, retention_ms=settings.outage_retention_sec * 1000,
+        )
+        if outage is None:
             return None
-        gap_ms = int((self._first_fail_mono - self._last_ok_mono) * 1000)
-        start = self._last_ok_ms + max(0, gap_ms)
-        if now - start < settings.store_outage_min_ms:
-            return None
-        await outages.record(require_redis(), start, now,
-                             retention_ms=settings.outage_retention_sec * 1000)
-        logger.warning("Recorded store outage %d..%d (%d ms)", start, now, now - start)
-        if now - start >= settings.store_outage_void_sec * 1000:
-            report.voided += await self._void_running(started_before_ms=now)
-        return start, now
+        start, end = outage
+        logger.warning("Recorded store outage %d..%d (%d ms)", start, end, end - start)
+        if end - start >= settings.store_outage_void_sec * 1000:
+            report.voided += await self._void_running(started_before_ms=start)
+        return outage
 
     async def _void_running(self, *, started_before_ms: int) -> list[str]:
         """진행 중 게임 = 데드라인 색인의 clock: member 전부 (게임당 하나)"""
@@ -234,8 +217,9 @@ class DeadlineSweeper:
             try:
                 if await self._games.void_game(game_id, started_before_ms=started_before_ms):
                     voided.append(game_id)
-            except GameBusy:
-                logger.warning("Game %s busy — void retried by the next outage observer", game_id)
+            except (GameBusy, GameNotFound):
+                # 바쁜 게임은 다음 처리 때 스스로 닫힌다(_void_due)
+                logger.warning("Game %s not voided by sweeper — it voids itself on its next run", game_id)
         return voided
 
     # ----- 상태 유실 (판단 8) -----
