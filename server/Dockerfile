@@ -115,7 +115,11 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 #
 # 워커를 늘리려면 PLATFORM_ARCHITECTURE.md §2.2 대로 상태를 Redis 로 옮기고
 # 워커 간 브로드캐스트를 Pub/Sub 으로 처리하는 작업이 선행되어야 한다.
+#
+# WS 플래그는 app/core/config.py 의 ws_ping_interval_sec·ws_ping_timeout_sec·ws_max_size_bytes 와
+# 같아야 한다(tests/test_dockerfile_flags.py). 반개방 끊김은 간격 + 타임아웃 + 10 s 뒤에 감지된다.
 CMD ["uvicorn", "app.main:app", \
      "--host", "0.0.0.0", "--port", "8000", \
      "--workers", "1", \
+     "--ws-ping-interval", "5", "--ws-ping-timeout", "5", "--ws-max-size", "4096", \
      "--proxy-headers", "--forwarded-allow-ips", "*"]

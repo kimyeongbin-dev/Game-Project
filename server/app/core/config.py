@@ -129,6 +129,13 @@ class Settings(BaseSettings):
     ws_expose_worker: bool = False
     # 큐 대기자에게 queue_status 를 보내는 주기 (§3 "대기 중 주기적으로")
     queue_status_interval_sec: int = Field(default=5, ge=1)
+    # WS ping — 반개방 끊김(신호 없이 사라진 연결)은 간격 + 타임아웃 + websockets close_timeout(10 s, uvicorn 미노출)
+    # 뒤에야 감지된다(B2 파일럿 실측). 그 구간은 접속 시계에서 빠지므로 짧게 둔다: 최대 5 + 5 + 10 = 20 s (L19 한계)
+    # Dockerfile prod CMD 의 --ws-ping-* 와 같아야 한다 — tests/test_dockerfile_flags.py 가 검사한다
+    ws_ping_interval_sec: float = Field(default=5.0, gt=0)
+    ws_ping_timeout_sec: float = Field(default=5.0, gt=0)
+    # 메시지 하나의 상한(바이트). 클라이언트 메시지는 수십 바이트다 — 기본 16 MiB 는 남용 여지일 뿐이다
+    ws_max_size_bytes: int = Field(default=4096, ge=256)
     # 끊김 기록이 실패(락 경합·Redis 장애)하면 원래 시각으로 이 시간까지 다시 시도한다 (검토 H4)
     disconnect_retry_max_sec: int = Field(default=120, ge=1)
 

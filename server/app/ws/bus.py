@@ -27,7 +27,7 @@ from app.core.config import settings
 from app.db import redis_keys as keys
 from app.db.redis import new_pubsub_client
 from app.db.redis_lock import require_redis
-from app.services.events import Event
+from app.services.events import SESSION_REPLACED, Event
 from app.ws.connection_manager import ConnectionManager
 from app.ws.delivery import Delivery
 
@@ -129,6 +129,12 @@ class EventBus:
             event = Event.from_json(raw)
         except Exception:
             logger.warning("Event bus %s: undecodable message dropped: %.200r", self.name, raw)
+            return
+
+        if event.scope == "user":  # 연결 제어(session_replaced) — 메시지가 아니다
+            if event.kind == SESSION_REPLACED:
+                for user_id in event.recipients:
+                    await self._manager.replace_if_stale(user_id, event.hint["conn_id"])
             return
 
         local = self._manager.local_user_ids()

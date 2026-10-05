@@ -24,11 +24,12 @@ from app.core.security import InvalidToken, verify_access_token
 from app.core.worker import WORKER_ID
 from app.db import redis_keys as keys
 from app.db.redis import get_redis
-from app.db.redis_lock import StoreUnavailable
+from app.db.redis_lock import StoreUnavailable, store_errors
 from app.games.maze import GameState
 from app.schemas.ws_messages import WSMessageType as T
 from app.services import activity, events
 from app.services.activity import MultiplayerError
+from app.services.events import Publisher, redis_publisher
 from app.services.identity import Identity, IdentityDirectory, IdentityUnavailable, identity_directory
 from app.services.matchmaking import Matchmaking, matchmaking
 from app.services.maze_game import (
@@ -87,6 +88,7 @@ class MazeSocketHandler:
     delivery: Delivery = delivery
     identity: IdentityDirectory = identity_directory
     worker_id: str = WORKER_ID
+    publisher: Publisher = redis_publisher
     # 소켓이 끝났을 때 — 기본은 바로 끊김을 기록한다. 런타임(B1)이 추적·재시도하는 구현으로 바꾼다
     on_disconnect: Optional[DisconnectHook] = None
     _handlers: dict = field(init=False, repr=False)
@@ -140,12 +142,25 @@ class MazeSocketHandler:
             return await _reject(websocket, CLOSE_TRY_AGAIN_LATER)
 
         conn = await self.manager.connect(websocket, identity.user_id, identity.nickname)
+        conn.conn_id = f"{self.worker_id}:{conn.conn_id}"
         session = Session(identity, conn)
         try:
+            await self._claim_session(session)
             await self._welcome(session)
         except _RETRYABLE as exc:
             logger.warning("WS welcome for %s degraded: %s", identity.user_id, exc)
         return session
+
+    async def _claim_session(self, session: Session) -> None:
+        """같은 계정의 연결은 클러스터에 하나 — 이전 연결이 다른 워커에 있으면 그 워커가 4000 으로 닫는다(판단 4)
+
+        같은 워커의 이전 연결은 connection_manager.connect 가 이미 닫았다. 이벤트는 이 워커에도 오지만 연결 id 가
+        같으므로 아무 일도 없다.
+        """
+        async with store_errors():
+            previous = await _redis().set(keys.user_conn(session.user_id), session.conn.conn_id, get=True)
+        if previous is not None and previous != session.conn.conn_id:
+            await self.publisher.publish(events.session_replaced(session.user_id, session.conn.conn_id))
 
     async def _welcome(self, session: Session) -> None:
         """connected → (게임 중이면 재접속 처리) → 재동기화. 재접속은 재동기화보다 먼저다"""

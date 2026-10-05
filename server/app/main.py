@@ -16,6 +16,7 @@ from app.api.ranking import router as ranking_router
 from app.api.users import router as users_router
 from app.ws.maze_handler import router as maze_ws_router
 from app.ws.runtime import realtime
+from app.core import redaction
 from app.core.config import settings
 from app.db import close_db, init_db, is_db_available
 from app.db.redis import close_redis, init_redis, is_redis_available, redis_health
@@ -31,6 +32,8 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+# WS 토큰(쿼리 문자열)이 uvicorn 접속 로그로 새지 않게 (maze.md §2)
+redaction.install()
 
 
 @asynccontextmanager
