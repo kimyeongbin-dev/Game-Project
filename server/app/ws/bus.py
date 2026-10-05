@@ -13,7 +13,7 @@
   로컬 유저 전원에게 Redis 의 현재 상태를 보낸다. 이벤트에 권위가 없으므로 이것으로 수렴한다
 - 수신 루프는 메시지 하나가 깨져도, 전송 하나가 실패해도 죽지 않는다
 
-lifespan 배선(start/stop)과 /health 보고는 7단계에서 WS 라우터와 함께 한다.
+lifespan 배선(start/stop)과 /health 보고는 `app/ws/runtime.py`(M3 7단계).
 """
 
 import asyncio
@@ -57,6 +57,7 @@ class EventBus:
         require_redis()
         if self._task is not None:
             return
+        self._subscribed = asyncio.Event()  # 이벤트 루프마다 새로 — 재기동(테스트의 수명 반복)에서 옛 루프에 묶이지 않게
         self._task = asyncio.create_task(self._run(), name=self.name)
         try:
             await self.wait_subscribed(settings.redis_socket_connect_timeout)

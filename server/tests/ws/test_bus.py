@@ -277,8 +277,14 @@ async def test_stop_releases_connection(redis_client, delivery):
 
 
 async def test_no_bus_connections_leak(redis_client):
-    """다른 테스트가 끝난 뒤 버스 연결이 남지 않는다 (픽스처 정리 확인)"""
-    names = [c.get("name", "") for c in await redis_client.client_list()]
+    """다른 테스트가 끝난 뒤 버스 연결이 남지 않는다 (픽스처 정리 확인)
+
+    같은 Redis 를 쓰는 개발 서버(논리 DB 0)도 버스를 띄운다(M3 7단계) — 테스트 DB 의 연결만 본다.
+    """
+    from app.core.config import settings
+
+    test_db = settings.redis_url.rstrip("/").rsplit("/", 1)[1]
+    names = [c.get("name", "") for c in await redis_client.client_list() if str(c.get("db")) == test_db]
     assert not [n for n in names if n.startswith(CLIENT_NAME_PREFIX)]
 
 

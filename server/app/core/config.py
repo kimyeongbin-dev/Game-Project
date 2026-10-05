@@ -127,6 +127,10 @@ class Settings(BaseSettings):
     # -----------------------------------------------------------------------
     # connected 페이로드에 워커 id 를 싣는다 — 다중 워커 하네스 전용. 운영은 끈다
     ws_expose_worker: bool = False
+    # 큐 대기자에게 queue_status 를 보내는 주기 (§3 "대기 중 주기적으로")
+    queue_status_interval_sec: int = Field(default=5, ge=1)
+    # 끊김 기록이 실패(락 경합·Redis 장애)하면 원래 시각으로 이 시간까지 다시 시도한다 (검토 H4)
+    disconnect_retry_max_sec: int = Field(default=120, ge=1)
 
     # -----------------------------------------------------------------------
     # 레이트 리미팅

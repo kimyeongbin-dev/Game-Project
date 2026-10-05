@@ -144,6 +144,13 @@ class DeadlineSweeper:
         self._worker_id = worker_id
         self._next_scan_ms: Optional[int] = None
         self._task: Optional[asyncio.Task] = None
+        # 관측용 — /health 가 보고한다
+        self.last_tick_ok: Optional[bool] = None
+        self.last_tick_at_ms: Optional[int] = None
+
+    @property
+    def running(self) -> bool:
+        return self._task is not None and not self._task.done()
 
     # ----- 루프 (7단계 lifespan 이 부른다) -----
 
@@ -186,6 +193,9 @@ class DeadlineSweeper:
         except (StoreUnavailable, RedisError) as exc:
             report.ok = False
             logger.warning("Sweeper sees store failure: %s", exc)
+        self.last_tick_ok = report.ok
+        if report.ok:
+            self.last_tick_at_ms = now
         return report
 
     async def claim(self, now: int) -> list[str]:

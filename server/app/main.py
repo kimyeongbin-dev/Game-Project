@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.ranking import router as ranking_router
 from app.api.users import router as users_router
 from app.ws.maze_handler import router as maze_ws_router
+from app.ws.runtime import realtime
 from app.core.config import settings
 from app.db import close_db, init_db, is_db_available
 from app.db.redis import close_redis, init_redis, is_redis_available, redis_health
@@ -36,11 +37,12 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """애플리케이션 생명주기.
 
-    기동 순서: DB -> Redis
-    종료 순서: 역순
+    기동 순서: DB -> Redis -> 실시간(버스 -> 스위퍼 -> 큐 티커 -> 종료 신호 훅)
+    종료 순서: 역순 — 실시간 종료(끊김 처리 대기 -> 서버 유예 소급 -> 정지)는 Redis 를 닫기 전이다
 
     DB 와 Redis 는 모두 graceful degradation 이다 — 연결 실패로 기동이
-    막히지 않는다. 대신 어떤 기능이 비활성인지 로그로 남긴다.
+    막히지 않는다. 대신 어떤 기능이 비활성인지 로그로 남긴다. Redis 가 없으면
+    실시간 구성요소를 띄우지 않고 WS 접속은 1013 으로 닫힌다 (app/ws/runtime.py).
     """
     logger.info(
         "Starting server (environment=%s, testing=%s)",
@@ -50,6 +52,7 @@ async def lifespan(app: FastAPI):
 
     await init_db()
     await init_redis()
+    await realtime.start()
 
     logger.info(
         "Startup complete — db=%s redis=%s rate_limit=%s",
@@ -57,9 +60,11 @@ async def lifespan(app: FastAPI):
         "up" if is_redis_available() else "down",
         "on" if limiter.enabled else "off",
     )
+    logger.info("Realtime %s", "on" if realtime.started else "off")
 
     yield
 
+    await realtime.stop()
     await close_redis()
     await close_db()
     logger.info("Shutdown complete")
@@ -124,6 +129,8 @@ async def health_check():
             "enabled": limiter.enabled,
             "per_minute": settings.rate_limit_per_minute,
         },
+        # 이 워커의 실시간 구성요소 (M3 7단계) — 요청이 닿은 워커 하나의 값이다
+        "realtime": realtime.health(),
     }
 
 
