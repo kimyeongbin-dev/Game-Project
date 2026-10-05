@@ -113,6 +113,22 @@ class Settings(BaseSettings):
     outage_retention_sec: int = Field(default=86_400, ge=1)
 
     # -----------------------------------------------------------------------
+    # 인증 (platform.md §1.3) — 이 서버는 access token 을 **검증만** 한다(발급은 인증 작업)
+    # -----------------------------------------------------------------------
+    # HS256 비밀키. 비어 있으면 모든 토큰을 거부한다(fail-closed). production 은 32자 이상 필수
+    jwt_secret_key: str = ""
+    # 허용 알고리즘은 이것 하나 — alg: none·알고리즘 바꿔치기를 막는다
+    jwt_algorithm: Literal["HS256"] = "HS256"
+    # MMR 초기값 (platform.md §4.2). MMR 저장소가 생기기 전 신원 조회의 임시값이다
+    mmr_initial: int = Field(default=1000, ge=0)
+
+    # -----------------------------------------------------------------------
+    # 실시간 WS (maze.md §2·§12, M3 7단계)
+    # -----------------------------------------------------------------------
+    # connected 페이로드에 워커 id 를 싣는다 — 다중 워커 하네스 전용. 운영은 끈다
+    ws_expose_worker: bool = False
+
+    # -----------------------------------------------------------------------
     # 레이트 리미팅
     # -----------------------------------------------------------------------
     rate_limit_enabled: bool = True
@@ -137,6 +153,13 @@ class Settings(BaseSettings):
         """테스트 네임스페이스로 운영 서버가 뜨면 테스트 이벤트가 실제 소켓으로 간다"""
         if self.environment == "production" and self.pubsub_namespace == TEST_PUBSUB_NAMESPACE:
             raise ValueError("PUBSUB_NAMESPACE=test is not allowed in production")
+        return self
+
+    @model_validator(mode="after")
+    def _production_needs_jwt_secret(self) -> "Settings":
+        """비밀키가 비거나 짧으면 운영 서버가 모든 토큰을 거부하거나(빈 값) 위조에 약하다(짧은 값)"""
+        if self.environment == "production" and len(self.jwt_secret_key) < 32:
+            raise ValueError("JWT_SECRET_KEY must be at least 32 characters in production")
         return self
 
     @property

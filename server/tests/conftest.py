@@ -154,3 +154,28 @@ def seat_mode(request, monkeypatch) -> tuple[str, int]:
     if mode == "quad":
         monkeypatch.setitem(LAYOUTS, "quad", QUAD_LAYOUT)
     return mode, seats
+
+
+# ----- 인증 (M3 7단계) -----
+
+TEST_JWT_SECRET = "test-only-jwt-secret-0123456789abcdef"
+
+
+def mint_token(user_id, *, typ: str = "access", auth: str = "kakao", exp_offset_sec: int = 1800,
+               secret: str = TEST_JWT_SECRET, algorithm: str = "HS256", **extra) -> str:
+    """테스트용 access token — 발급 코드는 서버에 없다(인증 작업 몫). §1.3 클레임 그대로"""
+    import time
+
+    from jose import jwt
+
+    now = int(time.time())
+    claims = {"sub": str(user_id), "typ": typ, "auth": auth, "jti": f"t-{user_id}-{now}",
+              "iat": now, "exp": now + exp_offset_sec, **extra}
+    return jwt.encode(claims, secret, algorithm=algorithm)
+
+
+@pytest.fixture
+def jwt_secret(monkeypatch) -> str:
+    """검증 쪽 비밀키를 테스트 값으로 — settings 기본값은 빈 문자열(fail-closed)이다"""
+    monkeypatch.setattr(settings, "jwt_secret_key", TEST_JWT_SECRET)
+    return TEST_JWT_SECRET

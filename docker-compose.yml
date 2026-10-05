@@ -87,6 +87,8 @@ services:
       REDIS_LIMITER_DB: "2"
       # Pub/Sub 채널은 논리 DB 로 격리되지 않는다(서버 전역) — 네임스페이스로 나눈다
       PUBSUB_NAMESPACE: app
+      # access token 검증 키(platform.md §1.3). 비어 있으면 WS 접속이 전부 4001 이다(fail-closed) — .env 에 넣는다
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-}
       RATE_LIMIT_ENABLED: "true"
       RATE_LIMIT_PER_MINUTE: "${RATE_LIMIT_PER_MINUTE:-60}"
     ports:
