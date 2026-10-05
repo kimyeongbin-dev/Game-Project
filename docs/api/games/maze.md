@@ -178,7 +178,8 @@ wss://<host>/api/v1/ws/maze?token=<access_token>
 ```
 
 대기 중 주기적으로 `queue_status`가 온다(`queue_status_interval_sec`, 5 s). `estimated_wait_sec` 는 근거 데이터가 생길 때까지
-`null` 이다(M3 7단계). 이 입장으로 곧바로 매칭이 성사되면 `position` 은 0 이고 이어서 `matched` 가 온다.
+`null` 이다(M3 7단계). 이 입장으로 곧바로 매칭이 성사되면 `position` 은 0 이고 `matched` 도 온다 — **둘의 도착 순서는 보장하지 않는다**
+(`queue_joined` 는 요청에 대한 응답이고 `matched` 는 방송이라 경로가 다르다. 클라이언트는 `matched` 를 받으면 큐 화면을 닫는다).
 
 ### MMR 범위 — Phase 1 은 제한하지 않는다
 

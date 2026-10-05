@@ -141,6 +141,8 @@ class Settings(BaseSettings):
     ws_msg_per_sec: float = Field(default=5.0, gt=0)
     ws_violation_close: int = Field(default=50, ge=1)
     ws_connect_per_minute: int = Field(default=20, ge=1)
+    # 소켓 하나에 메시지를 쓰는 시간 상한 — 넘기면 그 연결을 닫는다(버스가 한 루프로 보낸다, 독립 검토 #1 R8)
+    ws_send_timeout_sec: float = Field(default=2.0, gt=0)
     # 끊김 기록이 실패(락 경합·Redis 장애)하면 원래 시각으로 이 시간까지 다시 시도한다 (검토 H4)
     disconnect_retry_max_sec: int = Field(default=120, ge=1)
 

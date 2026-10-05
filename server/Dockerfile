@@ -82,7 +82,8 @@ COPY --from=deps-dev /opt/venv /opt/venv
 COPY . .
 
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# WS 플래그는 prod 와 같다(tests/test_dockerfile_flags.py) — 개발에서도 4 KiB 상한·ping 감지가 같게 재현된다
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload",      "--ws-ping-interval", "5", "--ws-ping-timeout", "5", "--ws-max-size", "4096"]
 
 # -----------------------------------------------------------------------------
 FROM base AS test

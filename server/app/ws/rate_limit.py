@@ -45,6 +45,8 @@ class TokenBucket:
         now = self._clock()
         self.tokens = min(self.burst, self.tokens + (now - self._at) * self.per_sec)
         self._at = now
+        if self.tokens >= self.burst:   # 버스트를 다 채울 만큼 조용했다 — 지난 위반은 잊는다(R14-6)
+            self.violations = 0
         if self.tokens >= 1:
             self.tokens -= 1
             return True
@@ -64,15 +66,19 @@ def message_bucket(clock: Callable[[], float] = _monotonic) -> TokenBucket:
 class ConnectLimiter:
     """유저별 분당 접속 수 — 리미터 DB 의 고정 창 INCR"""
 
+    def __init__(self, client_provider: Callable = get_limiter_redis):
+        self._client = client_provider
+
     async def allow(self, user_id: int) -> bool:
-        client = get_limiter_redis()
+        client = self._client()
         if client is None:
             return True
         key = keys.ws_connect_rate(user_id)
         try:
-            count = await client.incr(key)
-            if count == 1:
-                await client.expire(key, WINDOW_SEC)
+            async with client.pipeline(transaction=True) as pipe:   # INCR 와 TTL 을 한 번에 — TTL 없는 키가 남지 않는다(R11)
+                pipe.incr(key)
+                pipe.expire(key, WINDOW_SEC, nx=True)
+                count, _ = await pipe.execute()
         except RedisError as exc:
             logger.warning("WS connect limiter unavailable (allowing): %s", exc)
             return True

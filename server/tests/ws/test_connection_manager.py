@@ -134,3 +134,35 @@ class TestLocalUsers:
     def test_no_membership_state(self, connection_manager):
         for attr in ("_game_players", "_room_players", "join_game", "join_room", "send_to_game"):
             assert not hasattr(connection_manager, attr)
+
+
+async def test_slow_socket_is_dropped_not_waited_on(monkeypatch):
+    """받지 않는 소켓 하나가 버스를 막지 않는다 — 시간 상한 뒤 연결 맵에서 빼고 닫는다(독립 검토 #1 R8)"""
+    import asyncio
+
+    from app.core.config import settings
+    from app.ws.connection_manager import ConnectionManager
+
+    monkeypatch.setattr(settings, "ws_send_timeout_sec", 0.1)
+
+    class Stuck:
+        closed_with = None
+
+        async def accept(self):
+            pass
+
+        async def send_json(self, data):
+            await asyncio.sleep(10)
+
+        async def close(self, code=1000, reason=""):
+            Stuck.closed_with = code
+
+    manager = ConnectionManager()
+    await manager.connect(Stuck(), 1, "slow")
+    loop = asyncio.get_running_loop()
+    t = loop.time()
+    await manager.send_personal(1, {"type": "x"})
+    assert loop.time() - t < 1.0
+    assert manager.get_connection(1) is None
+    await asyncio.sleep(0.05)
+    assert Stuck.closed_with == 1013

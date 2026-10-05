@@ -8,12 +8,14 @@ WebSocket 연결 관리 — 이 워커 프로세스의 소켓만 안다
 (`app/ws/bus.py`)가 맡고, 버스는 수신자 목록과 `local_user_ids()` 의 교집합에만 보낸다.
 """
 
+import asyncio
 import logging
 import secrets
 from typing import Dict, Optional
 from fastapi import WebSocket
 from dataclasses import dataclass, field
 from datetime import datetime
+from app.core.config import settings
 from app.core.time import utcnow
 
 logger = logging.getLogger(__name__)
@@ -105,14 +107,19 @@ class ConnectionManager:
         return set(self._connections)
 
     async def send_personal(self, user_id: int, message: dict):
-        """특정 유저에게 메시지 전송"""
+        """특정 유저에게 메시지 전송 — 시간 상한(ws_send_timeout_sec)을 넘기면 그 연결을 닫는다
+
+        버스는 워커의 모든 이벤트를 한 루프에서 보낸다. 받지 않는 클라이언트 하나가 쓰기 버퍼를 막으면 같은 워커의 다른
+        게임 통지가 함께 늦어지고 그 사이 시계는 흐른다(독립 검토 #1 R8). 늦은 소켓은 끊고, 재접속이 상태를 복원한다.
+        """
         conn = self._connections.get(user_id)
         if conn:
             try:
-                await conn.websocket.send_json(message)
+                await asyncio.wait_for(conn.websocket.send_json(message), settings.ws_send_timeout_sec)
             except Exception as e:
-                logger.warning(f"Failed to send message to {user_id}: {e}")
+                logger.warning("Failed to send message to %s: %s", user_id, type(e).__name__)
                 await self.disconnect(user_id, conn.websocket)
+                asyncio.create_task(_close_quietly(conn.websocket, 1013))
 
     async def broadcast(self, message: dict):
         """이 워커의 모든 연결에 메시지 전송"""
@@ -124,6 +131,13 @@ class ConnectionManager:
     def get_stats(self) -> dict:
         """연결 통계 (이 워커만)"""
         return {"total_connections": len(self._connections)}
+
+
+async def _close_quietly(websocket: WebSocket, code: int) -> None:
+    try:
+        await asyncio.wait_for(websocket.close(code=code), settings.ws_send_timeout_sec)
+    except Exception:
+        pass
 
 
 # 싱글톤 인스턴스

@@ -131,3 +131,41 @@ async def test_connect_flood_closes_1013_before_anything(server, redis, monkeypa
     assert late.received == []
     other = await Client(server, 961).open()                    # 유저 단위다 — 다른 유저는 영향 없다
     await other.close()
+
+
+def test_violations_are_forgotten_after_calm():
+    """오래 유지된 정상 연결이 가끔의 초과를 누적해 1008 로 닫히지 않는다(독립 검토 #1 R14-6)"""
+    clock = Tick()
+    bucket = TokenBucket(3, 1.0, clock)
+    for _ in range(3):
+        bucket.allow()
+    assert not bucket.allow() and bucket.violations == 1
+    clock.t += 10                                              # 버스트를 다 채울 만큼 조용했다
+    assert bucket.allow() and bucket.violations == 0
+
+
+async def test_connect_limiter_key_always_has_ttl(redis):
+    from app.db import redis_keys as keys
+    from app.ws.rate_limit import ConnectLimiter
+
+    # 전역 연결(app.db.redis)은 스레드 서버가 쓰고 있다 — 따로 연 클라이언트를 주입한다(테스트는 리미터 DB = 앱 DB 1)
+    assert await ConnectLimiter(lambda: redis).allow(4_242)
+    assert 0 < await redis.ttl(keys.ws_connect_rate(4_242)) <= 60
+
+
+async def test_connect_flood_is_cut_before_identity_lookup(server, redis, monkeypatch):
+    """리미터는 신원 조회(DB) 앞이다 — 연타가 DB 쿼리를 만들지 않는다(R11)"""
+    monkeypatch.setattr(settings, "ws_connect_per_minute", 2)
+    identity = server.handler.identity
+    seen = []
+    original = identity.lookup
+
+    async def counting(uid):
+        seen.append(uid)
+        return await original(uid)
+
+    monkeypatch.setattr(identity, "lookup", counting)
+    for _ in range(5):
+        c = await Client(server, 970).open(mint_token(970), expect_connected=False)
+        await c.close()
+    assert seen.count(970) == 2

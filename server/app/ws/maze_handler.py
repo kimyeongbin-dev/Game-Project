@@ -142,6 +142,9 @@ class MazeSocketHandler:
             return await _reject(websocket, CLOSE_INVALID_TOKEN)
         if claims.is_anonymous:
             return await _reject(websocket, CLOSE_LOGIN_REQUIRED)
+        # 접속 연타 — 재접속마다 신원 조회(DB)와 mark_connected(게임 락)가 돈다. 그 전에 끊는다(독립 검토 #1 R11)
+        if not await self.limiter.allow(claims.user_id):
+            return await _reject(websocket, CLOSE_TRY_AGAIN_LATER)
         try:
             identity = await self.identity.lookup(claims.user_id)
         except IdentityUnavailable as exc:
@@ -152,9 +155,6 @@ class MazeSocketHandler:
         if not identity.nickname:
             return await _reject(websocket, CLOSE_NICKNAME_REQUIRED)
         if get_redis() is None:  # 멀티플레이는 Redis 없이 성립하지 않는다
-            return await _reject(websocket, CLOSE_TRY_AGAIN_LATER)
-        # 접속 연타 — 재접속마다 mark_connected 가 게임 락을 잡는다. 연결 맵·세션 키를 건드리기 전에 끊는다
-        if not await self.limiter.allow(identity.user_id):
             return await _reject(websocket, CLOSE_TRY_AGAIN_LATER)
 
         conn = await self.manager.connect(websocket, identity.user_id, identity.nickname)
