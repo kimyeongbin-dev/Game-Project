@@ -334,3 +334,25 @@ async def test_failed_reconnect_closes_1013_and_leaves_nothing(server, clients, 
     assert again.received == []
     await asyncio.sleep(0.1)
     assert server.handler.manager.get_connection(second.user_id) is None
+
+
+async def test_ready_then_gone_seat_starts_disconnected(server, clients, redis):
+    """매치에서 ready 뒤 끊긴 사람 — 그 좌석은 시작부터 끊김이고 접속 시계가 흐른다(독립 검토 #1 R4)"""
+    a, b = await clients(1_100, 1_101)
+    for c in (a, b):
+        await c.reply(await c.send("join_queue", {"mode": "duel"}))
+    for c in (a, b):
+        await c.recv("matched")
+    await b.send("ready")
+    await b.recv("player_ready")
+    await b.close()
+    await asyncio.sleep(0.3)
+    await a.send("ready")
+    start = await a.recv("game_start")
+    game_id = start["payload"]["game_id"]
+    b_seat = 3 - start["payload"]["my_seat_no"]
+    clocks = json.loads(await redis.get(keys.game_clocks(game_id)))
+    seat = next(s for s in clocks["seats"] if s["seat_no"] == b_seat)
+    assert seat["disconnected_at_ms"] is not None
+    view = (await a.recv("game_state"))["payload"]
+    assert next(c for c in view["clocks"] if c["seat_no"] == b_seat)["connected"] is False

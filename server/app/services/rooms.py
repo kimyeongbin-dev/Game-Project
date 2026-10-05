@@ -78,6 +78,7 @@ class LeaveResult:
     room: Room                 # 이탈 반영 후의 방 (해산이면 해산 직전 방)
     dissolved: bool            # 호스트 이탈로 해산됐다
     notify_user_ids: list[int] # 남은 인원 — player_left 를 받을 사람
+    seat_no: Optional[int] = None  # 나간 사람의 (나가기 전) 좌석 — 락 안에서 정한다
 
 
 def _random_code() -> str:
@@ -207,7 +208,7 @@ class Rooms:
                 for uid in room.user_ids:
                     await activity.release(redis, uid, held)
                 others = [uid for uid in room.user_ids if uid != user_id]
-                result = LeaveResult(room=room, dissolved=True, notify_user_ids=others)
+                result = LeaveResult(room=room, dissolved=True, notify_user_ids=others, seat_no=leaver.seat_no)
                 await self._publisher.publish(events.room_dissolved(result))
                 return result
 
@@ -221,7 +222,7 @@ class Rooms:
             await self._publisher.publish(events.room_updated(
                 room, events.ROOM_LEFT, user_id, leaver.seat_no, also_notify=[user_id]
             ))
-            return LeaveResult(room=room, dissolved=False, notify_user_ids=room.user_ids)
+            return LeaveResult(room=room, dissolved=False, notify_user_ids=room.user_ids, seat_no=leaver.seat_no)
 
     async def set_ready(self, user_id: int, is_ready: bool = True) -> Union[Room, GameState]:
         """준비 표시. 정원이 차고 전원 준비되면 비랭크 게임을 만들고 GameState 를 돌려준다"""

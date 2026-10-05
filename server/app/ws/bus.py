@@ -148,6 +148,10 @@ class EventBus:
                 continue
             if event.kind == GAME_STARTED:
                 self._claim(event.scope_id, user_id)
+            if event.scope in ("game", "room", "match"):
+                conn = self._manager.get_connection(user_id)
+                if conn is not None:
+                    conn.last_activity = (event.scope, event.scope_id)
             try:
                 messages = await self._delivery.deliver(event, user_id)
             except Exception:
@@ -191,8 +195,9 @@ class EventBus:
             current = await self._activity(user_id)
             if current is not None and keys.parse_activity(current)[0] == "game":
                 self._claim(keys.parse_activity(current)[1], user_id)  # 그 사이 시작된 게임(game_started 유실 — R4)
+            conn = self._manager.get_connection(user_id)
             try:
-                messages = await self._delivery.resync(user_id)
+                messages = await self._delivery.resync(user_id, conn.last_activity if conn else None)
             except Exception:
                 logger.exception("Event bus %s: resync of %s failed", self.name, user_id)
                 continue

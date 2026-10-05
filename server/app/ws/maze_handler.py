@@ -341,11 +341,13 @@ class MazeSocketHandler:
             return server_message(T.ROOM_JOINED, wire.room_payload(events.room_snapshot(room)), ack_seq=request.seq)
         room = await self.rooms.create_room(GAME, body.mode, session.user_id, session.identity.nickname,
                                             allow_spectate=body.allow_spectate)
+        session.conn.last_activity = ("room", room.code)   # 방장은 자기 생성을 방송으로 받지 않는다 — 여기서 기억한다(R6)
         return server_message(T.ROOM_CREATED, wire.room_payload(events.room_snapshot(room)), ack_seq=request.seq)
 
     async def _join_room(self, session: Session, request: ClientMessage) -> dict:
         body = parse_payload(request)
         room = await self.rooms.join_room(body.room_code, session.user_id, session.identity.nickname)
+        session.conn.last_activity = ("room", room.code)
         return server_message(T.ROOM_JOINED, wire.room_payload(events.room_snapshot(room)), ack_seq=request.seq)
 
     async def _leave_room(self, session: Session, request: ClientMessage) -> Optional[dict]:
@@ -358,10 +360,8 @@ class MazeSocketHandler:
             return await self._surrender(session, request)
         if kind != "room":
             raise MultiplayerError("not_in_room")
-        before = await self.rooms.get_room(rest)
         result = await self.rooms.leave_room(session.user_id)
-        seat_no = next((p.seat_no for p in before.players if p.user_id == session.user_id), None) if before else None
-        return server_message(T.PLAYER_LEFT, {"seat_no": seat_no, "room_code": result.room.code,
+        return server_message(T.PLAYER_LEFT, {"seat_no": result.seat_no, "room_code": result.room.code,
                                               "room_closed": result.dissolved}, ack_seq=request.seq)
 
     async def _ready(self, session: Session, request: ClientMessage) -> Optional[dict]:

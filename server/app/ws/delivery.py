@@ -16,7 +16,7 @@ from typing import Optional
 
 from app.core.time import Clock, redis_clock
 from app.db import redis_keys as keys
-from app.db.redis_lock import require_redis
+from app.db.redis_lock import require_redis, store_errors
 from app.schemas.ws_messages import WSMessageType as T
 from app.services import activity, events
 from app.services.events import Event
@@ -62,6 +62,8 @@ class Delivery:
 
     async def _game_event(self, event: Event, user_id: int) -> list[dict]:
         game_id, hint, v = event.scope_id, event.hint, event.seq
+        if await self._left(game_id, user_id):
+            return []  # 탈락 후 구경을 그만두고 나갔다(§9) — 옛 게임 통지를 받지 않는다(검토 R5)
 
         if event.kind == events.GAME_VOIDED:
             return [await self._voided_end(game_id, user_id, v)]
@@ -115,11 +117,21 @@ class Delivery:
             version=v,
         )
 
+    @staticmethod
+    async def _left(game_id: str, user_id: int) -> bool:
+        async with store_errors():
+            return bool(await require_redis().sismember(keys.game_left(game_id), user_id))
+
     async def _voided_end(self, game_id: str, user_id: int, v: int) -> dict:
-        """무효 — 장기 장애면 state 가 남아 full_board 를 채우고, 유실이면 남은 meta(없으면 빈 결과)로"""
+        """무효 — 장기 장애면 state 가 남아 full_board 를 채우고, 유실이면 남은 meta(없으면 빈 결과)로
+
+        다시 읽은 state 가 진행 중이고 무효 표시도 없으면 전체 판을 만들지 않는다 — 함수 가드를 호출자가 우회하지
+        않는다(검토 R12)
+        """
         snap = await game_snapshot(game_id, user_id, games=self._games)
         if snap is not None:
-            payload = wire.game_end_payload(game_id, snap.state, snap.meta, voided=True)
+            board_ok = snap.voided or snap.state.is_finished
+            payload = wire.game_end_payload(game_id, snap.state if board_ok else None, snap.meta, voided=True)
         else:
             meta = await self._games.get_meta(game_id)
             payload = wire.game_end_payload(game_id, None, meta, voided=True)
@@ -168,10 +180,12 @@ class Delivery:
 
     # ----- 재동기화 -----
 
-    async def resync(self, user_id: int) -> list[dict]:
+    async def resync(self, user_id: int, last: Optional[tuple[str, str]] = None) -> list[dict]:
+        """지금 활동의 상태. last: 이 연결이 마지막으로 통지를 받은 활동 — 활동이 그 사이 사라졌으면(끝남·해산·만료)
+        그 끝을 알려 준다(검토 R6). 이벤트가 유실돼도 재구독으로 수렴한다"""
         current = await activity.current(require_redis(), user_id)
         if current is None:
-            return []
+            return await self._ended(user_id, last) if last is not None else []
         kind, rest = keys.parse_activity(current)
 
         if kind == "game":
@@ -195,6 +209,22 @@ class Delivery:
             return [server_message(T.QUEUE_STATUS, wire.queue_payload(
                 status.mode, status.position, status.waiting_count))]
         logger.warning("Unknown activity %r for user %s", current, user_id)
+        return []
+
+    async def _ended(self, user_id: int, last: tuple[str, str]) -> list[dict]:
+        scope, scope_id = last
+        if scope == "game":
+            if await self._left(scope_id, user_id):
+                return []
+            snap = await game_snapshot(scope_id, user_id, games=self._games)
+            if snap is None or not (snap.state.is_finished or snap.voided):
+                return []
+            return [server_message(T.GAME_STATE, wire.game_state_payload(snap.view), version=snap.version),
+                    self._end(snap, snap.version)]
+        if scope == "room":
+            return [server_message(T.PLAYER_LEFT, {"seat_no": None, "room_code": scope_id, "room_closed": True})]
+        if scope == "match":
+            return [server_message(T.QUEUE_STATUS, wire.queue_payload(None, 0, 0, requeued=False))]
         return []
 
     async def game_resync(self, game_id: str, user_id: int) -> list[dict]:

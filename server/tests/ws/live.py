@@ -24,7 +24,7 @@ from app.db import redis_keys
 from app.db.redis import close_redis, init_redis
 from app.core.worker import WORKER_ID
 from app.services.matchmaking import Matchmaking
-from app.services.maze_game import GAME, MazeGameService
+from app.services.maze_game import GAME, MazeGameService, Presence
 from app.services.rooms import Rooms
 from app.ws.runtime import Realtime
 from app.ws.connection_manager import ConnectionManager
@@ -40,14 +40,18 @@ def raw_redis() -> Redis:
 
 
 async def purge(client: Redis) -> None:
+    """상태 키를 지운다 — 워커 하트비트(store:workers)는 남긴다. 서버의 스위퍼가 1 s 마다 쓰는 값이고, 지우면 다음 회차
+    전까지 만든 게임에서 접속자가 "없는 사람"으로 시작한다(Presence, 검토 R4)"""
+    keep = {redis_keys.workers()}
     for prefix in redis_keys.PREFIXES:
         async for key in client.scan_iter(match=f"{prefix}*", count=500):
-            await client.delete(key)
+            if key not in keep:
+                await client.delete(key)
 
 
 def build_handler(identity, *, worker_id: str = WORKER_ID, **overrides) -> MazeSocketHandler:
     """DB 없는 서비스로 조립한 핸들러 — 앱 싱글턴은 다른 테스트가 켠 DB 상태를 물려받을 수 있다"""
-    games = MazeGameService(lambda: None)
+    games = MazeGameService(lambda: None, presence=Presence())
     rooms = Rooms(games={GAME: games})
     matches = Matchmaking(games={GAME: games})
     return MazeSocketHandler(

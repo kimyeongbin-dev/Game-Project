@@ -31,6 +31,8 @@ class PlayerConnection:
     connected_at: datetime = field(default_factory=utcnow)
     conn_id: str = field(default_factory=lambda: secrets.token_hex(8))
     replaced: bool = False
+    # 마지막으로 통지를 받은 활동 (scope, id) — 재구독 때 활동이 사라졌으면 그 끝을 알려 준다(검토 R6)
+    last_activity: Optional[tuple[str, str]] = None
 
 
 class ConnectionManager:

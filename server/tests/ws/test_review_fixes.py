@@ -175,3 +175,81 @@ async def test_late_replacement_event_does_not_close_the_newest_connection(redis
         assert ws.close_code == 4000
     finally:
         await bus.stop()
+
+
+# ----- R4: 처음부터 없던 좌석 -----
+
+async def test_absent_player_starts_disconnected(redis_client, fake_clock):
+    from app.services.maze_game import Presence
+
+    games = MazeGameService(lambda: None, clock=fake_clock, presence=Presence())
+    await redis_client.zadd(keys.workers(), {"wA": fake_clock.ms, "wDead": fake_clock.ms - 60_000})
+    await redis_client.set(keys.user_conn(1), "wA:c1")            # 붙어 있다
+    await redis_client.set(keys.user_conn(3), "wDead:c3")         # 크래시한 워커가 남긴 키 — 붙어 있지 않다
+    state = await games.create_game(mode="trio", is_ranked=False,
+                                    players=[SeatPlayer(1, 1, "a"), SeatPlayer(2, 2, "b"), SeatPlayer(3, 3, "c")])
+    clocks = await games.load_clocks(state.game_id)
+    assert clocks.seat(1).connected
+    assert clocks.seat(2).disconnected_at_ms == fake_clock.ms     # 매치·방에서 준비한 뒤 끊겼다
+    assert clocks.seat(3).disconnected_at_ms == fake_clock.ms
+    members = await redis_client.zrange(keys.deadlines("maze_1p"), 0, -1)
+    assert keys.deadline_grace(state.game_id, 2) in members       # 접속 시계가 흐른다 — 스위퍼가 기권패를 낸다
+
+
+async def test_without_presence_everyone_starts_connected(real):
+    """서비스 단위 테스트의 전제 — Presence 를 안 넘기면 예전처럼 전원 연결로 시작한다"""
+    state = await start(real)
+    clocks = await real.load_clocks(state.game_id)
+    assert clocks.seat(1).connected and clocks.seat(2).connected
+
+
+# ----- R5·R6·R12: 게임 경계의 전달 -----
+
+async def test_left_spectator_gets_nothing_more(real, fake_clock):
+    from app.services.matchmaking import Matchmaking
+    from app.services.rooms import Rooms
+
+    d = Delivery(real, Rooms(games={"maze_1p": real}), Matchmaking(games={"maze_1p": real}), clock=fake_clock)
+    pub = []
+
+    class Rec:
+        async def publish(self, e):
+            pub.append(e)
+
+    real._publisher = Rec()
+    state = await real.create_game(mode="trio", is_ranked=False,
+                                   players=[SeatPlayer(1, 1, "a"), SeatPlayer(2, 2, "b"), SeatPlayer(3, 3, "c")])
+    await real.surrender(state.game_id, 3)
+    assert await real.leave_eliminated(state.game_id, 3) == 3
+    pub.clear()
+    target = state.get_valid_pawn_moves()[0]
+    await real.move(state.game_id, 1, target.row, target.col)
+    [event] = pub
+    assert await d.deliver(event, 3) == []                        # 나간 사람
+    assert [m["type"] for m in await d.deliver(event, 2)] == ["game_state", "turn_change"]
+
+
+async def test_resync_reports_endings_missed_while_unsubscribed(real, fake_clock):
+    from app.services.matchmaking import Matchmaking
+    from app.services.rooms import Rooms
+
+    rooms = Rooms(games={"maze_1p": real})
+    d = Delivery(real, rooms, Matchmaking(games={"maze_1p": real}), clock=fake_clock)
+    state = await start(real)
+    await real.surrender(state.game_id, 2)                        # 끝났다 — 활동이 풀린다
+    assert await d.resync(1) == []                                # 활동만 보면 아무것도 없다
+    msgs = await d.resync(1, last=("game", state.game_id))
+    assert [m["type"] for m in msgs] == ["game_state", "game_end"]
+
+    room = await rooms.create_room("maze_1p", "duel", 7, "host")
+    await rooms.join_room(room.code, 8, "guest")
+    await rooms.leave_room(7)                                     # 해산
+    [closed] = await d.resync(8, last=("room", room.code))
+    assert closed["type"] == "player_left" and closed["payload"]["room_closed"] is True
+
+
+async def test_void_event_on_running_state_never_builds_full_board(real, fake_clock):
+    state = await start(real)
+    d = Delivery(real, None, None, clock=fake_clock)
+    end = await d._voided_end(state.game_id, 1, 9)                # 경합으로 진행 중 state 를 다시 읽었다
+    assert end["payload"]["reason"] == "server_fault" and end["payload"]["full_board"] is None

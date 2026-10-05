@@ -51,6 +51,11 @@ def game_clocks(game_id: str) -> str:
     return f"game:{game_id}:clocks"
 
 
+def game_left(game_id: str) -> str:
+    """SET — 탈락 후 구경을 그만두고 나간 유저. 전달이 그 유저를 건너뛴다(M3 7단계 검토 R5). 안전망 TTL"""
+    return f"game:{game_id}:left"
+
+
 def game_version(game_id: str) -> str:
     """STRING int — 게임 이벤트의 단조 번호(M3 7단계, 검토 L23). state 와 같은 펜싱 쓰기로 올린다"""
     return f"game:{game_id}:version"

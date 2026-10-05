@@ -50,6 +50,8 @@ from app.services.maze_clock import GameClocks, Interval, merge
 logger = logging.getLogger(__name__)
 
 GAME = "maze_1p"
+# game:{id}:left 의 안전망 TTL — 게임은 이보다 짧다(시계 상한). 종료 TTL 과 따로 둔다
+LEFT_TTL_SEC = 86_400
 
 
 class GameNotFound(Exception):
@@ -114,6 +116,25 @@ class ActionOutcome:
 
 
 SessionFactoryProvider = Callable[[], Optional[async_sessionmaker]]
+
+
+class Presence:
+    """지금 어딘가에 WS 로 붙어 있는 유저 — 게임 시작 때 처음부터 없던 좌석을 끊김으로 두는 데 쓴다 (M3 7단계 검토 R4)
+
+    표시는 `user:{uid}:conn`(연결이 끝나면 CAS 로 지워진다)이고, 그 연결을 가진 워커의 하트비트(`store:workers`)가
+    살아 있어야 한다 — 크래시한 워커가 남긴 키를 연결로 치지 않는다.
+    """
+
+    async def connected(self, redis, user_ids: Sequence[int], now: int) -> set[int]:
+        if not user_ids:
+            return set()
+        async with store_errors():
+            values = await redis.mget(*(keys.user_conn(u) for u in user_ids))
+            owners = {u: v for u, v in zip(user_ids, values) if v}
+            workers = sorted({owner_worker(v) for v in owners.values()})
+            beats = dict(zip(workers, await redis.zmscore(keys.workers(), workers))) if workers else {}
+        alive = now - settings.worker_heartbeat_timeout_ms
+        return {u for u, v in owners.items() if (beats.get(owner_worker(v)) or 0) >= alive}
 
 
 def _app_session_factory() -> Optional[async_sessionmaker]:
@@ -270,10 +291,13 @@ class MazeGameService:
         session_factory: SessionFactoryProvider = _app_session_factory,
         publisher: Publisher = redis_publisher,
         clock: Clock = redis_clock,
+        presence: Optional[Presence] = None,
     ):
         self._session_factory = session_factory
         self._publisher = publisher
         self._clock = clock
+        # None 이면 모든 좌석을 연결 상태로 시작한다(서비스 단위 테스트). 운영은 Presence 를 넘긴다
+        self._presence = presence
 
     # ----- 생성·조회 -----
 
@@ -335,6 +359,13 @@ class MazeGameService:
         try:
             now = await self._clock.now_ms()
             clocks = self._start_clocks(state, now)
+            if self._presence is not None:
+                # 매치·방에서 준비한 뒤 끊긴 사람 — 시작부터 끊김이다(§8 "끊긴 동안"). 그렇지 않으면 그 좌석은 아무도
+                # 없는데 연결 중으로 남아 접속 시계가 흐르지 않는다(검토 R4)
+                here = await self._presence.connected(redis, meta.human_user_ids, now)
+                for p in meta.players:
+                    if p.user_id is not None and p.user_id not in here:
+                        clocks.disconnect(p.seat_no, now)
             zadd, _ = deadline_ops(state, clocks)
             async with store_errors():
                 async with redis.pipeline(transaction=True) as pipe:
@@ -528,7 +559,13 @@ class MazeGameService:
             raise MultiplayerError("not_in_game")
         if not (state.is_finished or state.seat(seat_no).is_eliminated):
             return None
-        await activity.release(require_redis(), user_id, keys.activity_game(game_id))
+        redis = require_redis()
+        async with store_errors():
+            async with redis.pipeline(transaction=True) as pipe:  # 나간 뒤에는 그 게임의 통지를 받지 않는다(검토 R5)
+                pipe.sadd(keys.game_left(game_id), user_id)
+                pipe.expire(keys.game_left(game_id), LEFT_TTL_SEC)
+                await pipe.execute()
+        await activity.release(redis, user_id, keys.activity_game(game_id))
         return seat_no
 
     async def drop_seat(self, game_id: str, seat_no: int, *, owner: str, at_ms: int) -> bool:
@@ -957,7 +994,7 @@ class MazeGameService:
         return [p.user_id for p in record.participants if p.user_id is not None]
 
 
-maze_games = MazeGameService()
+maze_games = MazeGameService(presence=Presence())
 
 __all__ = [
     "GAME",
