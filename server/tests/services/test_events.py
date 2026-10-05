@@ -79,9 +79,12 @@ def test_test_channels_are_explicitly_separated():
     """채널은 DB 전역이다 — 테스트는 명시 네임스페이스 "test", 앱은 "app" """
     assert keys.channel_namespace() == "test:"
     assert keys.room_events("ABC") == "test:room:ABC:events"
-    assert keys.event_patterns() == ("test:game:*:events", "test:match:*:events", "test:room:*:events")
+    assert keys.event_patterns() == (
+        "test:game:*:events", "test:match:*:events", "test:room:*:events", "test:user:*:events",
+    )
+    assert keys.user_events(7) == "test:user:7:events"
     with pytest.raises(ValueError):
-        keys.events("user", "1")
+        keys.events("player", "1")
 
 
 def test_namespace_settings_guard():
@@ -121,7 +124,7 @@ async def test_move_publishes_last_action_without_coordinates(games, pub, seat_m
     assert e.kind == events.GAME_UPDATED
     assert e.recipients == tuple(users)
     assert e.hint == {"last_action": {"seat_no": 1, "kind": "move"}, "ended": False}
-    assert e.seq == 1
+    assert e.seq == 2   # game:{id}:version — game_started 가 1번 (검토 L23)
     assert_public(e.hint)
 
 
@@ -152,7 +155,8 @@ async def test_surrender_and_end(games, pub, seat_mode):
 
     await games.surrender(state.game_id, users[-1])
     e = pub.events[-1]
-    assert e.hint["last_action"] == {"seat_no": seats, "kind": "eliminated", "reason": "surrender"}
+    assert e.hint["last_action"] == {"seat_no": seats, "kind": "eliminated", "reason": "surrender",
+                                     "survivors": seats - 1}
     assert e.hint["ended"] is (seats == 2)
     # 탈락한 좌석도 결과를 받아야 한다 — 수신자는 meta 의 사람 좌석 전원
     assert e.recipients == tuple(users)
@@ -161,7 +165,8 @@ async def test_surrender_and_end(games, pub, seat_mode):
 async def test_server_elimination_names_the_seat(games, pub):
     state, users = await start(games, "trio", 3)
     await games.eliminate(state.game_id, 2, "time_forfeit")
-    assert pub.events[-1].hint["last_action"] == {"seat_no": 2, "kind": "eliminated", "reason": "time_forfeit"}
+    assert pub.events[-1].hint["last_action"] == {"seat_no": 2, "kind": "eliminated", "reason": "time_forfeit",
+                                                  "survivors": 2}
 
 
 async def test_connection_events_are_public(games, pub, seat_mode):
@@ -172,7 +177,7 @@ async def test_connection_events_are_public(games, pub, seat_mode):
     await games.mark_connected(state.game_id, users[-1])
     gone, back = pub.events[-2:]
     assert (gone.kind, back.kind) == (events.SEAT_DISCONNECTED, events.SEAT_RECONNECTED)
-    assert set(gone.hint) == {"seat_no", "grace_remaining_ms"} and back.hint == {"seat_no": seats}
+    assert set(gone.hint) == {"seat_no", "grace_remaining_ms", "survivors"} and back.hint == {"seat_no": seats}
     for e in (gone, back):
         assert_public(e.hint)
         assert e.recipients == tuple(users)
@@ -247,7 +252,7 @@ async def test_expire_notifies_requeued_and_dropped(mm, pub, fake_clock):
     await mm.expire_match(result.match.match_id)
     e = pub.events[-1]
     assert e.kind == events.MATCH_EXPIRED
-    assert e.hint == {"requeued": [1], "dropped": [2]}
+    assert e.hint == {"game": GAME, "mode": "duel", "requeued": [1], "dropped": [2]}
     assert sorted(e.recipients) == users
 
 

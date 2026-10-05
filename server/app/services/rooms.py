@@ -145,7 +145,7 @@ class Rooms:
             async with store_errors():
                 await redis.delete(keys.room(room.code))
             raise
-        await self._publisher.publish(events.room_updated(room))
+        await self._publisher.publish(events.room_updated(room, events.ROOM_CREATED, user_id, 1))
         return room
 
     async def join_room(self, code: str, user_id: int, nickname: str) -> Room:
@@ -165,7 +165,28 @@ class Rooms:
                            nickname=nickname, is_host=False),
             ))
             await self._save(redis, room)
-            await self._publisher.publish(events.room_updated(room))
+            await self._publisher.publish(
+                events.room_updated(room, events.ROOM_JOINED, user_id, len(room.players))
+            )
+            return room
+
+    async def update_settings(self, user_id: int, mode: str, allow_spectate: bool) -> Room:
+        """대기 중인 방장이 create_room 을 다시 보냈다 — 관전 허용만 바꾼다 (§4, M3 7단계 사용자 결정)
+
+        모드는 바꿀 수 없다(정원이 달라진다). 방장이 아니거나 모드가 다르면 already_in_room, 시작한 방이면 not_in_room.
+        """
+        redis = require_redis()
+        code = await self._room_code_of(redis, user_id)
+        async with self._locked(redis, code):
+            room = await self._load(redis, code)
+            me = next((p for p in room.players if p.user_id == user_id), None)
+            if room.status != WAITING or me is None:
+                raise MultiplayerError("not_in_room")
+            if not me.is_host or mode != room.mode:
+                raise MultiplayerError("already_in_room")
+            room = replace(room, allow_spectate=allow_spectate)
+            await self._save(redis, room)
+            await self._publisher.publish(events.room_updated(room, events.ROOM_SETTINGS, user_id, me.seat_no))
             return room
 
     async def leave_room(self, user_id: int) -> LeaveResult:
@@ -197,7 +218,9 @@ class Rooms:
             await self._save(redis, room)
             await activity.release(redis, user_id, held)
             # 떠난 사람도 받는다 — 다른 워커에 붙은 같은 유저의 화면이 방을 닫게 한다
-            await self._publisher.publish(events.room_updated(room, also_notify=[user_id]))
+            await self._publisher.publish(events.room_updated(
+                room, events.ROOM_LEFT, user_id, leaver.seat_no, also_notify=[user_id]
+            ))
             return LeaveResult(room=room, dissolved=False, notify_user_ids=room.user_ids)
 
     async def set_ready(self, user_id: int, is_ready: bool = True) -> Union[Room, GameState]:
@@ -215,7 +238,8 @@ class Rooms:
             full = len(room.players) == room.capacity
             if not (full and all(p.is_ready for p in room.players)):
                 await self._save(redis, room)
-                await self._publisher.publish(events.room_updated(room))
+                seat_no = next(p.seat_no for p in room.players if p.user_id == user_id)
+                await self._publisher.publish(events.room_updated(room, events.ROOM_READY, user_id, seat_no))
                 return room
 
             # 게임 시작 통지는 create_game 이 발행한다 (출처는 하나)

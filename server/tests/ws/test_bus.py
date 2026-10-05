@@ -20,10 +20,15 @@ from app.services.maze_game import GAME, MazeGameService, SeatPlayer
 from app.services.rooms import Rooms
 from app.ws.bus import CLIENT_NAME_PREFIX, EventBus
 from app.ws.connection_manager import ConnectionManager
-from app.ws.delivery import GAME_STATE, QUEUE_STATUS, Delivery
+from app.ws.delivery import Delivery
 from tests.ws.conftest import MockWebSocket
 
 WAIT_SEC = 2.0
+
+# §12 와이어 이름 (M3 7단계 — 내부 이벤트 이름이 아니다)
+GAME_START, GAME_STATE, TURN_CHANGE = "game_start", "game_state", "turn_change"
+PLAYER_LEFT, PLAYER_JOINED, ROOM_JOINED = "player_left", "player_joined", "room_joined"
+QUEUE_STATUS, MATCHED = "queue_status", "matched"
 
 
 async def eventually(predicate, timeout: float = WAIT_SEC):
@@ -115,18 +120,18 @@ async def test_cross_worker_delivery_per_seat(workers, games, seat_mode):
 
     for seat_no, uid in enumerate(users, start=1):
         sent = sockets[uid].sent_messages
-        assert types(sockets[uid]) == [
-            events.GAME_STARTED, GAME_STATE, events.GAME_UPDATED, GAME_STATE
-        ]
+        assert types(sockets[uid]) == [GAME_START, GAME_STATE, TURN_CHANGE, GAME_STATE, TURN_CHANGE]
         assert sent[0]["payload"]["my_seat_no"] == seat_no
-        assert sent[2]["payload"]["last_action"] == {"seat_no": 1, "kind": "move"}
+        assert sent[2]["payload"]["last_action"] is None          # 시작은 행동이 아니다
+        assert sent[4]["payload"]["last_action"] == {"seat_no": 1, "kind": "move"}
+        assert [m["version"] for m in sent] == [1, 1, 1, 2, 2]
         view = sent[3]["payload"]
         assert view["me"]["seat_no"] == seat_no and view["turn_count"] == 1
         # §6 — 시작 배치에서는 서로 3×3 밖이라 남의 좌표가 어디에도 없다 (변 좌표는 칸 기준이라 제외)
         assert view["visible_players"] == [] and view["last_seen_players"] == []
         no_edges = {k: v for k, v in view.items() if not k.endswith("_edges")}
         assert positions_in(no_edges) == [view["me"]["position"]]
-        assert positions_in(sent[2]["payload"]) == []
+        assert positions_in(sent[4]["payload"]) == []
 
 
 async def test_non_recipients_receive_nothing(workers, games):
@@ -151,7 +156,7 @@ async def test_app_channels_do_not_reach_test_bus(workers, redis_client):
     await redis_client.publish(mine.channel, mine.to_json())
 
     await eventually(lambda: ws.sent_messages)
-    assert types(ws) == [events.ROOM_DISSOLVED]
+    assert types(ws) == [PLAYER_LEFT]
 
 
 async def test_broken_message_does_not_kill_loop(workers, redis_client):
@@ -161,7 +166,7 @@ async def test_broken_message_does_not_kill_loop(workers, redis_client):
     await redis_client.publish(ok.channel, ok.to_json())
 
     await eventually(lambda: ws.sent_messages)
-    assert types(ws) == [events.ROOM_DISSOLVED]
+    assert types(ws) == [PLAYER_LEFT]
 
 
 async def test_room_and_match_events_cross_workers(workers, rooms, mm):
@@ -170,16 +175,18 @@ async def test_room_and_match_events_cross_workers(workers, rooms, mm):
 
     room = await rooms.create_room(GAME, "duel", 1, "host")
     await rooms.join_room(room.code, 2, "guest")
-    await eventually(lambda: types(host) == [events.ROOM_UPDATED, events.ROOM_UPDATED])
-    await eventually(lambda: types(guest) == [events.ROOM_UPDATED])
+    # 바꾼 사람(방장의 생성, 게스트의 참가)은 핸들러 응답으로 받으므로 버스가 보내지 않는다
+    await eventually(lambda: types(host) == [PLAYER_JOINED])
+    assert host.sent_messages[0]["payload"]["seat_no"] == 2
     await rooms.leave_room(1)  # 호스트 → 해산
-    await eventually(lambda: types(guest)[-1:] == [events.ROOM_DISSOLVED])
+    await eventually(lambda: types(guest) == [PLAYER_LEFT])
+    assert guest.sent_messages[0]["payload"]["room_closed"] is True
 
     for uid in (3, 4):
         await connect(a if uid == 3 else b, uid)
         result = await mm.join(GAME, "duel", uid, f"n{uid}", 1000)
     ws3, ws4 = a.get_connection(3).websocket, b.get_connection(4).websocket
-    await eventually(lambda: types(ws3) == [events.MATCHED] and types(ws4) == [events.MATCHED])
+    await eventually(lambda: types(ws3) == [MATCHED] and types(ws4) == [MATCHED])
     seats = {ws3.sent_messages[0]["payload"]["my_seat_no"], ws4.sent_messages[0]["payload"]["my_seat_no"]}
     assert seats == {1, 2}
     assert result.match is not None
@@ -218,7 +225,7 @@ async def test_resubscribe_then_resync(workers, games, redis_client):
     ws1.sent_messages.clear()
     target = (await games.load_game(state.game_id)).get_valid_pawn_moves()[0]
     await games.move(state.game_id, 2, target.row, target.col)
-    await eventually(lambda: events.GAME_UPDATED in types(ws1))
+    await eventually(lambda: TURN_CHANGE in types(ws1))
 
     # 다른 워커는 영향을 받지 않았다
     assert workers[1][1].resubscribes == 0
@@ -231,17 +238,18 @@ async def test_resync_by_activity(redis_client, games, rooms, mm, delivery):
     for uid in (5, 6):
         result = await mm.join(GAME, "duel", uid, f"n{uid}", 1000)
 
-    [game_msg] = await delivery.resync(1)
+    game_msg, turn_msg = await delivery.resync(1)
     assert game_msg["type"] == GAME_STATE and game_msg["payload"]["game_id"] == state.game_id
+    assert turn_msg["type"] == TURN_CHANGE and game_msg["version"] == turn_msg["version"] == 1
 
     [room_msg] = await delivery.resync(3)
-    assert room_msg["type"] == events.ROOM_UPDATED and room_msg["payload"]["code"] == room.code
+    assert room_msg["type"] == ROOM_JOINED and room_msg["payload"]["room_code"] == room.code
 
     [queue_msg] = await delivery.resync(4)
     assert queue_msg["type"] == QUEUE_STATUS and queue_msg["payload"]["position"] == 1
 
     [match_msg] = await delivery.resync(5)
-    assert match_msg["type"] == events.MATCHED
+    assert match_msg["type"] == MATCHED
     assert match_msg["payload"]["match_id"] == result.match.match_id
     assert match_msg["payload"]["my_seat_no"] in (1, 2)
 
@@ -280,14 +288,15 @@ async def test_disconnect_event_reaches_other_worker(workers, games):
     sockets = {uid: await connect(workers[i][0], uid) for i, uid in enumerate((1, 2))}
     state = await start_game(games, "duel", [1, 2])
     await games.mark_disconnected(state.game_id, 2)
-    await eventually(lambda: events.SEAT_DISCONNECTED in types(sockets[1]))
-    msg = next(m for m in sockets[1].sent_messages if m["type"] == events.SEAT_DISCONNECTED)
-    assert msg["payload"]["seat_no"] == 2 and positions_in(msg["payload"]) == []
+    await eventually(lambda: PLAYER_LEFT in types(sockets[1]))
+    msg = next(m for m in sockets[1].sent_messages if m["type"] == PLAYER_LEFT)
+    assert msg["payload"]["seat_no"] == 2 and msg["payload"]["state"] == "reconnecting"
+    assert positions_in(msg["payload"]) == []
 
 
 async def test_resync_game_state_carries_clocks(redis_client, games, delivery):
     state = await start_game(games, "duel", [1, 2])
-    [msg] = await delivery.resync(1)
+    msg, _ = await delivery.resync(1)
     clocks = msg["payload"]["clocks"]
-    assert [c["seat_no"] for c in clocks["seats"]] == [1, 2]
-    assert clocks["current_expires_at_ms"] is not None
+    assert [c["seat_no"] for c in clocks] == [1, 2]
+    assert msg["payload"]["clock_expires_at"].endswith("Z")

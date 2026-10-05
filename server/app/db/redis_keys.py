@@ -51,6 +51,11 @@ def game_clocks(game_id: str) -> str:
     return f"game:{game_id}:clocks"
 
 
+def game_version(game_id: str) -> str:
+    """STRING int — 게임 이벤트의 단조 번호(M3 7단계, 검토 L23). state 와 같은 펜싱 쓰기로 올린다"""
+    return f"game:{game_id}:version"
+
+
 # ----- 데드라인 (시간 체계) -----
 # 게임 시계·접속 시계·매치 ready 기한을 하나의 ZSET 에 담고 워커마다 스위퍼가 훑는다(maze.md §8).
 # score 는 소진 예정 시각(epoch ms, Redis TIME 기준)이고 **힌트일 뿐이다** — 처리는 락 안에서 다시 계산한다.
@@ -160,6 +165,16 @@ def user_activity(user_id: int) -> str:
     return f"user:{user_id}:activity"
 
 
+def user_conn(user_id: int) -> str:
+    """STRING — 그 유저의 현재 WS 연결 id(`<worker_id>:<토큰>`). 클러스터에 연결 하나를 강제한다(4000 교체)"""
+    return f"user:{user_id}:conn"
+
+
+def ws_connect_rate(user_id: int) -> str:
+    """STRING int — 리미터 DB 의 분당 WS 접속 횟수(INCR + EX 60). 네임스페이스로 테스트와 나눈다"""
+    return f"ws:{settings.pubsub_namespace}:connect:{user_id}"
+
+
 # ----- user_activity 의 값 -----
 # 유저는 동시에 하나의 활동에만 속한다 (maze.md §3). 값 자체가 대상 키를 가리킨다
 
@@ -191,7 +206,7 @@ def parse_activity(value: str) -> tuple[str, str]:
 # 워커는 패턴 하나로 전부 구독한다(app/ws/bus.py) — 게임·방 단위로 나눠 두는 것은
 # 나중에 구독 쪽만 동적 SUBSCRIBE 로 바꿀 수 있게 하기 위해서다.
 
-EVENT_SCOPES = ("game", "match", "room")
+EVENT_SCOPES = ("game", "match", "room", "user")
 
 
 def channel_namespace() -> str:
@@ -215,6 +230,11 @@ def match_events(match_id: str) -> str:
 
 def room_events(code: str) -> str:
     return events("room", code)
+
+
+def user_events(user_id: int) -> str:
+    """유저 범위 — 같은 계정의 새 연결을 다른 워커에 알린다(session_replaced)"""
+    return events("user", str(user_id))
 
 
 def event_patterns() -> tuple[str, ...]:

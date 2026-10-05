@@ -15,9 +15,11 @@
   탈락 좌석도 같은 값을 받는다. 위치·벽과 결합되는 값이 없다. 필드 이름은 잠정(§12 확정은 7단계)
 """
 
+from dataclasses import dataclass
 from typing import Optional
 
 from app.games.maze import GameState
+from app.services.maze_clock import GameClocks
 from app.games.maze.core.vision import SeatMemory, edges_payload, game_sight
 from app.services.maze_game import GameMeta, MazeGameService, maze_games
 
@@ -115,13 +117,27 @@ def build_view(
     return view
 
 
-async def game_view(
+@dataclass(frozen=True)
+class GameSnapshot:
+    """한 좌석의 화면과, 같은 읽기에서 나온 전체 상태(와이어 빌더 전용 — 소켓에 그대로 싣지 않는다)"""
+    view: dict
+    state: GameState
+    meta: GameMeta
+    clocks: Optional[GameClocks]
+    version: int
+
+    @property
+    def voided(self) -> bool:
+        return self.clocks is not None and self.clocks.voided
+
+
+async def game_snapshot(
     game_id: str, user_id: int, *, games: MazeGameService = maze_games
-) -> Optional[dict]:
-    """user_id 의 좌석에서 본 현재 화면. 게임이 없거나 좌석이 아니면 None
+) -> Optional[GameSnapshot]:
+    """user_id 의 좌석에서 본 현재 화면 + 그 스냅샷. 게임이 없거나 좌석이 아니면 None
 
     좌석은 인증된 user_id 로만 정한다(meta.seat_of) — 클라이언트가 좌석을 고를 수 없다.
-    락 없이 읽는 스냅샷이다. meta 는 불변이고 state·관측은 MGET 한 번이라 찢어진 읽기가 없다.
+    락 없이 읽는 스냅샷이다. meta 는 불변이고 state·관측·이벤트 번호는 MGET 한 번이라 찢어진 읽기가 없다.
     """
     meta = await games.get_meta(game_id)
     if meta is None:
@@ -129,20 +145,30 @@ async def game_view(
     seat_no = meta.seat_of(user_id)
     if seat_no is None:
         return None
-    state, memories, clocks = await games.load_with_vision(game_id, [seat_no])
+    state, memories, clocks, version = await games.load_with_vision(game_id, [seat_no])
     if state is None:
         return None
     if not spectating(state, meta, seat_no):
-        return build_view(state, meta, seat_no, memories[seat_no],
+        view = build_view(state, meta, seat_no, memories[seat_no],
                           clocks=await games.public_clocks(state, clocks))
+        return GameSnapshot(view, state, meta, clocks, version)
 
     # 관전: 생존자 관측까지 같은 스냅샷으로 다시 읽는다
     survivor_seats = [p.seat_no for p in state.survivors]
-    state, memories, clocks = await games.load_with_vision(game_id, [seat_no, *survivor_seats])
+    state, memories, clocks, version = await games.load_with_vision(game_id, [seat_no, *survivor_seats])
     if state is None:
         return None
-    return build_view(
+    view = build_view(
         state, meta, seat_no, memories[seat_no],
         survivors={s: memories[s] for s in survivor_seats},
         clocks=await games.public_clocks(state, clocks),
     )
+    return GameSnapshot(view, state, meta, clocks, version)
+
+
+async def game_view(
+    game_id: str, user_id: int, *, games: MazeGameService = maze_games
+) -> Optional[dict]:
+    """user_id 의 좌석에서 본 현재 화면(§6 상태 패킷). 게임이 없거나 좌석이 아니면 None"""
+    snapshot = await game_snapshot(game_id, user_id, games=games)
+    return None if snapshot is None else snapshot.view

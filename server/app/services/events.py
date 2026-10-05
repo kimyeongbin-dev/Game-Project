@@ -44,6 +44,14 @@ MATCH_READY = "match_ready"
 MATCH_EXPIRED = "match_expired"
 ROOM_UPDATED = "room_updated"
 ROOM_DISSOLVED = "room_dissolved"
+SESSION_REPLACED = "session_replaced"   # user 범위 — 같은 계정의 새 연결 (M3 7단계)
+
+# room_updated hint 의 change.kind — 수신자별 §12 메시지(player_joined·player_ready·player_left)를 고른다
+ROOM_CREATED = "created"
+ROOM_JOINED = "joined"
+ROOM_LEFT = "left"
+ROOM_READY = "ready"
+ROOM_SETTINGS = "settings"
 
 # last_action.kind — 좌표는 담지 않는다 (§6 "행동 사실은 알리되 위치는 감춘다")
 ACTION_MOVE = "move"
@@ -58,7 +66,7 @@ class Event:
     scope_id: str                 # game_id | match_id | room code
     recipients: tuple[int, ...]   # 사람 user_id
     hint: dict = field(default_factory=dict)
-    seq: int = 0                  # game: turn_count — 수신 측이 낡은 이벤트를 알아본다
+    seq: int = 0                  # game: 게임별 단조 번호(game:{id}:version) — 서비스가 커밋 때 매긴다(검토 L23)
 
     @property
     def channel(self) -> str:
@@ -130,13 +138,15 @@ def game_updated(
     last_action = {"seat_no": seat_no, "kind": action}
     if reason is not None:
         last_action["reason"] = reason
+    # 생존자 수는 공개 정보이고 "통보 시점" 값이다(§9) — 늦게 전달돼도 다시 읽은 상태로 세지 않게 싣는다
+    if action == ACTION_ELIMINATED:
+        last_action["survivors"] = len(state.survivors)
     return Event(
         kind=GAME_UPDATED,
         scope="game",
         scope_id=meta.game_id,
         recipients=_unique(meta.human_user_ids),
         hint={"last_action": last_action, "ended": ended},
-        seq=state.turn_count,
     )
 
 
@@ -150,26 +160,24 @@ def game_voided(game_id: str, recipients: Iterable[Optional[int]]) -> Event:
     )
 
 
-def seat_disconnected(meta: "GameMeta", seat_no: int, grace_remaining_ms: int, turn_count: int) -> Event:
+def seat_disconnected(meta: "GameMeta", seat_no: int, grace_remaining_ms: int, survivors: int) -> Event:
     """접속 시계가 흐르기 시작했다 (§9 `player_left state=reconnecting`). 남은 접속 시계는 공개 정보다(§8)"""
     return Event(
         kind=SEAT_DISCONNECTED,
         scope="game",
         scope_id=meta.game_id,
         recipients=_unique(meta.human_user_ids),
-        hint={"seat_no": seat_no, "grace_remaining_ms": grace_remaining_ms},
-        seq=turn_count,
+        hint={"seat_no": seat_no, "grace_remaining_ms": grace_remaining_ms, "survivors": survivors},
     )
 
 
-def seat_reconnected(meta: "GameMeta", seat_no: int, turn_count: int) -> Event:
+def seat_reconnected(meta: "GameMeta", seat_no: int) -> Event:
     return Event(
         kind=SEAT_RECONNECTED,
         scope="game",
         scope_id=meta.game_id,
         recipients=_unique(meta.human_user_ids),
         hint={"seat_no": seat_no},
-        seq=turn_count,
     )
 
 
@@ -177,7 +185,7 @@ def seat_reconnected(meta: "GameMeta", seat_no: int, turn_count: int) -> Event:
 
 def _match_players(match: "PendingMatch") -> list[dict]:
     return [
-        {"seat_no": p.seat_no, "user_id": p.user_id, "nickname": p.nickname, "ready": p.ready}
+        {"seat_no": p.seat_no, "user_id": p.user_id, "nickname": p.nickname, "mmr": p.mmr, "ready": p.ready}
         for p in match.players
     ]
 
@@ -213,7 +221,8 @@ def match_expired(match: "PendingMatch", result: "ExpireResult") -> Event:
         scope="match",
         scope_id=match.match_id,
         recipients=_unique([*result.requeued, *result.dropped]),
-        hint={"requeued": list(result.requeued), "dropped": list(result.dropped)},
+        hint={"game": match.game, "mode": match.mode,
+              "requeued": list(result.requeued), "dropped": list(result.dropped)},
     )
 
 
@@ -236,14 +245,20 @@ def room_snapshot(room: "Room") -> dict:
     }
 
 
-def room_updated(room: "Room", *, also_notify: Iterable[int] = ()) -> Event:
-    """also_notify: 방에서 막 나간 사람처럼 room.players 에 없지만 알아야 하는 유저"""
+def room_updated(room: "Room", change: str, actor_user_id: int, seat_no: Optional[int] = None,
+                 *, also_notify: Iterable[int] = ()) -> Event:
+    """change: 무엇이 바뀌었나(ROOM_*), actor: 바꾼 사람 — 그 사람은 핸들러 응답으로 받으므로 버스가 건너뛴다.
+    seat_no 는 바뀐 좌석(나간 사람은 나가기 전 좌석). also_notify: 방에서 막 나간 사람처럼 room.players 에 없지만
+    알아야 하는 유저"""
     return Event(
         kind=ROOM_UPDATED,
         scope="room",
         scope_id=room.code,
         recipients=_unique([*room.user_ids, *also_notify]),
-        hint={"room": room_snapshot(room)},
+        hint={
+            "room": room_snapshot(room),
+            "change": {"kind": change, "seat_no": seat_no, "actor_user_id": actor_user_id},
+        },
     )
 
 
@@ -254,4 +269,20 @@ def room_dissolved(result: "LeaveResult") -> Event:
         scope_id=result.room.code,
         recipients=_unique(result.notify_user_ids),
         hint={"code": result.room.code},
+    )
+
+
+# ----- 유저 -----
+
+def session_replaced(user_id: int, conn_id: str) -> Event:
+    """같은 계정의 새 연결 — conn_id 가 아닌 그 유저의 로컬 연결은 4000 으로 닫는다(판단 4)
+
+    conn_id 는 워커 id 를 담는다. 채널은 서버 안쪽(워커들)만 구독하고 클라이언트에는 나가지 않는다.
+    """
+    return Event(
+        kind=SESSION_REPLACED,
+        scope="user",
+        scope_id=str(user_id),
+        recipients=(user_id,),
+        hint={"conn_id": conn_id},
     )

@@ -124,7 +124,8 @@ async def test_action_after_exhaustion_forfeits_first(games, redis_client, fake_
     assert outcome.rejection == "not_in_game"
     seat1 = outcome.state.seat(1)
     assert seat1.is_eliminated and seat1.elimination_reason == "time_forfeit"
-    assert pub.events[-1].hint["last_action"] == {"seat_no": 1, "kind": "eliminated", "reason": "time_forfeit"}
+    assert pub.events[-1].hint["last_action"] == {"seat_no": 1, "kind": "eliminated", "reason": "time_forfeit",
+                                                  "survivors": seats - 1}
     due = await members(redis_client, state.game_id)
     if seats == 2:
         assert outcome.ended and due == {}

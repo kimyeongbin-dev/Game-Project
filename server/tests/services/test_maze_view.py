@@ -283,7 +283,7 @@ async def test_resync_restores_discovered_map(games, redis_client):
     await games.move(state.game_id, users[0], 6, 4)            # (8,4) 북쪽 변은 이제 3×3 밖
 
     messages = await Delivery(games=games).resync(users[0])
-    assert [m["type"] for m in messages] == ["game_state"]
+    assert [m["type"] for m in messages] == ["game_state", "turn_change"]
     view = messages[0]["payload"]
     old = (8, 4, "horizontal", False)
     assert old in as_set(view["discovered_edges"])

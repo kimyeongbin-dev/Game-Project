@@ -21,7 +21,7 @@ import asyncio
 import json
 import logging
 import random
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Callable, Optional, Sequence
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -192,6 +192,7 @@ class _Tx:
     now: int
     outages: list[Interval]
     raw_meta: str = ""
+    version: int = 0               # 마지막으로 커밋된 이벤트 번호 (검토 L23)
     prev_owners: dict[int, Optional[str]] = field(default_factory=dict)
     outbox: list[events.Event] = field(default_factory=list)
     expired: list[tuple[int, str]] = field(default_factory=list)
@@ -332,6 +333,7 @@ class MazeGameService:
                     pipe.set(keys.game_state(state.game_id), json.dumps(state.to_dict()))
                     pipe.set(keys.game_meta(state.game_id), meta.to_json())
                     pipe.set(keys.game_clocks(state.game_id), json.dumps(clocks.to_dict()))
+                    pipe.set(keys.game_version(state.game_id), "1")  # game_started 가 1번
                     for p in state.seats:  # 초기 관측 (turn 0)
                         pipe.set(keys.game_vision(state.game_id, p.seat_no),
                                  _encode_memory(_observe(state, p.seat_no, SeatMemory())))
@@ -343,7 +345,7 @@ class MazeGameService:
             # Redis 에 상태가 없으면 이 게임은 진행할 수 없다 — DB 행을 무효로 닫는다
             await self._void_record(state.game_id)
             raise
-        await self._publisher.publish(events.game_started(meta))
+        await self._publisher.publish(replace(events.game_started(meta), seq=1))
         return state
 
     async def load_game(self, game_id: str) -> Optional[GameState]:
@@ -355,20 +357,20 @@ class MazeGameService:
 
     async def load_with_vision(
         self, game_id: str, seat_nos: Sequence[int]
-    ) -> tuple[Optional[GameState], dict[int, SeatMemory], Optional[GameClocks]]:
-        """state·시계와 지정한 좌석들의 누적 관측을 MGET 한 번으로 — 찢어진 읽기가 없는 스냅샷"""
+    ) -> tuple[Optional[GameState], dict[int, SeatMemory], Optional[GameClocks], int]:
+        """state·시계·이벤트 번호와 지정한 좌석들의 누적 관측을 MGET 한 번으로 — 찢어진 읽기가 없는 스냅샷"""
         redis = require_redis()
         async with store_errors():
-            raw_state, raw_clocks, *raw_vision = await redis.mget(
-                keys.game_state(game_id), keys.game_clocks(game_id),
+            raw_state, raw_clocks, raw_version, *raw_vision = await redis.mget(
+                keys.game_state(game_id), keys.game_clocks(game_id), keys.game_version(game_id),
                 *(keys.game_vision(game_id, s) for s in seat_nos),
             )
         if raw_state is None:
-            return None, {}, None
+            return None, {}, None, 0
         clocks = _decode_clocks(raw_clocks) if raw_clocks is not None else None
         return _decode_state(raw_state), {
             s: _decode_memory(raw) for s, raw in zip(seat_nos, raw_vision)
-        }, clocks
+        }, clocks, int(raw_version or 0)
 
     async def public_clocks(self, state: GameState, clocks: Optional[GameClocks]) -> Optional[dict]:
         """전원에게 공개하는 시계 잔량 — 지금 시각(Redis TIME) 기준 지연 정산 값 (§8)"""
@@ -459,7 +461,7 @@ class MazeGameService:
             seat = tx.clocks.seat(seat_no)
             remaining = max(0, tx.clocks.conn_remaining(seat_no, tx.now, tx.outages))
             if fresh:
-                tx.outbox.append(events.seat_disconnected(tx.meta, seat_no, remaining, tx.state.turn_count))
+                tx.outbox.append(events.seat_disconnected(tx.meta, seat_no, remaining, len(tx.state.survivors)))
             return Disconnection(seat_no, seat.disconnected_at_ms, remaining)
 
         result, _, _ = await self._run(game_id, step)
@@ -497,7 +499,7 @@ class MazeGameService:
                 return False
             tx.clocks.disconnect(seat_no, max(at_ms, tx.clocks.latest_ms()))
             remaining = max(0, tx.clocks.conn_remaining(seat_no, tx.now, tx.outages))
-            tx.outbox.append(events.seat_disconnected(tx.meta, seat_no, remaining, tx.state.turn_count))
+            tx.outbox.append(events.seat_disconnected(tx.meta, seat_no, remaining, len(tx.state.survivors)))
             return True
 
         result, _, _ = await self._run(game_id, step)
@@ -626,9 +628,9 @@ class MazeGameService:
         try:
             async with redis_lock(redis, lock_key) as token:
                 async with store_errors():
-                    raw_state, raw_meta, raw_clocks, raw_alive = await redis.mget(
+                    raw_state, raw_meta, raw_clocks, raw_alive, raw_version = await redis.mget(
                         keys.game_state(game_id), keys.game_meta(game_id), keys.game_clocks(game_id),
-                        keys.store_alive(),
+                        keys.store_alive(), keys.game_version(game_id),
                     )
                 if raw_state is None or raw_meta is None:
                     raise GameNotFound(game_id)
@@ -647,7 +649,7 @@ class MazeGameService:
                     *outages.provisional(raw_alive, now, settings.store_outage_min_ms),
                 ])
                 tx = _Tx(state=state, meta=GameMeta.from_json(raw_meta), clocks=clocks,
-                         now=now, outages=exempt, raw_meta=raw_meta,
+                         now=now, outages=exempt, raw_meta=raw_meta, version=int(raw_version or 0),
                          prev_owners={s.seat_no: s.owner for s in clocks.seats})
                 was_closed = tx.closed
                 if not was_closed and self._void_due(tx, void_before_ms):
@@ -657,6 +659,8 @@ class MazeGameService:
                 result = step(tx)  # 닫힌 게임이면 step 이 스스로 거절한다(game_already_ended 등)
                 ended = tx.closed and not was_closed
 
+                # 커밋되는 이벤트만 번호를 받는다 — 같은 쓰기에서 version 을 올린다(검토 L23)
+                tx.outbox = [replace(e, seq=tx.version + i) for i, e in enumerate(tx.outbox, start=1)]
                 # 이미 닫힌 게임은 쓰지 않는다 — 바뀔 것이 없고, 쓰면 종료 TTL 이 키마다 엇갈려 연장된다(검토 L22)
                 if not was_closed:
                     await self._commit(redis, lock_key, token, tx)
@@ -735,7 +739,7 @@ class MazeGameService:
     def _reconnect(self, tx: _Tx, seat_no: int) -> bool:
         if not tx.clocks.reconnect(seat_no, tx.current, tx.now, tx.outages):
             return False
-        tx.outbox.append(events.seat_reconnected(tx.meta, seat_no, tx.state.turn_count))
+        tx.outbox.append(events.seat_reconnected(tx.meta, seat_no))
         return True
 
     async def _commit(self, redis, lock_key: str, token: str, tx: _Tx) -> None:
@@ -744,6 +748,7 @@ class MazeGameService:
         items = {
             keys.game_state(gid): json.dumps(tx.state.to_dict()),
             keys.game_clocks(gid): json.dumps(tx.clocks.to_dict()),
+            keys.game_version(gid): str(tx.version + len(tx.outbox)),
         }
         if tx.observe:
             # 남의 행동도 내 시야를 바꾼다 — 좌석 전원을 state 와 한 번에 쓴다.
@@ -784,8 +789,9 @@ class MazeGameService:
         try:
             async with redis_lock(redis, keys.game_lock(game_id)):
                 async with store_errors():
-                    raw_state, raw_meta, raw_result = await redis.mget(
-                        keys.game_state(game_id), keys.game_meta(game_id), keys.game_result(game_id)
+                    raw_state, raw_meta, raw_result, raw_version = await redis.mget(
+                        keys.game_state(game_id), keys.game_meta(game_id), keys.game_result(game_id),
+                        keys.game_version(game_id),
                     )
                 if raw_state is not None or raw_result is not None:
                     return False  # 살아 있거나, 끝났는데 DB 기록만 밀린 게임 — 무효가 아니다
@@ -795,6 +801,7 @@ class MazeGameService:
                     async with redis.pipeline(transaction=True) as pipe:
                         pipe.delete(
                             keys.game_state(game_id), keys.game_meta(game_id), keys.game_clocks(game_id),
+                            keys.game_version(game_id),
                             *(keys.game_vision(game_id, s) for s in seat_nos),
                         )
                         pipe.zrem(keys.deadlines(GAME), keys.deadline_clock(game_id),
@@ -813,7 +820,8 @@ class MazeGameService:
             recipients = db_recipients
         else:
             return False
-        await self._publisher.publish(events.game_voided(game_id, recipients))
+        await self._publisher.publish(replace(events.game_voided(game_id, recipients),
+                                              seq=int(raw_version or 0) + 1))
         for user_id in recipients:
             await activity.release(redis, user_id, keys.activity_game(game_id))
         return True
