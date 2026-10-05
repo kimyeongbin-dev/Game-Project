@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.ranking import router as ranking_router
 from app.api.users import router as users_router
+from app.ws.maze_handler import router as maze_ws_router
 from app.core.config import settings
 from app.db import close_db, init_db, is_db_available
 from app.db.redis import close_redis, init_redis, is_redis_available, redis_health
@@ -129,11 +130,11 @@ async def health_check():
 # ---------------------------------------------------------------------------
 # 라우터
 #
-# NOTE: WebSocket 라우터는 아직 없다. maze WS 핸들러는 M3 7단계에서 새로
-#       작성해 여기 등록한다 (docs/ROADMAP.md, app/ws/__init__.py)
+# maze WS(`/api/v1/ws/maze`, docs/api/games/maze.md §12) — M3 7단계
 # ---------------------------------------------------------------------------
 app.include_router(users_router)
 app.include_router(ranking_router)
+app.include_router(maze_ws_router)
 
 
 if __name__ == "__main__":

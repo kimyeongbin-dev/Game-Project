@@ -15,6 +15,7 @@ import logging
 from typing import Optional
 
 from app.core.time import Clock, redis_clock
+from app.core.worker import WORKER_ID
 from app.db import redis_keys as keys
 from app.db.redis_lock import require_redis
 from app.schemas.ws_messages import WSMessageType as T
@@ -43,11 +44,14 @@ class Delivery:
         room_service: Rooms = rooms,
         match_service: Matchmaking = matchmaking,
         clock: Clock = redis_clock,
+        worker_id: Optional[str] = None,
     ):
         self._games = games
         self._rooms = room_service
         self._matches = match_service
         self._clock = clock
+        # 게임이 시작되면 이 워커에 붙은 좌석의 소유를 기록한다 — 시작 직후 크래시해도 스위퍼가 그 좌석을 찾는다(H4)
+        self._worker_id = worker_id
 
     # ----- 이벤트 -----
 
@@ -72,6 +76,7 @@ class Delivery:
         view = snap.view
 
         if event.kind == events.GAME_STARTED:
+            await self._claim_seat(game_id, user_id)
             return [
                 server_message(T.GAME_START, wire.game_start_payload(snap.meta, view["me"]["seat_no"]), version=v),
                 server_message(T.GAME_STATE, wire.game_state_payload(view), version=v),
@@ -100,6 +105,14 @@ class Delivery:
         return []
 
 
+    async def _claim_seat(self, game_id: str, user_id: int) -> None:
+        if self._worker_id is None:
+            return
+        try:
+            await self._games.mark_connected(game_id, user_id, worker_id=self._worker_id)
+        except Exception:  # 다음 재접속·행동이 다시 기록한다 — 전달을 막지 않는다
+            logger.warning("Could not record seat owner for user %s in game %s", user_id, game_id)
+
     @staticmethod
     def _end(snap: GameSnapshot, v: int) -> dict:
         return server_message(
@@ -125,6 +138,8 @@ class Delivery:
             return [server_message(T.MATCHED, wire.matched_payload(
                 event.scope_id, hint, _my_seat(hint["players"], user_id), now))]
         if event.kind == events.MATCH_READY:
+            if _my_seat(hint["players"], user_id) == hint["seat_no"]:
+                return []  # 준비한 사람은 핸들러 응답으로 받았다
             return [server_message(T.PLAYER_READY, {"seat_no": hint["seat_no"]})]
         if event.kind == events.MATCH_EXPIRED:
             if user_id in hint["requeued"]:
@@ -199,4 +214,4 @@ class Delivery:
         return [server_message(T.GAME_STATE, wire.game_state_payload(snap.view), version=v), last]
 
 
-delivery = Delivery()
+delivery = Delivery(worker_id=WORKER_ID)

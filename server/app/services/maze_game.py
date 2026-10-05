@@ -485,6 +485,24 @@ class MazeGameService:
         result, _, _ = await self._run(game_id, step)
         return result
 
+    async def leave_eliminated(self, game_id: str, user_id: int) -> Optional[int]:
+        """탈락한 좌석(또는 끝난 게임)이 구경을 그만두고 나간다 — activity 만 해제한다 (§9 "구경하지 않고 나가도")
+
+        결과는 종료 시 그대로 기록된다(좌석·순위는 state 에 있다). 해제했으면 그 좌석 번호, 아직 생존 좌석이면 None —
+        생존 좌석의 이탈은 항복이다(호출자가 surrender). 좌석이 아니면 MultiplayerError(not_in_game).
+        """
+        meta = await self.get_meta(game_id)
+        state = await self.load_game(game_id)
+        if meta is None or state is None:
+            raise GameNotFound(game_id)
+        seat_no = meta.seat_of(user_id)
+        if seat_no is None:
+            raise MultiplayerError("not_in_game")
+        if not (state.is_finished or state.seat(seat_no).is_eliminated):
+            return None
+        await activity.release(require_redis(), user_id, keys.activity_game(game_id))
+        return seat_no
+
     async def drop_seat(self, game_id: str, seat_no: int, *, owner: str, at_ms: int) -> bool:
         """죽은 워커가 가진 연결을 끊김으로 — 그 워커의 마지막 하트비트 시각부터 접속 시계가 흐른다 (검토 H4)
 

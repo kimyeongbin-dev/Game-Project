@@ -9,6 +9,8 @@ WebSocket 연결 관리 — 이 워커 프로세스의 소켓만 안다
 """
 
 import logging
+import secrets
+import time
 from typing import Dict, Optional
 from fastapi import WebSocket
 from dataclasses import dataclass, field
@@ -18,13 +20,28 @@ from app.core.time import utcnow
 logger = logging.getLogger(__name__)
 
 
+def _monotonic_ms() -> int:
+    return time.monotonic_ns() // 1_000_000
+
+
 @dataclass
 class PlayerConnection:
-    """플레이어 연결 정보"""
+    """플레이어 연결 정보
+
+    replaced: 같은 계정의 새 연결이 이 연결을 밀어냈다(4000). 핸들러는 이 연결의 끝을 **끊김으로 치지 않는다**.
+    accepted_ms·last_inbound_ms: 단조 시계 — 반개방 끊김 소급(L19)의 하한
+    """
     websocket: WebSocket
     user_id: int
     nickname: str
     connected_at: datetime = field(default_factory=utcnow)
+    conn_id: str = field(default_factory=lambda: secrets.token_hex(8))
+    replaced: bool = False
+    accepted_ms: int = field(default_factory=_monotonic_ms)
+    last_inbound_ms: int = field(default_factory=_monotonic_ms)
+
+    def touch(self) -> None:
+        self.last_inbound_ms = _monotonic_ms()
 
 
 class ConnectionManager:
@@ -38,9 +55,10 @@ class ConnectionManager:
         """새 연결 등록"""
         await websocket.accept()
 
-        # 기존 연결이 있으면 끊기
+        # 기존 연결이 있으면 끊기 — 끊김으로 치지 않도록 먼저 표시한다
         if user_id in self._connections:
             old_conn = self._connections[user_id]
+            old_conn.replaced = True
             try:
                 await old_conn.websocket.close(code=4000, reason="다른 기기에서 연결됨")
             except Exception:
@@ -69,6 +87,19 @@ class ConnectionManager:
 
         del self._connections[user_id]
         logger.info(f"WebSocket disconnected: {conn.nickname} (user_id={user_id})")
+
+    async def replace_if_stale(self, user_id: int, current_conn_id: str) -> bool:
+        """다른 워커에 같은 계정의 새 연결(current_conn_id)이 생겼다 — 이 워커의 옛 연결을 4000 으로 닫는다"""
+        conn = self._connections.get(user_id)
+        if conn is None or conn.conn_id == current_conn_id:
+            return False
+        conn.replaced = True
+        del self._connections[user_id]
+        try:
+            await conn.websocket.close(code=4000, reason="다른 기기에서 연결됨")
+        except Exception:
+            pass
+        return True
 
     def get_connection(self, user_id: int) -> Optional[PlayerConnection]:
         """연결 정보 조회"""
