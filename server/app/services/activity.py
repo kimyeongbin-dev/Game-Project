@@ -4,7 +4,7 @@
 "한 사용자는 동시에 하나의 큐에만 들어간다"(maze.md §3)와 방·큐 동시 참가 금지를
 `user:{uid}:activity` 의 `SET NX` 하나로 원자적으로 지킨다. 전이(queue → match → game,
 room → game)와 해제는 기대값 비교(CAS)로만 한다 — 다른 경로가 이미 바꾼 값을 덮지 않는다.
-재접속 시 진행 중 게임을 찾는 색인도 이 키다(7단계).
+재접속 시 진행 중 게임을 찾는 색인도 이 키다(`app/ws/maze_handler.py`).
 """
 
 from typing import Optional
@@ -44,7 +44,7 @@ return 0
 
 
 class MultiplayerError(Exception):
-    """§13 에러 코드를 가진 도메인 오류. 핸들러(7단계)가 code 를 그대로 보낸다"""
+    """§13 에러 코드를 가진 도메인 오류. 핸들러가 code 를 고정 문구와 함께 보낸다(app/ws/protocol.py)"""
 
     def __init__(self, code: str):
         super().__init__(code)

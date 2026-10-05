@@ -11,7 +11,7 @@ docs/api/games/maze.md §8: 게임 상태의 권위는 Redis `game:<id>:state` �
 - 좌석별 누적 시야(`game:<id>:vision:<seat_no>`, maze.md §6)는 수락된 행동마다 생존 좌석 전원을
   다시 관측해 state 와 **같은 펜싱 쓰기 한 번**으로 기록한다. 탈락 좌석은 탈락 직전 관측으로 동결된다
 - 상태를 쓴 직후(락 안에서) 이벤트를 발행만 한다(`app/services/events.py`). 소켓 전송은 ws 계층
-  구독 버스가 한다. 거절은 발행하지 않는다 — 행동한 사람에게만 응답한다(핸들러, 7단계)
+  구독 버스가 한다. 거절은 발행하지 않는다 — 행동한 사람에게만 응답한다(app/ws/maze_handler.py)
 - 시간 체계(maze.md §8·§9, M3 6단계): 좌석별 게임 시계·접속 시계(`game:<id>:clocks`, 계산은
   `maze_clock.py`)와 데드라인 색인(`deadlines:<game>`)을 state 와 **같은 펜싱 쓰기 한 번**으로 기록한다.
   시각은 Redis TIME(주입 가능). 모든 처리는 맨 앞에서 소진된 시계를 먼저 탈락 처리한다(지연 보정)
@@ -446,7 +446,7 @@ class MazeGameService:
             return ActionOutcome("not_your_turn", state, False)
         return None
 
-    # ----- 연결 (7단계 핸들러가 부른다 — user_id 는 인증된 연결에서만) -----
+    # ----- 연결 (WS 핸들러·런타임이 부른다 — user_id 는 인증된 연결에서만) -----
 
     async def mark_disconnected(self, game_id: str, user_id: int, *,
                                 worker_id: Optional[str] = None) -> Optional[Disconnection]:

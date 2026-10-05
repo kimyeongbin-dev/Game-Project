@@ -831,6 +831,7 @@ Redis와 이중 기록이 되고 정합성 문제가 생긴다. 방 기록이 �
 | `{ns}:game:{id}:events` | Pub/Sub 채널 | 이벤트 JSON `{kind, scope, scope_id, recipients, hint, seq}` — 권위 없음 | — | 게임 서비스(상태를 쓴 직후, 락 안) | 워커별 구독 버스 |
 | `{ns}:match:{id}:events` | Pub/Sub 채널 | 〃 | — | 매치메이킹 | 〃 |
 | `{ns}:room:{code}:events` | Pub/Sub 채널 | 〃 | — | 방 서비스 | 〃 |
+| `{ns}:user:{uid}:events` | Pub/Sub 채널 | 연결 제어 `session_replaced {conn_id}` — 메시지가 아니다(M3 7단계) | — | WS 핸들러 | 〃 (그 유저의 옛 연결을 4000 으로 닫는다) |
 | `game:{id}:vision:{seat_no}` | STRING | 좌석의 누적 관측 `{v, edges:[[row, col, "h"\|"v", wall]…], last_seen:[{seat_no, row, col, turn}…]}` ([`games/maze.md`](games/maze.md) §6) | state 와 같다 | 게임 서비스 — 생성 시 MULTI, 수락된 행동마다 **state 와 같은 펜싱 쓰기 한 번**(M3 5단계) | 좌석별 화면(자기 좌석 키만), 탈락자 관전 패킷 |
 | `game:{id}:clocks` | STRING | `{v, turn_started_at_ms, stopped_at_ms, started_at_ms, seats:[{seat_no, remaining_ms, conn_remaining_ms, disconnected_at_ms, grace:[[from, until]…], frozen}]}` — 마지막 정산 시점의 두 시계 ([`games/maze.md`](games/maze.md) §8) | state 와 같다 | 게임 서비스 — 생성 시 MULTI, 이후 **state 와 같은 펜싱 쓰기 한 번**(M3 6단계) | 게임 서비스, 좌석별 화면(공개 잔량) |
 | `deadlines:{game}` | ZSET | member=`clock:<game_id>` \| `grace:<game_id>:<seat_no>` \| `ready:<match_id>`, score=소진 예정 시각(epoch ms, Redis TIME) | 없음 | 게임 서비스(펜싱 쓰기 Lua 안), 매치메이킹(매치 기록과 MULTI), 스위퍼(리스 클레임) | 스위퍼 |
@@ -839,6 +840,9 @@ Redis와 이중 기록이 되고 정합성 문제가 생긴다. 방 기록이 �
 | `store:alive` | STRING | 전역 하트비트 — 어느 워커든 스위퍼 회차가 Redis 에 마지막으로 성공한 시각(epoch ms). 이후 공백 = 장애 | 없음 | 스위퍼(하트비트 Lua — 공백이면 `store:outages` 에 함께 기록) | 시계 정산(잠정 면제) |
 | `store:workers` | ZSET | member=워커 id(`app/core/worker.py`), score=그 워커의 마지막 하트비트 | 없음(다 처리한 죽은 워커는 제거) | 스위퍼(자기 하트비트, 죽은 워커 리스 클레임) | 스위퍼 |
 | `store:workers:{wid}:seats` | ZSET | member=`<game_id>:<seat_no>` — 그 워커가 연결을 가진 좌석 | 없음 | 게임 서비스 — **시계와 같은 펜싱 쓰기**(소유가 바뀐 만큼 이동) | 스위퍼(죽은 워커의 좌석을 끊김으로) |
+| `game:{id}:version` | STRING | 게임 이벤트 번호(정수) — 커밋되는 이벤트마다 +1, 와이어 `version`([`games/maze.md`](games/maze.md) §1) | state 와 같다 | 게임 서비스 — **state 와 같은 펜싱 쓰기**(M3 7단계, 검토 L23) | 게임 서비스, 좌석별 화면(재동기화 번호) |
+| `user:{uid}:conn` | STRING | 그 유저의 현재 WS 연결 id `<worker_id>:<토큰>` — 클러스터에 연결 하나 | 없음(다음 접속이 덮는다) | WS 핸들러(접속 시 `SET … GET`) | WS 핸들러(이전 연결이 다른 워커면 `session_replaced` 발행) |
+| `ws:{ns}:connect:{uid}` | STRING | 분당 WS 접속 수 — **리미터 논리 DB**(앱 상태 DB 가 아니다) | `EX 60`(첫 INCR 때) | WS 핸들러(INCR) | WS 핸들러(`ws_connect_per_minute` 초과면 1013) |
 | `store:outages` | ZSET | member=`"<start_ms>-<end_ms>"`, score=end_ms — 스위퍼가 관측한 Redis 장애 구간 | 원소별 `outage_retention_sec`(86400) 뒤 정리 | 스위퍼 | 시계 정산(면제 구간) |
 
 **설계 근거**
@@ -881,6 +885,9 @@ Redis와 이중 기록이 되고 정합성 문제가 생긴다. 방 기록이 �
   같은 Redis 를 쓰는 테스트의 이벤트가 앱 워커로 간다. 그래서 `PUBSUB_NAMESPACE`(앱 `app`, 테스트 `test`)를 접두어로
   붙인다. DB 번호에서 파생하지 않는다 — 격리가 "테스트는 DB 1" 이라는 다른 약속에 기대면 그 약속이 바뀔 때 조용히
   깨진다. 테스트 픽스처는 `test` 가 아니면 중단하고, production 은 `test` 로 기동하지 않는다
+- **방송은 §12 이름으로 바꿔 보낸다(M3 7단계).** 이벤트 kind 는 서비스 어휘이고, 수신자별 와이어 메시지는 `app/ws/delivery.py`
+  한 곳이 만든다 — 대응 표는 [`games/maze.md`](games/maze.md) §12 "내부 이벤트 → 와이어". 게임 이벤트의 `seq` 는 게임별
+  이벤트 번호(`game:{id}:version`)이고, 수락된 이벤트만 같은 쓰기에서 번호를 받는다
 - **끊기면 재구독 → 재동기화.** 버스는 지수 백오프로 새 연결에 다시 구독하고, 직후 자기 소켓 전원에게 각자의
   활동(`user:{uid}:activity`)에 맞는 현재 상태를 보낸다. 유실된 이벤트는 이것으로 메워진다
 
@@ -961,11 +968,11 @@ Fog of War 정책(전체 공개 vs 플레이어 시점 재생)과 함께 재설�
 
 구 Quoridor 2P 프로토콜이다. 1인칭 미로 프로토콜로 재설계한다
 ([`games/maze.md`](games/maze.md)). 기존 `WSMessageType` 25종 어휘는 재사용한다(정의 파일 `app/schemas/ws_messages.py` 는
-M3 3단계에서 `ws_game` 과 함께 삭제했다 — 7단계에서 git 히스토리를 참고해 다시 정의한다).
+M3 3단계에서 `ws_game` 과 함께 삭제했고 7단계에서 같은 어휘로 다시 정의했다).
 
 구 핸들러 `app/ws/ws_game.py` 는 M3 3단계에서 **삭제했다**. maze WS 핸들러는 M3 7단계에서
 3단계 서비스(`app/services/maze_game.py`·`matchmaking.py`·`rooms.py`)를 대상으로 새로 작성해
-`app/main.py` 에 등록한다.
+`app/main.py` 에 등록했다 — `WEBSOCKET /api/v1/ws/maze`(`app/ws/maze_handler.py`, 어휘는 `app/schemas/ws_messages.py`).
 
 ---
 

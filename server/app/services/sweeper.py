@@ -18,7 +18,7 @@
   Redis 가 통째로 비면 ZSET 도 사라지므로 출처는 DB 다. 생성 직후(DB 먼저 → Redis) 오탐을 피하려고
   `lost_game_min_age_sec` 보다 오래된 것만 본다. 점검 락으로 주기마다 한 워커만 한다
 
-lifespan 배선(start/stop)은 7단계다. 프로세스 로컬 상태는 루프 태스크와 장애 관측뿐이다.
+lifespan 배선(start/stop)은 `app/ws/runtime.py`(M3 7단계). 프로세스 로컬 상태는 루프 태스크와 장애 관측뿐이다.
 """
 
 import asyncio
@@ -152,7 +152,7 @@ class DeadlineSweeper:
     def running(self) -> bool:
         return self._task is not None and not self._task.done()
 
-    # ----- 루프 (7단계 lifespan 이 부른다) -----
+    # ----- 루프 (app/ws/runtime.py 가 lifespan 에서 부른다) -----
 
     async def start(self) -> None:
         if self._task is None:

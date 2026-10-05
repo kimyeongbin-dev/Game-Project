@@ -84,6 +84,7 @@ REST의 `data` 봉투와 달리 WebSocket은 `type`으로 분기한다.
 | `type` | `WSMessageType` 값 (§12) |
 | `seq` | 클라이언트 → 서버에만. 요청 일련번호. 서버 응답·에러에 `ack_seq`로 되돌려 준다 |
 | `payload` | 타입별 본문 |
+| `version` | 서버 → 클라이언트, **게임 범위 메시지에만**(M3 7단계). 게임별 단조 이벤트 번호(아래) |
 
 서버 → 클라이언트 에러는 공통 규약의 필드명을 유지한다.
 
@@ -91,6 +92,23 @@ REST의 `data` 봉투와 달리 WebSocket은 `type`으로 분기한다.
 { "type": "error", "ack_seq": 12,
   "payload": { "error": "not_your_turn", "message": "내 차례가 아닙니다." } }
 ```
+
+**응답 규약 (M3 7단계 확정)**
+
+- **수락된 게임 행동(`move`·`wall`·`surrender`)에는 직접 응답이 없다.** 행위자도 수신자이므로 다른 좌석과 같은 경로로
+  `game_state`·`turn_change` 를 받는다(출처 하나). 거절만 `error`(`ack_seq`) 로 온다
+- 큐·방 요청은 `ack_seq` 를 단 응답을 받는다(`queue_joined`·`room_created`·`room_joined`·`player_ready`·`player_left`·
+  `queue_status`). 같은 변화는 **바꾼 사람에게 다시 방송하지 않는다**
+- `error.message` 는 코드별 **고정 문구**다. 예외 내용·좌표를 싣지 않는다 — 클라이언트는 `error` 코드로만 분기한다
+- `payload` 에 정의되지 않은 필드는 **버린다**. 좌석·유저·시각을 실어도 아무 효과가 없다(좌석은 인증된 유저로 서버가 정하고,
+  시각은 서버가 찍는다). 좌표 범위·방향 값은 엔진이 판정한다(§7 "범위 밖은 세지 않는다")
+- 메시지 하나는 4 KiB 이하(`--ws-max-size`). 넘으면 서버가 1009 로 닫는다
+
+**`version` — 게임 이벤트 번호.** 게임마다 1부터 하나씩 오르는 정수다(`game_start` = 1). 한 이벤트에서 나온 메시지 여러 개는
+같은 번호를 단다(예: `player_left` + `game_state` + `turn_change`). 재접속·재동기화의 `game_state` 는 **지금 번호**를 단다.
+클라이언트 규칙: **마지막으로 본 번호보다 작으면 버린다**(이미 반영된 낡은 통지). 같으면 받는다. `turn_count` 와는 다르다 —
+끊김·재접속·탈락은 턴을 바꾸지 않지만 번호는 오른다. Pub/Sub 이 at-most-once 라 번호가 건너뛸 수 있다(그 사이는 화면이 이미
+최신 상태로 만들어졌으므로 다시 요청할 필요가 없다).
 
 ---
 
@@ -103,7 +121,11 @@ wss://<host>/api/v1/ws/maze?token=<access_token>
 - 인증은 **연결 수립 시 1회**. 쿼리 파라미터로 access token을 보낸다.
   WebSocket 핸드셰이크는 커스텀 헤더를 브라우저에서 설정할 수 없어 쿼리를 쓴다.
   **access token만** 허용한다 (`typ=access` 검증). 리프레시 토큰은 거부한다.
-- 토큰이 없거나 무효면 핸드셰이크를 수락하지 않고 close code로 끊는다 (§13).
+- 토큰이 없거나 무효면 close code로 끊는다 (§13). **구현은 accept 직후 바로 닫는다** — ASGI 는 accept 전에 닫으면
+  HTTP 403 으로 바꿔 close code 를 전하지 못한다. 닫기 전에는 어떤 메시지도 보내지 않는다 (M3 7단계).
+- 토큰은 HS256 하나만 받는다(`alg` 고정). `exp`·`sub` 필수, `sub` 는 내부 user_id. 토큰은 맞지만 없는 계정도 4001 이다.
+- **쿼리 문자열의 토큰은 서버 로그에 남기지 않는다** — uvicorn 접속 로그가 경로를 쿼리째 찍으므로 `token=` 값을 가린다
+  (`server/app/core/redaction.py`).
 - **익명 계정은 거부한다.** 멀티플레이는 카카오 로그인 필수(§1.1)이므로
   `auth=anonymous` 토큰은 `login_required`로 끊는다.
 - **닉네임이 없으면 거부한다.** 상대에게 표시할 이름이 필요하다
@@ -121,11 +143,16 @@ wss://<host>/api/v1/ws/maze?token=<access_token>
   } }
 ```
 
-`reconnect`는 진행 중인 게임이 있을 때만 포함된다 (§9).
+`reconnect`는 진행 중인 게임이 있을 때만 포함된다 (§9). 닉네임·MMR 은 서버 저장소 값이다(클라이언트 값을 쓰지 않는다).
+**`mmr` 은 지금 언제나 초기값(1000)이다** — MMR 저장소는 인증·MMR 작업 몫이다(임시).
 
-> 같은 계정으로 새 연결이 들어오면 **기존 연결을 끊는다** (close code 4000).
-> 현행 `ConnectionManager.connect`가 이미 이 동작을 한다
-> (`server/app/ws/connection_manager.py:48`) — 재사용한다.
+> 같은 계정으로 새 연결이 들어오면 **기존 연결을 끊는다** (close code 4000) — **워커가 달라도**(M3 7단계). 연결마다
+> `user:{uid}:conn` 에 연결 id 를 쓰고, 이전 값이 다른 워커의 것이면 유저 범위 이벤트로 그 워커가 옛 연결을 닫는다.
+> **밀려난 연결은 끊김으로 치지 않는다** — 상대에게 `player_left` 가 가지 않고 접속 시계도 흐르지 않는다.
+
+> **접속을 거절하는 그 밖의 경우 — 1013(Try Again Later):** 신원 저장소(DB)나 Redis 에 닿지 못할 때(클라이언트 잘못이
+> 아니다), 그리고 **같은 계정의 접속이 분당 `ws_connect_per_minute`(20)를 넘을 때**. 재접속은 매번 게임 락을 잡으므로
+> 연타를 막는다(§13 레이트 리밋).
 
 ---
 
@@ -147,10 +174,11 @@ wss://<host>/api/v1/ws/maze?token=<access_token>
 ```json
 { "type": "queue_joined", "ack_seq": 1,
   "payload": { "mode": "duel", "position": 3, "waiting_count": 7,
-               "estimated_wait_sec": 20 } }
+               "estimated_wait_sec": null } }
 ```
 
-대기 중 주기적으로 `queue_status`가 온다.
+대기 중 주기적으로 `queue_status`가 온다(`queue_status_interval_sec`, 5 s). `estimated_wait_sec` 는 근거 데이터가 생길 때까지
+`null` 이다(M3 7단계). 이 입장으로 곧바로 매칭이 성사되면 `position` 은 0 이고 이어서 `matched` 가 온다.
 
 ### MMR 범위 — Phase 1 은 제한하지 않는다
 
@@ -186,7 +214,7 @@ MMR 자체는 정상적으로 계산·기록하고 리더보드에 쓴다([`../p
 ```json
 { "type": "matched",
   "payload": {
-    "game_id": "8f14e45f-ceea-467a-9a0b-1c2d3e4f5a6b",
+    "match_id": "8f14e45f-ceea-467a-9a0b-1c2d3e4f5a6b",
     "mode": "duel",
     "my_seat_no": 1,
     "players": [
@@ -200,11 +228,20 @@ MMR 자체는 정상적으로 계산·기록하고 리더보드에 쓴다([`../p
 양측이 `ready`를 보내야 시작한다. 기한 내 응답하지 않으면 매칭이 취소되고
 **응답한 쪽만 큐로 복귀**한다.
 
+- 식별자는 `match_id` 다 — 게임은 전원 `ready` 뒤에 생기므로 이 시점에는 `game_id` 가 없다(M3 7단계 정정). 게임 id 는
+  `game_start` 가 준다
+- `ready` 를 보낸 사람은 `player_ready`(`ack_seq`) 응답을, 나머지는 `player_ready { seat_no }` 통지를 받는다. 전원 준비되면
+  응답 대신 `game_start` 가 온다
+- 기한 만료: 복귀한 사람은 `queue_status { …, "requeued": true }`(원래 입장 시각 자리), 응답하지 않은 사람은
+  `queue_status { "position": 0, "waiting_count": 0, "requeued": false }`(큐 밖)
+
 ### 큐 이탈
 
 ```json
 { "type": "leave_queue", "seq": 2 }
 ```
+
+응답은 `queue_status { "position": 0, "left": true }`(`ack_seq`). 매칭이 이미 성사된 뒤(ready 대기)에는 `not_in_queue` 다.
 
 ---
 
@@ -220,15 +257,23 @@ MMR에 반영되지 않는 비랭크 경기다.
 
 ```json
 { "type": "room_created", "ack_seq": 1,
-  "payload": { "room_code": "K7QX2M", "mode": "trio", "capacity": 3, "allow_spectate": false,
-               "players": [ { "seat_no": 1, "nickname": "미로장인", "is_host": true } ] } }
+  "payload": { "room_code": "K7QX2M", "mode": "trio", "capacity": 3, "status": "waiting",
+               "allow_spectate": false,
+               "players": [ { "seat_no": 1, "nickname": "미로장인", "is_host": true, "is_ready": false } ] } }
 ```
 
-방 코드는 6자다 (`server/app/services/rooms.py` `ROOM_CODE_LENGTH = 6`).
+방 코드는 6자다 (`server/app/services/rooms.py` `ROOM_CODE_LENGTH = 6`). 이 **방 페이로드**(`room_code`·`mode`·`capacity`·
+`status`·`allow_spectate`·`players[]`)는 `room_created`·`room_joined` 와 방 통지의 `room` 필드에 같은 모양으로 실린다.
+좌석은 `seat_no` 로만 가리킨다 — `user_id` 는 와이어에 없다(M3 7단계).
 
 | 방 설정 | 기본 | 의미 |
 | :--- | :--- | :--- |
 | `allow_spectate` | `false` | 탈락자가 **관전 전환**(전체 판 + 생존자 시야, §9)을 받는다. 게임 시작 시 게임 meta 에 복사되어 그 게임 동안 바뀌지 않는다. **랭크전에는 없다** — 항상 꺼져 있다 |
+
+**설정 변경 — 대기 중인 방장이 `create_room` 을 다시 보낸다 (M3 7단계 사용자 결정).** 새 메시지 타입을 두지 않는다(§12).
+이미 자기 방의 방장이고 방이 대기 중이며 `mode` 가 같으면 `allow_spectate` 만 바꾸고 `room_joined`(`ack_seq`, 방 전체)로
+답한다. 다른 인원은 `room_joined`(방 전체)를 받는다. 방장이 아니거나 `mode` 가 다르면 `already_in_room`, 시작한 뒤에는
+활동이 게임이라 `already_in_game` 이다.
 
 ### 방 참가
 
@@ -236,13 +281,18 @@ MMR에 반영되지 않는 비랭크 경기다.
 { "type": "join_room", "seq": 1, "payload": { "room_code": "K7QX2M" } }
 ```
 
-참가자에게 `room_joined`, 기존 인원에게 `player_joined`가 간다.
-정원 초과 시 `room_full`.
+참가자에게 `room_joined`(`ack_seq`), 기존 인원에게 `player_joined { seat_no, room }`가 간다.
+정원 초과 시 `room_full`, 없는 코드는 `room_not_found`.
 
 ### 준비와 시작
 
-각자 `ready` → 서로에게 `player_ready` → 전원 준비되면 `game_start`.
-호스트가 이탈하면 방이 해산되고 남은 인원에게 `player_left` 후 방이 닫힌다.
+각자 `ready` → 본인은 `player_ready`(`ack_seq`), 나머지는 `player_ready { seat_no, room }` → 전원 준비되면 `game_start`.
+
+`leave_room`(시작 전) — 본인은 `player_left { seat_no, room_code, room_closed }`(`ack_seq`), 나머지는
+`player_left { seat_no, room }`. 게스트가 나가면 뒤 좌석이 당겨진다(새 `room` 의 좌석 번호를 따른다).
+호스트가 이탈하면 방이 해산되고 남은 인원에게 `player_left { seat_no: 1, room_code, room_closed: true }` 후 방이 닫힌다.
+
+재접속·재동기화 때 방에 있으면 `room_joined`(방 전체)를 받는다.
 
 > **랭크와 친구 대전의 차이:** 친구 대전은 `is_ranked=false`로 기록되며
 > MMR이 변하지 않는다. 결과는 `game_sessions`에 남는다 (전적 표시용).
@@ -394,28 +444,32 @@ MMR에 반영되지 않는 비랭크 경기다.
 ### 턴 전환
 
 ```json
-{ "type": "turn_change",
+{ "type": "turn_change", "version": 14,
   "payload": {
     "current_seat_no": 2,
     "turn_count": 13,
     "last_action": { "seat_no": 1, "kind": "wall" },
     "clocks": [
-      { "seat_no": 1, "remaining_ms": 243500 },
-      { "seat_no": 2, "remaining_ms": 268000 }
+      { "seat_no": 1, "remaining_ms": 243500, "connection_remaining_ms": 60000, "connected": true },
+      { "seat_no": 2, "remaining_ms": 268000, "connection_remaining_ms": 41200, "connected": true }
     ],
-    "clock_expires_at": "2026-10-01T09:34:28Z"
+    "clock_expires_at": "2026-10-01T09:34:28.120Z"
   } }
 ```
 
 | 필드 | 설명 |
 | :--- | :--- |
-| `last_action` | 직전에 **누가 무엇을 했는지**. `kind` 는 `move` \| `wall`. **좌표는 담지 않는다** (§6) |
-| `clocks` | 좌석별 남은 게임 시계 (§8). 전원에게 공개한다 |
-| `clock_expires_at` | `current_seat_no` 의 게임 시계가 0이 되는 시각 |
+| `last_action` | 직전에 **누가 무엇을 했는지**. `kind` 는 `move` \| `wall`. **좌표는 담지 않는다** (§6). 차례가 행동 없이 넘어갔으면 `null`(아래) |
+| `clocks` | 좌석별 남은 게임 시계(`remaining_ms`)·접속 시계(`connection_remaining_ms`)·연결 여부 (§8). 전원에게 공개한다. 보낸 시각 기준 지연 정산 값이다 |
+| `clock_expires_at` | `current_seat_no` 의 게임 시계가 0이 되는 시각. ISO 8601 UTC, ms 정밀도(`.mmmZ`) |
 
 시간패로 차례가 넘어오면 다음 좌석의 시계는 **서버가 그 만료를 처리한 시각부터** 흐른다(§8 "시간패 다음 차례").
 
-게임 시작 직후의 첫 `turn_change` 에는 `last_action` 이 `null` 이다.
+`last_action` 이 `null` 인 경우(M3 7단계 확정): 게임 시작 직후의 첫 `turn_change`, 그리고 **탈락으로 차례가 넘어간 경우**
+— 탈락은 행동이 아니고, 그 사실은 같은 번호의 `player_left`(§9)가 먼저 알린다.
+
+한 행동은 수신자마다 `game_state`(§6) → `turn_change` 순서로, 같은 `version` 으로 온다. 그 행동으로 게임이 끝났으면
+`turn_change` 대신 `game_end`(§10)가 온다.
 
 ---
 
@@ -489,6 +543,9 @@ WebSocket 패킷으로 전송".
 | `others[].walls_remaining` | 상대의 남은 벽 개수 | **공개한다** (아래 근거) |
 | `others[].eliminated` | 탈락 여부 (§9) | **공개한다** |
 | `others[].position` | — | **필드 자체가 없다** |
+| `me.eliminated` · `finished` | 내 탈락 여부, 게임 종료 여부 (M3 7단계) | — |
+| `clocks` · `clock_expires_at` | `turn_change` 와 같은 모양의 공개 시계 (§5·§8). 끝난 게임이면 `clock_expires_at` 은 `null` | — |
+| `spectator` | 친구 방 관전 켬 + **탈락한 좌석에만** (§9) | — |
 
 > 전체 벽 목록 필드는 **존재하지 않는다.** 모든 배열이 이 플레이어가 **실제로
 > 본** 것만 담는다.
@@ -850,6 +907,18 @@ Fog of War가 무너진다.
 앱 레벨 하트비트 메시지를 만들지 않는다 — §12 어휘를 늘리지 않고 같은 일을
 할 수 있다.
 
+**M3 7단계 확정 — 간격 5 s, 타임아웃 5 s** (`ws_ping_interval_sec`·`ws_ping_timeout_sec`, prod CMD 와 같은 값을
+`tests/test_dockerfile_flags.py` 가 검사).
+
+| 끊긴 방식 | 서버가 아는 시점 (실측, `server/spikes/m3_stage7/l19_pilot.py`) |
+| :--- | :--- |
+| 정상 종료·RST(앱 강제 종료 등) | 즉시 |
+| **반개방** — 신호 없이 사라짐(터널·와이파이 단절) | **간격 + 타임아웃 + 10 s**(websockets 의 close 대기, uvicorn 이 노출하지 않는다) = 최대 20 s |
+
+> **알려진 한계 (2026-10-05 사용자 결정):** 반개방 끊김은 감지되기 전까지 접속 시계에서 빠지지 않는다 — 최대 20 s.
+> 끊긴 시각을 앞당겨 기록하는 안(검토 L19)은 **기각**했다. 앱이 받는 종료 코드가 반개방과 RST 모두 1006 이라 구분할 수
+> 없고, 앞당기면 즉시 끊긴 정상 사용자도 그만큼 잃는다. 대신 확인 주기를 줄여(기본 20 s/20 s 면 최대 50 s) 공백을 묶었다.
+
 ### 만료 감지 — Redis ZSET + 스위퍼
 
 감지해야 할 데드라인은 세 종류다(게임 시계·접속 시계·매치 ready 기한). 하나의 정렬 집합에 담고 전용 루프가 훑는다.
@@ -919,6 +988,7 @@ Fog of War가 무너진다.
 | 상한 | 접속 시계는 `server_grace_max`(초기 `30초`)까지, **게임 시계는 `server_grace_game`(초기 `8초`)까지만** 멈춘다. 넘으면 일반 끊김처럼 흐른다. 신 인스턴스 기동 공백 실측은 ≈7 s 다(E4). 게임 시계를 짧게 두는 이유: 두 시계를 30 s 멈추면 재접속을 일부러 늦춰 "끊고 생각하기"로 그만큼 벌 수 있다 — 이득을 교체 공백 정도로 묶는다(2026-10-04 사용자 결정) |
 | 크래시 | 면제하지 않는다. 크래시한 워커는 아무것도 남기지 못하고, 판별하려면 워커 하트비트·좌석별 소속 워커 기록이 추가로 필요하다. 드물고 재기동이 짧아 일반 끊김으로 처리한다 |
 | 적용 방식 (M3 6단계 확정) | **소급.** 끊김은 언제나 일반 끊김으로 기록하고, 워커는 자기가 기록한 최근 끊김을 프로세스 안에 짧게 둔다. lifespan shutdown 이 종료 직전 `server_grace_window_ms`(2 s) 안의 끊김에 `[끊긴 시각, + server_grace_max)` 면제 창을 건다. 시계가 지연 정산이라 그 사이 차감된 것이 없어 소급이 정확하다. 좌석이 **아직 같은 끊김**일 때만 건다 — 그 사이 재접속했거나 다시 끊겼으면 건드리지 않는다 |
+| 기준 시각 (M3 7단계, 검토 M9) | 창의 기준은 lifespan 시각이 아니라 **종료 신호(SIGTERM/SIGINT)를 받은 시각**이다. 워커가 uvicorn 의 신호 처리기를 감싸 그 순간을 남기고(`server/app/ws/runtime.py`), 그 시각 − 2 s 이후의 끊김을 전부 배포 끊김으로 본다 — 끊김 처리가 늦거나 E4 처럼 종료 중인 인스턴스로 붙었다 다시 끊겨도 유예가 남는다. lifespan 은 진행 중인 끊김 처리를 기다린 뒤 소급한다. 신호를 못 봤으면 lifespan 시각이 기준이다 |
 | 유예 중 들어온 행동 | 유예 좌석 본인의 행동은 재접속 뒤에만 가능하다(**행동 = 재접속**, §9) → 창이 그 시각에서 끝나고 정상 판정. 다른 좌석의 행동은 그대로 처리되고, 차례가 유예 좌석으로 넘어가면 그 좌석 게임 시계는 창 끝까지 멈춘다 |
 | 창 오탐 | 종료 직전 2 s 안에 **우연히** 끊긴 좌석도 면제된다. 클라이언트가 배포 시각을 알 수 없어 악용 경로가 아니고 이득은 ≤30 s 한 번이다. close code 로 거르지 않는다(위) |
 
@@ -979,6 +1049,9 @@ Fog of War가 무너진다.
 - **접속 시계는 게임당 누적 60초다**(§8). 끊긴 동안만 줄어들고, **재접속해도
   리셋되지 않는다**
 - 유예 중 나머지에게 `player_left`가 `state: "reconnecting"` 으로 간다
+- **돌아오면 나머지에게 `player_joined { seat_no, state: "reconnected" }`** 가 간다(게임 범위 재사용, M3 7단계 — 새 타입 없음).
+  본인은 `connected`(+`reconnect`) → `game_state` → `turn_change`(끝난 게임이면 `game_end`)를 받는다. 서버는 재동기화를
+  보내기 **전에** 재접속을 기록한다 — 받는 화면에서 이미 내 좌석이 연결 상태다
 - 접속 시계가 0이 되면 `disconnect_forfeit` 으로 **탈락**한다
 - **배포로 끊긴 경우는 예외다.** 서버 유예 동안 접속 시계와 게임 시계가 멈춘다(§8)
 - **행동 = 재접속이다.** 끊김으로 기록된 좌석의 행동이 도착하면 서버는 먼저 재접속으로 처리(끊긴 구간 차감)한 뒤
@@ -998,6 +1071,8 @@ Fog of War가 무너진다.
 ```
 
 게임 시작 전에만 유효하다. 시작 후 이탈은 항복과 동일하게 처리한다.
+**이미 탈락한 좌석**(또는 끝난 게임)의 `leave_room` 은 구경을 그만두고 나가는 것이다 — 활동만 해제하고
+`player_left { seat_no, game_id }`(`ack_seq`)로 답한다. 결과는 종료 시 그대로 기록되고, 바로 큐·방에 들어갈 수 있다(M3 7단계).
 
 ### 항복
 
@@ -1042,7 +1117,7 @@ Fog of War가 무너진다.
 | `state` | `reconnecting`(일시) \| `eliminated`(확정) |
 | `reason` | 탈락 사유 3종. `state: "reconnecting"` 이면 `null` |
 | `grace_remaining_ms` | `state: "reconnecting"` 일 때만. 남은 접속 시계 |
-| `survivors` | 통보 시점의 생존자 수 |
+| `survivors` | 통보 시점의 생존자 수 — 이벤트에 실린 값이다. 통지가 늦게 도착해도 그 뒤 상태로 다시 세지 않는다 |
 
 탈락자의 말은 보드에 남지만 더 이상 움직이지 않는다. 다른 플레이어는 그 말을
 여전히 볼 수 있다(§6). **이동 규칙상 장애물이 아니다** — 살아있는 말과 똑같이
@@ -1056,7 +1131,8 @@ Fog of War가 무너진다.
 
 탈락자는 게임에 남아 **끝까지 진행을 받고, 종료 시 `game_end` 로 순위를 받는다.**
 아무것도 보낼 수 없다 — 행동은 `not_in_game` 이고, `chat` 이 추가되면(§12 유보) 탈락자의
-발신도 막는다. 구경하지 않고 나가도 **결과는 종료 시 그대로 기록**된다(전적·MMR).
+발신도 막는다 — 지금 `chat` 은 생존자에게 `feature_disabled`, 탈락자에게 `not_in_game` 이다. 구경하지 않고 나가도
+(`leave_room`, §9 이탈) **결과는 종료 시 그대로 기록**된다(전적·MMR).
 
 무엇을 구경하는지는 방 설정(§4 `allow_spectate`)이 정한다.
 
@@ -1153,10 +1229,25 @@ Fog of War가 무너진다.
 
 친구 대전(`is_ranked=false`)과 `server_fault` 무효 게임은 `mmr_*` 필드가 `null`이다.
 
+> **임시 (M3 7단계):** MMR 산정·저장소는 인증·MMR 작업 몫이라 **지금은 랭크전도 `mmr_*` 가 `null`** 이다.
+> 그 작업이 들어오면 랭크전만 채운다 — 필드 모양은 바뀌지 않는다.
+
+`game_end` 를 받는 경우(M3 7단계 확정):
+
+- 게임을 끝낸 그 이벤트 하나에서만 — 늦게 도착한 이전 통지가 끝난 상태를 다시 읽어도 `game_end` 를 또 보내지 않는다
+- 무효(`server_fault`): 전원 `result: "void"`, `rank: null`
+- 끝난 게임(종료 TTL 300 s 안)에 재동기화되면 `game_state` 다음에 `game_end`. 다만 종료 처리가 활동을 풀므로 **종료 뒤의 새
+  접속은 그 게임을 찾지 않는다**(`reconnect` 없음) — 종료 순간 끊겨 있던 사람은 결과를 전적 API 로 본다(알려진 한계)
+
 ### 종료 후 최종 상태를 공개한다
 
 `full_board`는 **게임이 끝난 뒤에만** 채워진다. 경기 중에는 어떤 메시지에도
 전체 맵이 포함되지 않는다.
+
+**생성 시점 (M3 7단계 확정):** 따로 저장하지 않고, `game_end` 를 만들 때 Redis 의 최종 state 에서 만든다. 빌더는 진행 중인
+state 로는 만들 수 없다(`server/app/ws/wire.py` — 함수 수준에서 막는다). 무효 게임: 긴 Redis 장애로 닫힌 게임은 state 를
+보존하므로(§8) 채우고, **상태를 잃어 닫힌 게임은 `null`** 이다 — 잃은 판은 보여줄 수 없다. 그때 `results` 는 남은 meta 의 좌석이고,
+meta 까지 잃었으면 빈 배열이다.
 
 ```json
 "full_board": {
@@ -1329,7 +1420,7 @@ M3 3단계에서 정원을 그 테이블에서 받는다(`app/services/matchmaki
 | `player_joined` | 재사용 | — |
 | `player_left` | **변경** | `state`(`reconnecting`\|`eliminated`), `reason`, `grace_remaining_ms`, `survivors` (§9) |
 | `player_ready` | 재사용 | — |
-| `game_start` | **변경** | N인 좌석 정보 |
+| `game_start` | **변경** | N인 좌석 정보 — `game_id`·`mode`·`is_ranked`·`my_seat_no`·`players[]{seat_no, nickname, is_ai}` (M3 7단계) |
 | `game_state` | **전면 변경** | **Fog of War 적용. 플레이어별로 다른 내용.** `discovered_edges` + `visible_edges`(원소에 `wall`) + `visible_players` + `last_seen_players` (§6). 친구 방 관전 켬 + 탈락자에게만 `spectator` (§9) |
 | `turn_change` | **변경** | `current_turn`(1\|2) → `current_seat_no`, `last_action`, `clocks`, `clock_expires_at` (§5·§8) |
 | `turn_timeout` | **폐기** | 턴 타이머를 없앴다(§8). 탈락은 `player_left`, 종료는 `game_end` 가 통보한다 |
@@ -1341,6 +1432,24 @@ M3 3단계에서 정원을 그 테이블에서 받는다(`app/services/matchmaki
 | 타입 | 용도 |
 | :--- | :--- |
 | *(없음)* | 기존 25종으로 충분하다. 새 타입을 추가하지 않는다 |
+
+### 내부 이벤트 → 와이어 (M3 7단계 확정)
+
+서비스는 내부 이벤트(`server/app/services/events.py`)를 발행하고, 워커의 버스가 수신자마다 아래 메시지로 바꾼다
+(`server/app/ws/delivery.py` — 와이어 모양을 정하는 곳은 여기 하나다). 게임 이벤트에는 상태가 없어, 받는 워커가 Redis 를
+다시 읽어 **좌석별로** 만든다(§6).
+
+| 내부 이벤트 | 수신자별 메시지 |
+| :--- | :--- |
+| `game_started` | `game_start` → `game_state` → `turn_change`(`last_action: null`) |
+| `game_updated` (이동·벽) | `game_state` → `turn_change`, 그 행동으로 끝났으면 `turn_change` 대신 `game_end` |
+| `game_updated` (탈락) | `player_left`(`eliminated`) → `game_state` → `turn_change`(`last_action: null`) 또는 `game_end` |
+| `seat_disconnected` / `seat_reconnected` | `player_left`(`reconnecting`) / `player_joined`(`reconnected`) |
+| `game_voided` | `game_end`(`server_fault`) |
+| `matched` / `match_ready` / `match_expired` | `matched` / `player_ready`(준비한 사람 제외) / `queue_status`(`requeued`) |
+| `room_updated` | 바꾼 사람 제외 — 참가 `player_joined`, 준비 `player_ready`, 퇴장 `player_left`, 설정 변경 `room_joined` |
+| `room_dissolved` | `player_left`(`room_closed: true`) |
+| `session_replaced` | 메시지가 아니다 — 그 유저의 옛 연결을 4000 으로 닫는다(§2) |
 
 > **집계:** 재사용 10종 / 변경 12종 / 전면 변경 1종 / 유보 1종 / 폐기 1종 /
 > 신규 0종 = 25종. 표에서 기계적으로 센 값이다.
@@ -1377,6 +1486,22 @@ M3 3단계에서 정원을 그 테이블에서 받는다(`app/services/matchmaki
 | `probe_limit_exceeded` | **이번 턴 벽 설치가 잠겼다.** 거절(막힘·겹침·교차) 2회 뒤 3회째도 거절된 상태로, 이동만 가능하다 (§7) |
 | `game_already_ended` | 종료된 게임에 행동 시도 |
 | `feature_disabled` | **공통 코드** ([`../platform.md`](../platform.md) §0). 현 Phase 범위 밖 기능 — `chat` 이 여기 해당한다 (§12) |
+| `server_busy` | **재시도하라.** 게임 락을 제때 얻지 못했거나 Redis 에 잠시 닿지 못했다(§8 "짧은 Redis 장애 — 클라이언트가 재시도"). 클라이언트 잘못이 아니다 (M3 7단계 추가) |
+| `invalid_request` · `rate_limit_exceeded` · `internal_error` | **공통 코드**(platform §0). 형식 오류·없는 모드 / 메시지 레이트 리밋(아래) / 분류되지 않은 서버 오류. 어느 경우에도 예외 내용은 싣지 않는다 |
+
+### 레이트 리밋 (M3 7단계 확정 — 6단계 검토 H8)
+
+차례 아닌 행동을 연타해 게임 락을 붙잡으면 정상 행동이 락을 기다리게 된다. 시계는 수신 시각으로 정산하므로(§8) 직접 타지는
+않지만, 락 대기 상한을 넘기면 행동 자체가 실패한다. 재접속은 매번 락을 잡는다.
+
+| 대상 | 단위 | 기본값 | 초과 시 |
+| :--- | :--- | :--- | :--- |
+| 메시지 | 소켓(= 유저 — 같은 계정 연결은 하나다, §2) | 버스트 20, 초당 5 회복 | `rate_limit_exceeded`(`ack_seq`). 처리하지 않는다 — 락·Redis 에 닿지 않는다 |
+| 지속 위반 | 소켓 | 누적 50회 | close **1008** |
+| 접속 | 유저(워커 공통, 리미터 DB) | 분당 20 | 인증 직후 close **1013** |
+| 메시지 크기 | 프레임 | 4 KiB | close 1009 (uvicorn) |
+
+턴제 정상 플레이(초당 1회 미만)는 걸리지 않는다. 다른 워커로 다시 붙어 버킷을 초기화하는 경로는 접속 리밋이 막는다.
 
 ### 연결 종료 코드
 
@@ -1388,8 +1513,11 @@ M3 3단계에서 정원을 그 테이블에서 받는다(`app/services/matchmaki
 | 4001 | 토큰 무효·만료 |
 | 4002 | 익명 계정 (로그인 필요) |
 | 4003 | 닉네임 미설정 |
+| 1008 | 레이트 리밋을 계속 넘겼다 (표준 Policy Violation) |
+| 1013 | 지금 받을 수 없다 — 신원 저장소·Redis 장애, 또는 접속 연타 (표준 Try Again Later). 잠시 뒤 재접속한다 |
 
-> 4001~4003은 신규다. 구 `ws_game.py`(M3 3단계에서 삭제)는 4001만 썼다. 4000~4003 은 7단계 핸들러가 구현한다.
+> 4001~4003은 신규다. 구 `ws_game.py`(M3 3단계에서 삭제)는 4001만 썼다. 4000~4003 과 1008·1013 은 M3 7단계 핸들러가
+> 구현했다(`server/app/ws/maze_handler.py`). 모두 accept 직후 닫는다(§2).
 
 ---
 
@@ -1447,7 +1575,9 @@ M3 3단계에서 정원을 그 테이블에서 받는다(`app/services/matchmaki
 | 접속 시계 (누적) | `60초` | 악용·오탐 빈도 | §9 |
 | 서버 유예 상한 | 접속 시계 `30초` / 게임 시계 `8초` | 배포처의 실제 교체 공백 (로컬 실측 ≈7 s) | §8 |
 | 워커 하트비트 타임아웃 | `10초` | 오탐(긴 GC 정지)과 크래시 감지 지연 | §8 |
-| 서버 유예 판별 창 | 종료 직전 `2초` | 정상 종료 소요 (실측 E3 ≈0.1 s) | §8 |
+| 서버 유예 판별 창 | 종료 신호 `2초` 전부터 | 정상 종료 소요 (실측 E3 ≈0.1 s) | §8 |
+| WS ping 간격 / 타임아웃 | `5초` / `5초` | 반개방 끊김 무료 구간(간격 + 타임아웃 + 10 s)과 모바일 오탐 | §8 |
+| WS 레이트 리밋 | 버스트 20·초당 5 / 위반 50회 / 접속 분당 20 | 정상 플레이 거절 발생 여부 | §13 |
 | 장애 구간 기록 하한 / 무효 상한 | `3초` / `120초` | 실제 Redis 장애 길이 분포 | §8 |
 | 스위퍼 주기 / 리스 | `1초` / `10초` | 만료 감지 지연, 처리 시간 | §8 |
 | 유실 점검 주기 / 최소 나이 | `30초` / `30초` | 생성 소요 시간 | §8 |
@@ -1460,9 +1590,9 @@ M3 3단계에서 정원을 그 테이블에서 받는다(`app/services/matchmaki
 | 항목 | 현재 | 필요 |
 | :--- | :--- | :--- |
 | 큐·방 상태 | ✅ Redis (M3 3단계) | Redis |
-| 게임·접속 시계 | ✅ `game:<id>:clocks` + `deadlines:<game>` + 스위퍼 (M3 6단계, lifespan 배선은 7단계) | Redis **ZSET + 스위퍼** (§8) |
+| 게임·접속 시계 | ✅ `game:<id>:clocks` + `deadlines:<game>` + 스위퍼 (M3 6단계), lifespan 배선 (M3 7단계) | Redis **ZSET + 스위퍼** (§8) |
 | 게임 상태 | ✅ Redis `game:<id>:state` + 게임별 락 (M3 3단계) | Redis `game:<id>:state` + 게임별 락 (§8) |
-| 배포 시 서버 유예 | ✅ 소급 적용 `apply_server_grace` (M3 6단계, lifespan 호출은 7단계) | 종료 단계 판별 + 두 시계 정지 (§8) |
+| 배포 시 서버 유예 | ✅ 소급 적용 `apply_server_grace` (M3 6단계), 종료 신호 기준 lifespan 호출 (M3 7단계) | 종료 단계 판별 + 두 시계 정지 (§8) |
 | 인원 | ✅ 배치 테이블 정원 (M3 3단계) | 모드별 정원 테이블 |
 | 좌석 표현 | `player1_*`/`player2_*`, `player`(1\|2) | `game_participants` + `seat_no` ([`../platform.md`](../platform.md) §5) |
 | 목표 | ✅ `Player.goals` (M3 1단계) | **`goals[]`** — 축 + 값의 목록 (§11) |
