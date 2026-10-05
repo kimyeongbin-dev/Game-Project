@@ -79,6 +79,7 @@ services:
       SERVER_WS: ws://server:8000/api/v1/ws/maze
       SERVER_HTTP: http://server:8000
       COMPOSE_PROJECT: m3s7
+      HARNESS_FALSIFY: ${HARNESS_FALSIFY:-}
     volumes:
       - .:/srv/harness
       - /var/run/docker.sock:/var/run/docker.sock

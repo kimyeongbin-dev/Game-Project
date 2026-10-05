@@ -119,6 +119,21 @@ async def health_by_worker(tries: int = 60) -> dict[str, dict]:
     return seen
 
 
+async def wait_two_workers(killed_pid: Optional[int] = None, timeout: float = 30) -> None:
+    """워커 kill 뒤 — 마스터가 새 워커를 띄워(실측 E2 ≈3.6 s) 두 워커가 다시 보일 때까지"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            seen = await health_by_worker(20)
+            pids = {int(w.split("-")[0]) for w, rt in seen.items() if rt.get("started")}
+            if len(pids) >= 2 and killed_pid not in pids:
+                return
+        except Exception:
+            pass
+        await asyncio.sleep(0.5)
+    raise RuntimeError("second worker did not come back")
+
+
 async def wait_server(timeout: float = 60) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -230,7 +245,7 @@ class Pool:
         self.free = list(user_ids)
         self.clients: list[Client] = []
 
-    async def on_workers(self, counts: list[int], max_tries: int = 80) -> list[list[Client]]:
+    async def on_workers(self, counts: list[int], max_tries: int = 120) -> list[list[Client]]:
         """counts[i] 명을 서로 다른 워커 i 에 — 워커 순서는 처음 본 순서"""
         workers: list[str] = []
         buckets: dict[str, list[Client]] = {}
