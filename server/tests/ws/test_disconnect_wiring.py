@@ -40,10 +40,13 @@ async def start(games, users=(1, 2)):
 
 async def test_old_worker_disconnect_is_ignored_after_move(games, fake_clock):
     state = await start(games)
-    await games.mark_connected(state.game_id, 2, worker_id="wB")      # 새 연결이 먼저 owner 를 옮겼다
-    assert await games.mark_disconnected(state.game_id, 2, worker_id="wA") is None
+    await games.mark_connected(state.game_id, 2, owner="wA:old")
+    await games.mark_connected(state.game_id, 2, owner="wA:new")  # 같은 워커로 다시 붙었다 — 연결이 다르다(검토 R1)
+    assert await games.mark_disconnected(state.game_id, 2, owner="wA:old") is None
     assert (await games.load_clocks(state.game_id)).seat(2).connected
-    gone = await games.mark_disconnected(state.game_id, 2, worker_id="wB")
+    await games.mark_connected(state.game_id, 2, owner="wB:x")    # 다른 워커로
+    assert await games.mark_disconnected(state.game_id, 2, owner="wA:new") is None
+    gone = await games.mark_disconnected(state.game_id, 2, owner="wB:x")
     assert gone is not None and gone.disconnected_at_ms == fake_clock.ms
 
 
@@ -51,10 +54,10 @@ async def test_disconnect_at_original_time_is_clamped(games, fake_clock):
     state = await start(games)
     t0 = fake_clock.ms
     fake_clock.advance(4_000)
-    gone = await games.redo_disconnect(state.game_id, 2, worker_id="w1", at_ms=t0 + 1_000)
+    gone = await games.redo_disconnect(state.game_id, 2, owner="w1", at_ms=t0 + 1_000)
     assert gone.disconnected_at_ms == t0 + 1_000                      # 늦게 기록해도 원래 시각
     state2 = await start(games, (3, 4))
-    early = await games.redo_disconnect(state2.game_id, 4, worker_id="w1", at_ms=t0 - 60_000)
+    early = await games.redo_disconnect(state2.game_id, 4, owner="w1", at_ms=t0 - 60_000)
     assert early.disconnected_at_ms == fake_clock.ms                 # 시작(정산된 가장 늦은 시각) 전으로 되감지 않는다
 
 
@@ -91,7 +94,7 @@ async def test_failed_disconnect_is_retried_with_original_time(games, fake_clock
                   sweeper=FakePart("s", SimpleNamespace(calls=[])), ticker=FakePart("t", SimpleNamespace(calls=[])),
                   clock=fake_clock, worker_id="w1", monotonic_ms=FakeMono(fake_clock))
     t_disconnect = fake_clock.ms
-    session = Session(Identity(2, "n2", 1000), SimpleNamespace(replaced=False, user_id=2))
+    session = Session(Identity(2, "n2", 1000), SimpleNamespace(replaced=False, user_id=2, conn_id="w1:c2"))
     await rt._record_disconnect(session, 1006)
     assert len(rt.pending) == 1 and (await games.load_clocks(state.game_id)).seat(2).connected
 
@@ -115,7 +118,7 @@ async def test_retry_gives_up_after_limit(games, fake_clock, monkeypatch):
     rt = Realtime(handler, games=flaky, bus=FakePart("b", SimpleNamespace(calls=[])),
                   sweeper=FakePart("s", SimpleNamespace(calls=[])), ticker=FakePart("t", SimpleNamespace(calls=[])),
                   clock=fake_clock, worker_id="w1", monotonic_ms=FakeMono(fake_clock))
-    await rt._record_disconnect(Session(Identity(2, "n2", 1000), SimpleNamespace(replaced=False, user_id=2)), 1006)
+    await rt._record_disconnect(Session(Identity(2, "n2", 1000), SimpleNamespace(replaced=False, user_id=2, conn_id="w1:c2")), 1006)
     fake_clock.advance(6_000)
     await rt.retry_pending()
     assert rt.pending == []
@@ -133,7 +136,7 @@ async def two_workers(redis_client, fake_clock):
     pairs, buses = [], []
     for wid in ("wA", "wB"):
         manager = ConnectionManager()
-        delivery = Delivery(games, rooms, mm, clock=fake_clock, worker_id=wid)
+        delivery = Delivery(games, rooms, mm, clock=fake_clock)
         handler = MazeSocketHandler(manager=manager, games=games, rooms=rooms, matches=mm,
                                     delivery=delivery, worker_id=wid)
         bus = EventBus(manager, delivery)
@@ -159,17 +162,17 @@ async def test_cross_worker_replacement(two_workers):
     state = await start(games)
     opponent_ws, _ = await attach(b, 1)
     old_ws, old = await attach(a, 2)
-    await games.mark_connected(state.game_id, 2, worker_id="wA")
+    await games.mark_connected(state.game_id, 2, owner=old.conn.conn_id)
 
     new_ws, new = await attach(b, 2)                                  # 같은 계정이 다른 워커로
-    await games.mark_connected(state.game_id, 2, worker_id="wB")
+    await games.mark_connected(state.game_id, 2, owner=new.conn.conn_id)
     await eventually(lambda: old_ws.closed)
     assert old_ws.close_code == 4000 and old.conn.replaced
     assert a.manager.get_connection(2) is None and b.manager.get_connection(2) is new.conn
     assert not new_ws.closed                                          # 새 연결은 그대로
 
     # 옛 워커의 늦은 끊김 처리 — 핸들러는 replaced 라 부르지 않고, 불러도 서비스가 owner 로 무시한다
-    assert await games.mark_disconnected(state.game_id, 2, worker_id="wA") is None
+    assert await games.mark_disconnected(state.game_id, 2, owner=old.conn.conn_id) is None
     await asyncio.sleep(0.1)
     assert not [m for m in opponent_ws.sent_messages if m["type"] == "player_left"]
     assert (await games.load_clocks(state.game_id)).seat(2).connected

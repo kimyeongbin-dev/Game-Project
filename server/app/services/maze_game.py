@@ -238,12 +238,20 @@ def deadline_ops(state: GameState, clocks: GameClocks,
     return zadd, zrem
 
 
+def owner_worker(owner: Optional[str]) -> Optional[str]:
+    """좌석 owner(연결 id `<worker_id>:<연결>`, M3 7단계 검토 R1) → 그 연결을 가진 워커. 옛 형식(워커 id 만)도 받는다"""
+    return None if owner is None else owner.split(":", 1)[0]
+
+
 def owner_index_ops(state: GameState, clocks: GameClocks,
                     prev_owners: dict[int, Optional[str]]) -> dict[str, tuple[dict[str, int], list[str]]]:
-    """좌석 소유 워커가 바뀐 만큼 워커별 좌석 색인을 옮긴다 — 시계와 같은 쓰기로 (검토 H4)"""
+    """좌석 소유 워커가 바뀐 만큼 워커별 좌석 색인을 옮긴다 — 시계와 같은 쓰기로 (검토 H4)
+
+    owner 는 연결 단위지만 색인은 워커 단위다(크래시한 워커의 좌석을 찾는 용도) — 같은 워커 안의 재접속은 옮기지 않는다.
+    """
     ops: dict[str, tuple[dict[str, int], list[str]]] = {}
     for seat in clocks.seats:
-        before, after = prev_owners.get(seat.seat_no), seat.owner
+        before, after = owner_worker(prev_owners.get(seat.seat_no)), owner_worker(seat.owner)
         if before == after:
             continue
         member = keys.seat_member(state.game_id, seat.seat_no)
@@ -449,32 +457,32 @@ class MazeGameService:
     # ----- 연결 (WS 핸들러·런타임이 부른다 — user_id 는 인증된 연결에서만) -----
 
     async def mark_disconnected(self, game_id: str, user_id: int, *,
-                                worker_id: Optional[str] = None) -> Optional[Disconnection]:
+                                owner: Optional[str] = None) -> Optional[Disconnection]:
         """끊김 — 그 좌석의 접속 시계가 흐르기 시작한다 (§8·§9)
 
         이미 끊김이면 처음 끊긴 시각을 그대로 둔다. 좌석이 아니거나 탈락·종료면 None.
-        worker_id: 끊긴 연결을 가졌던 워커. 좌석이 이미 **다른 워커**의 연결이면(같은 계정이 다른 워커로 다시 붙었다)
-        옛 연결의 끊김은 무시한다 — 4000 교체 경합(M3 7단계 판단 4).
+        owner: 끊긴 **연결**의 id(`<worker_id>:<연결>`). 좌석이 이미 다른 연결의 것이면(같은 계정이 같은 워커든 다른
+        워커든 다시 붙었다) 옛 연결의 끊김은 무시한다 — 교체·재시도 경합(M3 7단계 판단 4, 검토 R1·R3).
         """
-        return await self._disconnect(game_id, user_id, worker_id, None)
+        return await self._disconnect(game_id, user_id, owner, None)
 
-    async def redo_disconnect(self, game_id: str, user_id: int, *, worker_id: str,
+    async def redo_disconnect(self, game_id: str, user_id: int, *, owner: str,
                               at_ms: int) -> Optional[Disconnection]:
         """서버 전용 — 기록에 실패한 끊김을 원래 시각(at_ms, Redis TIME 기준)으로 다시 기록한다(검토 H4)
 
         시각은 워커가 끊김을 본 순간에서 잰 것이고 클라이언트 값이 아니다. 이미 정산된 시각보다 이르게는 기록하지
         않는다(drop_seat 와 같은 규칙) — 시계를 되감지 않는다.
         """
-        return await self._disconnect(game_id, user_id, worker_id, at_ms)
+        return await self._disconnect(game_id, user_id, owner, at_ms)
 
-    async def _disconnect(self, game_id: str, user_id: int, worker_id: Optional[str],
+    async def _disconnect(self, game_id: str, user_id: int, owner: Optional[str],
                           at_ms: Optional[int]) -> Optional[Disconnection]:
         def step(tx: _Tx) -> Optional[Disconnection]:
             seat_no = tx.meta.seat_of(user_id)
             if seat_no is None or tx.closed or tx.state.seat(seat_no).is_eliminated:
                 return None
-            owner = tx.clocks.seat(seat_no).owner
-            if worker_id is not None and owner is not None and owner != worker_id:
+            current = tx.clocks.seat(seat_no).owner
+            if owner is not None and current is not None and current != owner:
                 return None
             when = tx.now if at_ms is None else min(tx.now, max(at_ms, tx.clocks.latest_ms()))
             fresh = tx.clocks.disconnect(seat_no, when)
@@ -487,19 +495,19 @@ class MazeGameService:
         result, _, _ = await self._run(game_id, step)
         return result
 
-    async def mark_connected(self, game_id: str, user_id: int, *, worker_id: Optional[str] = None) -> bool:
+    async def mark_connected(self, game_id: str, user_id: int, *, owner: Optional[str] = None) -> bool:
         """재접속 — 끊긴 구간을 접속 시계에서 차감한다(리셋 없음). 끊김 상태였으면 True
 
-        worker_id 는 이 연결을 가진 워커(서버가 넘긴다, app/core/worker.py). 그 워커가 죽으면 다른 워커의
-        스위퍼가 이 좌석을 끊김으로 처리한다(검토 H4). 연결 상태 그대로 워커만 바뀌는 재접속도 기록한다.
+        owner 는 이 연결의 id(`<worker_id>:<연결>`, 서버가 넘긴다). 그 워커가 죽으면 다른 워커의 스위퍼가 이 좌석을
+        끊김으로 처리한다(검토 H4). 연결 상태 그대로 연결만 바뀌는 재접속도 기록한다 — 옛 연결의 끊김을 거르는 기준이다.
         """
         def step(tx: _Tx) -> bool:
             seat_no = tx.meta.seat_of(user_id)
             if seat_no is None or tx.closed or tx.state.seat(seat_no).is_eliminated:
                 return False
             reconnected = self._reconnect(tx, seat_no)
-            if worker_id is not None:
-                tx.clocks.set_owner(seat_no, worker_id)
+            if owner is not None:
+                tx.clocks.set_owner(seat_no, owner)
             return reconnected
 
         result, _, _ = await self._run(game_id, step)
@@ -524,6 +532,7 @@ class MazeGameService:
         return seat_no
 
     async def drop_seat(self, game_id: str, seat_no: int, *, owner: str, at_ms: int) -> bool:
+        # owner 는 여기서 **워커** id 다 — 좌석 owner(연결 id)의 워커 부분과 비교한다
         """죽은 워커가 가진 연결을 끊김으로 — 그 워커의 마지막 하트비트 시각부터 접속 시계가 흐른다 (검토 H4)
 
         스위퍼 전용. 좌석이 아직 그 워커 소유이고 연결 상태일 때만 — 그 사이 다른 워커로 재접속했으면
@@ -533,7 +542,7 @@ class MazeGameService:
             if tx.closed or tx.state.seat(seat_no).is_eliminated:
                 return False
             seat = tx.clocks.seat(seat_no)
-            if seat.owner != owner or not seat.connected:
+            if owner_worker(seat.owner) != owner or not seat.connected:
                 return False
             tx.clocks.disconnect(seat_no, max(at_ms, tx.clocks.latest_ms()))
             remaining = max(0, tx.clocks.conn_remaining(seat_no, tx.now, tx.outages))

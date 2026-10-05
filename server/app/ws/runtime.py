@@ -50,14 +50,18 @@ def _monotonic_ms() -> int:
 
 
 RETRY_INTERVAL_SEC = 1.0
+# 밀려난(4000) 연결의 끊김 확인을 미루는 시간 — 새 연결이 좌석 소유를 가져가기에 충분하다(접속 처리는 수 ms)
+REPLACE_SETTLE_SEC = 3.0
 
 
 @dataclass
 class PendingDisconnect:
-    """기록에 실패한 끊김 — 원래 시각(단조)을 들고 다시 시도한다 (검토 H4)"""
-    game_id: str
+    """아직 기록하지 못한 끊김 — 원래 시각(단조)과 끊긴 연결 id 를 들고 다시 시도한다 (검토 H4·R1·R2·R3)"""
+    game_id: Optional[str]          # 활동을 아직 못 읽었으면 None
     user_id: int
     at_mono_ms: int
+    conn_id: str
+    not_before_mono_ms: int = 0     # 밀려난 연결은 새 연결이 자리 잡을 때까지 기다린다
 
 
 class QueueTicker:
@@ -180,7 +184,11 @@ class Realtime:
     # ----- 끊김 -----
 
     async def on_disconnect(self, session: Session, close_code: Optional[int]) -> None:
-        """핸들러가 소켓 종료 때 부른다(밀려난 연결은 부르지 않는다). 처리는 추적되는 태스크로"""
+        """핸들러가 소켓 종료 때 부른다 — 밀려난(4000) 연결도. 처리는 추적되는 태스크로
+
+        좌석 owner 는 연결 id 다(검토 R1). 그래서 기록은 언제나 "끊긴 그 연결이 아직 좌석의 연결일 때만" 일어난다 —
+        그 사이 같은 계정이 (같은 워커든 다른 워커든) 다시 붙었으면 서비스가 무시한다.
+        """
         task = asyncio.create_task(self._record_disconnect(session, close_code))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
@@ -188,28 +196,46 @@ class Realtime:
 
     async def _record_disconnect(self, session: Session, close_code: Optional[int]) -> None:
         at_mono = self._monotonic_ms()
-        game_id = await self.handler._current_game(session.user_id)
-        if game_id is None:
+        item = PendingDisconnect(None, session.user_id, at_mono, session.conn.conn_id)
+        await self.handler.release_session(session)
+        if session.conn.replaced:
+            # 밀려난 연결 — 보통은 새 연결이 이미 좌석을 가져갔다(그러면 아래 기록은 무시된다). 새 연결이 소유를 못 가져간
+            # 채 끝났으면(검토 R3) 이 기록이 끊김을 남긴다. 새 연결이 자리 잡을 시간을 주고 확인한다
+            item.not_before_mono_ms = at_mono + int(REPLACE_SETTLE_SEC * 1000)
+            self._defer(item)
             return
+        if not await self._try_record(item, first=True):
+            self._defer(item)
+
+    async def _try_record(self, item: PendingDisconnect, *, first: bool) -> bool:
+        """한 번 시도. 끝났으면(기록·무시·게임 없음) True, 다시 시도해야 하면 False"""
         try:
-            result = await self.games.mark_disconnected(game_id, session.user_id, worker_id=self.worker_id)
+            if item.game_id is None:  # 활동 읽기도 실패할 수 있다(Redis 순간 장애 — 검토 R2)
+                kind, rest = await self.handler._activity(item.user_id)
+                if kind != "game":
+                    return True
+                item.game_id = rest
+            if first:
+                result = await self.games.mark_disconnected(item.game_id, item.user_id, owner=item.conn_id)
+            else:
+                at_ms = await self._clock.now_ms() - (self._monotonic_ms() - item.at_mono_ms)
+                result = await self.games.redo_disconnect(item.game_id, item.user_id, owner=item.conn_id, at_ms=at_ms)
         except (GameBusy, StoreUnavailable) as exc:
-            # 기록하지 못하면 그 좌석은 "연결 중"으로 남아 접속 시계가 흐르지 않는다 — 원래 시각으로 다시 시도한다
-            logger.info("Disconnect of %s in %s deferred: %s", session.user_id, game_id, exc)
-            self.pending.append(PendingDisconnect(game_id, session.user_id, at_mono))
-            self._ensure_retry()
-            return
+            logger.info("Disconnect of %s deferred: %s", item.user_id, exc)
+            return False
         except GameNotFound:
-            return
+            return True
         except Exception:
-            logger.exception("Could not record disconnect of %s in %s", session.user_id, game_id)
-            return
+            logger.exception("Could not record disconnect of %s in %s", item.user_id, item.game_id)
+            return False
         if result is not None:
-            self.recent.record(game_id, session.user_id, result.disconnected_at_ms)
+            self.recent.record(item.game_id, item.user_id, result.disconnected_at_ms)
+        return True
 
-    # ----- 끊김 재시도 (검토 H4) -----
+    # ----- 끊김 재시도 (검토 H4·R1·R2·R3) -----
 
-    def _ensure_retry(self) -> None:
+    def _defer(self, item: PendingDisconnect) -> None:
+        self.pending.append(item)
         if self._retry_task is None or self._retry_task.done():
             self._retry_task = asyncio.create_task(self._retry_loop(), name="disconnect-retry")
 
@@ -218,32 +244,26 @@ class Realtime:
             await asyncio.sleep(RETRY_INTERVAL_SEC)
             await self.retry_pending()
 
-    async def retry_pending(self) -> int:
-        """밀린 끊김을 원래 시각으로 다시 기록한다. 기록한 수. 상한이 지난 것은 버린다 —
-        그 뒤로는 이 워커가 죽으면 다른 워커의 스위퍼가 owner 기준으로 처리한다"""
+    async def retry_pending(self, *, force: bool = False) -> int:
+        """밀린 끊김을 원래 시각으로 다시 기록한다. 끝낸 수
+
+        상한(disconnect_retry_max_sec)이 지나면 버린다 — 그만큼 Redis 가 안 되면 장기 장애 무효(§8)가 그 게임을 닫고,
+        락 경합만으로 120 s 를 넘기는 일은 없다. force: 정착 시간을 기다리지 않는다(종료 직전).
+        """
         done = 0
         still: list[PendingDisconnect] = []
+        now_mono = self._monotonic_ms()
         for item in self.pending:
-            age = self._monotonic_ms() - item.at_mono_ms
-            if age > settings.disconnect_retry_max_sec * 1000:
+            if now_mono - item.at_mono_ms > settings.disconnect_retry_max_sec * 1000:
                 logger.warning("Gave up recording disconnect of %s in %s", item.user_id, item.game_id)
                 continue
-            try:
-                at_ms = await self._clock.now_ms() - age
-                result = await self.games.redo_disconnect(
-                    item.game_id, item.user_id, worker_id=self.worker_id, at_ms=at_ms)
-            except (GameBusy, StoreUnavailable):
+            if not force and now_mono < item.not_before_mono_ms:
                 still.append(item)
                 continue
-            except GameNotFound:
-                continue
-            except Exception:
-                logger.exception("Retry of disconnect %s failed", item)
+            if await self._try_record(item, first=False):
+                done += 1
+            else:
                 still.append(item)
-                continue
-            done += 1
-            if result is not None:
-                self.recent.record(item.game_id, item.user_id, result.disconnected_at_ms)
         self.pending = still
         return done
 
@@ -255,8 +275,8 @@ class Realtime:
                 await task
             except asyncio.CancelledError:
                 pass
-        if self.pending:  # 종료 전에 한 번 더
-            await self.retry_pending()
+        if self.pending:  # 종료 전에 한 번 더 — 정착 시간을 기다리지 않는다
+            await self.retry_pending(force=True)
 
     # ----- 종료 신호 (검토 M9) -----
 

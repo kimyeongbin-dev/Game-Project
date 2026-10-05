@@ -27,7 +27,9 @@ from app.core.config import settings
 from app.db import redis_keys as keys
 from app.db.redis import new_pubsub_client
 from app.db.redis_lock import require_redis
-from app.services.events import SESSION_REPLACED, Event
+from app.db.redis_lock import StoreUnavailable, store_errors
+from app.services import activity
+from app.services.events import GAME_STARTED, SESSION_REPLACED, Event
 from app.ws.connection_manager import ConnectionManager
 from app.ws.delivery import Delivery
 
@@ -44,6 +46,7 @@ class EventBus:
         self._task: Optional[asyncio.Task] = None
         self._subscribed = asyncio.Event()
         self.resubscribes = 0  # 재구독 성공 횟수 — 관측·테스트용
+        self._claims: set[asyncio.Task] = set()
 
     @property
     def subscribed(self) -> bool:
@@ -74,6 +77,8 @@ class EventBus:
         except asyncio.CancelledError:
             pass
         self._subscribed.clear()
+        for claim in list(self._claims):
+            claim.cancel()
 
     async def wait_subscribed(self, timeout: float) -> None:
         await asyncio.wait_for(self._subscribed.wait(), timeout)
@@ -134,13 +139,15 @@ class EventBus:
         if event.scope == "user":  # 연결 제어(session_replaced) — 메시지가 아니다
             if event.kind == SESSION_REPLACED:
                 for user_id in event.recipients:
-                    await self._manager.replace_if_stale(user_id, event.hint["conn_id"])
+                    await self._replace(user_id, event.hint["conn_id"])
             return
 
         local = self._manager.local_user_ids()
         for user_id in event.recipients:
             if user_id not in local:
                 continue
+            if event.kind == GAME_STARTED:
+                self._claim(event.scope_id, user_id)
             try:
                 messages = await self._delivery.deliver(event, user_id)
             except Exception:
@@ -150,8 +157,40 @@ class EventBus:
             for message in messages:
                 await self._manager.send_personal(user_id, message)
 
+    async def _activity(self, user_id: int):
+        try:
+            return await activity.current(require_redis(), user_id)
+        except StoreUnavailable:
+            return None
+
+    async def _replace(self, user_id: int, announced: str) -> None:
+        """다른 연결이 그 유저를 가져갔다 — 권위는 Redis 의 현재 연결 id 다(이벤트 순서가 엇갈려도, 검토 R10)"""
+        try:
+            async with store_errors():
+                current = await require_redis().get(keys.user_conn(user_id))
+        except StoreUnavailable:
+            current = None
+        await self._manager.replace_if_stale(user_id, current or announced)
+
+    def _claim(self, game_id: str, user_id: int) -> None:
+        """좌석 소유 기록은 게임 락을 잡는다 — 수신 루프를 막지 않게 따로 돈다(검토 R8). 그때도 연결이 있을 때만(R4)"""
+        conn = self._manager.get_connection(user_id)
+        if conn is None:
+            return
+
+        async def claim():
+            if self._manager.get_connection(user_id) is conn:
+                await self._delivery.claim_seat(game_id, user_id, conn.conn_id)
+
+        task = asyncio.create_task(claim())
+        self._claims.add(task)
+        task.add_done_callback(self._claims.discard)
+
     async def _resync_all(self) -> None:
         for user_id in sorted(self._manager.local_user_ids()):
+            current = await self._activity(user_id)
+            if current is not None and keys.parse_activity(current)[0] == "game":
+                self._claim(keys.parse_activity(current)[1], user_id)  # 그 사이 시작된 게임(game_started 유실 — R4)
             try:
                 messages = await self._delivery.resync(user_id)
             except Exception:

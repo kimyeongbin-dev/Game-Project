@@ -26,7 +26,7 @@ from app.core.worker import WORKER_ID
 from app.services.matchmaking import Matchmaking
 from app.services.maze_game import GAME, MazeGameService
 from app.services.rooms import Rooms
-from app.ws.bus import EventBus
+from app.ws.runtime import Realtime
 from app.ws.connection_manager import ConnectionManager
 from app.ws.delivery import Delivery
 from app.ws.maze_handler import PATH, MazeSocketHandler, build_router
@@ -52,20 +52,21 @@ def build_handler(identity, *, worker_id: str = WORKER_ID, **overrides) -> MazeS
     matches = Matchmaking(games={GAME: games})
     return MazeSocketHandler(
         manager=ConnectionManager(), games=games, rooms=rooms, matches=matches,
-        delivery=Delivery(games, rooms, matches, worker_id=worker_id),
+        delivery=Delivery(games, rooms, matches),
         identity=identity, worker_id=worker_id, **overrides,
     )
 
 
 def build_app(handler: MazeSocketHandler) -> FastAPI:
+    """운영과 같은 런타임(버스·스위퍼·큐 티커·끊김 추적·재시도)을 배선한다 — 끊김 경로가 운영과 같다(검토 R9)"""
     @asynccontextmanager
     async def lifespan(app):
         await init_redis()
-        bus = EventBus(handler.manager, handler.delivery)
-        await bus.start()
-        app.state.bus = bus
+        realtime = Realtime(handler, worker_id=handler.worker_id)
+        await realtime.start()
+        app.state.realtime = realtime
         yield
-        await bus.stop()
+        await realtime.stop()
         await close_redis()
 
     app = FastAPI(lifespan=lifespan)

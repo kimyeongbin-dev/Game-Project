@@ -87,7 +87,7 @@ async def test_crashed_workers_seat_starts_its_connection_clock(games, mm, fake_
     state, users = await start(games, mode, seats)
     doomed, survivor = worker(games, mm, fake_clock, "w-doomed"), worker(games, mm, fake_clock, "w-survivor")
     for uid in users:
-        await games.mark_connected(state.game_id, uid, worker_id="w-doomed" if uid == users[-1] else "w-survivor")
+        await games.mark_connected(state.game_id, uid, owner="w-doomed" if uid == users[-1] else "w-survivor")
     assert await redis_client.zrange(keys.worker_seats("w-doomed"), 0, -1) == [keys.seat_member(state.game_id, seats)]
     await doomed.tick()
     last_beat = fake_clock.ms
@@ -109,9 +109,9 @@ async def test_crashed_workers_seat_starts_its_connection_clock(games, mm, fake_
 async def test_seat_moved_to_another_worker_is_not_dropped(games, mm, fake_clock, redis_client):
     state, users = await start(games)
     old, new = worker(games, mm, fake_clock, "w-old"), worker(games, mm, fake_clock, "w-new")
-    await games.mark_connected(state.game_id, users[1], worker_id="w-old")
+    await games.mark_connected(state.game_id, users[1], owner="w-old")
     await old.tick()
-    await games.mark_connected(state.game_id, users[1], worker_id="w-new")  # 끊김 없이 다른 워커로 붙었다(E4)
+    await games.mark_connected(state.game_id, users[1], owner="w-new")  # 끊김 없이 다른 워커로 붙었다(E4)
     assert await redis_client.zcard(keys.worker_seats("w-old")) == 0
     await passes(fake_clock, TIMEOUT + S)
     assert (await new.tick()).dropped == []
@@ -124,7 +124,7 @@ async def test_stale_index_entry_does_not_drop_a_moved_seat(games, mm, fake_cloc
     state, users = await start(games)
     old, new = worker(games, mm, fake_clock, "w-old"), worker(games, mm, fake_clock, "w-new")
     await old.tick()
-    await games.mark_connected(state.game_id, users[1], worker_id="w-new")
+    await games.mark_connected(state.game_id, users[1], owner="w-new")
     await redis_client.zadd(keys.worker_seats("w-old"), {keys.seat_member(state.game_id, 2): 0})
     await passes(fake_clock, TIMEOUT + S)
     assert (await new.tick()).dropped == []
@@ -136,7 +136,7 @@ async def test_stale_index_entry_does_not_drop_a_moved_seat(games, mm, fake_cloc
 async def test_live_worker_is_never_reaped(games, mm, fake_clock):
     state, users = await start(games)
     a, b = worker(games, mm, fake_clock, "w-a"), worker(games, mm, fake_clock, "w-b")
-    await games.mark_connected(state.game_id, users[0], worker_id="w-a")
+    await games.mark_connected(state.game_id, users[0], owner="w-a")
     for _ in range(3):
         await passes(fake_clock, TIMEOUT // 2)
         await a.tick()
@@ -145,8 +145,8 @@ async def test_live_worker_is_never_reaped(games, mm, fake_clock):
 
 async def test_finished_game_clears_owner_index(games, redis_client):
     state, users = await start(games)
-    await games.mark_connected(state.game_id, users[0], worker_id="w-x")
-    await games.mark_connected(state.game_id, users[1], worker_id="w-x")
+    await games.mark_connected(state.game_id, users[0], owner="w-x")
+    await games.mark_connected(state.game_id, users[1], owner="w-x")
     await games.surrender(state.game_id, users[0])
     assert await redis_client.zcard(keys.worker_seats("w-x")) == 0
 

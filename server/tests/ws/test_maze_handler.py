@@ -92,6 +92,17 @@ async def start_ranked(clients, mode: str, seats: int, base: int = 100) -> tuple
     return cs, cs[0].start["payload"]["game_id"]
 
 
+async def seat_owners(redis, game_id: str) -> dict[int, str]:
+    """좌석 owner(연결 id) — 게임 시작 때의 기록은 버스 밖 태스크라(검토 R8) 잠깐 기다린다"""
+    for _ in range(150):
+        clocks = json.loads(await redis.get(keys.game_clocks(game_id)))
+        owners = {s["seat_no"]: s["owner"] for s in clocks["seats"]}
+        if all(owners.values()):
+            return owners
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"seat owners not recorded: {owners}")
+
+
 def legal_move(view: dict) -> tuple[int, int]:
     """내 칸의 열린 변으로 한 칸 — 발견 맵(내 4면)만으로 정한다(§5 클라이언트 자족)"""
     r, c = view["me"]["position"]["row"], view["me"]["position"]["col"]
@@ -237,6 +248,7 @@ async def test_unknown_mode_is_invalid_request(clients):
 async def test_disconnect_then_reconnect(server, clients, redis):
     cs, game_id = await start_ranked(clients, "duel", 2, base=500)
     first, second = cs
+    second_conn_id = (await seat_owners(redis, game_id))[2]
     await second.close()
     left = await first.recv("player_left", state="reconnecting")
     assert left["payload"]["seat_no"] == 2 and left["payload"]["grace_remaining_ms"] > 0
@@ -250,14 +262,17 @@ async def test_disconnect_then_reconnect(server, clients, redis):
     back = await first.recv("player_joined")
     assert back["payload"] == {"seat_no": 2, "state": "reconnected"}
     clocks = json.loads(await redis.get(keys.game_clocks(game_id)))
-    assert {s["seat_no"]: s["owner"] for s in clocks["seats"]}[2] == server.handler.worker_id
+    # owner 는 연결 id — 새 연결의 것이다(같은 워커의 옛 연결과 구분된다, 검토 R1)
+    owner = {s["seat_no"]: s["owner"] for s in clocks["seats"]}[2]
+    assert owner.startswith(server.handler.worker_id + ":") and owner != second_conn_id
     await again.close()
 
 
 async def test_seat_owner_recorded_at_game_start(clients, redis):
     cs, game_id = await start_ranked(clients, "trio", 3, base=550)
-    clocks = json.loads(await redis.get(keys.game_clocks(game_id)))
-    assert {s["owner"] for s in clocks["seats"]} == {WORKER_ID}
+    owners = await seat_owners(redis, game_id)
+    assert {o.split(":")[0] for o in owners.values()} == {WORKER_ID}
+    assert len(set(owners.values())) == 3                           # 좌석마다 자기 연결
 
 
 async def test_same_worker_replacement_is_not_a_disconnect(server, clients):
@@ -298,3 +313,24 @@ async def test_alive_leave_room_in_game_is_surrender(clients):
     await cs[1].send("leave_room")
     end = await cs[0].recv("game_end")
     assert end["payload"]["reason"] == "last_standing"
+
+
+# ----- 접속 처리 실패 (독립 검토 #1 R3·R7) -----
+
+async def test_failed_reconnect_closes_1013_and_leaves_nothing(server, clients, monkeypatch):
+    """재접속 때 좌석 소유를 못 가져가면 반쯤 열린 연결로 두지 않는다 — connected 없이 1013, 연결 맵에 없음"""
+    from app.services.maze_game import GameBusy
+
+    cs, _ = await start_ranked(clients, "duel", 2, base=1_000)
+    second = cs[1]
+    games = server.handler.games
+
+    async def busy(*args, **kwargs):
+        raise GameBusy("contended")
+
+    monkeypatch.setattr(games, "mark_connected", busy)
+    again = await Client(server, second.user_id).open(mint_token(second.user_id), expect_connected=False)
+    assert await again.closed_code() == 1013
+    assert again.received == []
+    await asyncio.sleep(0.1)
+    assert server.handler.manager.get_connection(second.user_id) is None

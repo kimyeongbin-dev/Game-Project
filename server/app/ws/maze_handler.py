@@ -63,6 +63,15 @@ logger = logging.getLogger(__name__)
 
 PATH = "/api/v1/ws/maze"
 
+# user:{uid}:conn 의 안전망 TTL — 정상 종료는 CAS 로 지우고, 크래시한 워커가 남긴 키만 이것으로 사라진다
+USER_CONN_TTL_SEC = 86_400
+_RELEASE_CONN_LUA = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
+
 # 서비스 예외 → §13 코드. 문구는 protocol.MESSAGES 에서만 나온다
 _RETRYABLE = (GameBusy, StoreUnavailable)
 
@@ -123,8 +132,7 @@ class MazeSocketHandler:
             close_code = await self._loop(session)
         finally:
             await self.manager.disconnect(session.user_id, websocket)
-            if not session.conn.replaced:
-                await self._closed(session, close_code)
+            await self._closed(session, close_code)
 
     async def _open(self, websocket: WebSocket) -> Optional[Session]:
         try:
@@ -155,8 +163,20 @@ class MazeSocketHandler:
         try:
             await self._claim_session(session)
             await self._welcome(session)
-        except _RETRYABLE as exc:
-            logger.warning("WS welcome for %s degraded: %s", identity.user_id, exc)
+        except Exception as exc:
+            # connected 를 못 보냈거나 좌석 소유를 못 가져갔다 — 반쯤 열린 연결로 두지 않는다(검토 R3·R7).
+            # 닫고, 끊김 경로를 그대로 탄다(밀어낸 옛 연결의 좌석은 끊김으로 기록된다). 클라이언트는 재접속한다
+            if isinstance(exc, _RETRYABLE + (StateVersionMismatch,)):
+                logger.warning("WS open for %s failed: %s", identity.user_id, type(exc).__name__)
+            else:
+                logger.exception("WS open for %s failed", identity.user_id)
+            await self.manager.disconnect(identity.user_id, websocket)
+            try:
+                await websocket.close(code=CLOSE_TRY_AGAIN_LATER)
+            except Exception:
+                pass
+            await self._closed(session, CLOSE_TRY_AGAIN_LATER)
+            return None
         return session
 
     async def _claim_session(self, session: Session) -> None:
@@ -166,7 +186,8 @@ class MazeSocketHandler:
         같으므로 아무 일도 없다.
         """
         async with store_errors():
-            previous = await _redis().set(keys.user_conn(session.user_id), session.conn.conn_id, get=True)
+            previous = await _redis().set(keys.user_conn(session.user_id), session.conn.conn_id, get=True,
+                                          ex=USER_CONN_TTL_SEC)
         if previous is not None and previous != session.conn.conn_id:
             await self.publisher.publish(events.session_replaced(session.user_id, session.conn.conn_id))
 
@@ -181,7 +202,7 @@ class MazeSocketHandler:
             if seat_no is not None:
                 reconnect = {"game_id": game_id, "seat_no": seat_no}
                 try:
-                    await self.games.mark_connected(game_id, uid, worker_id=self.worker_id)
+                    await self.games.mark_connected(game_id, uid, owner=session.conn.conn_id)
                 except GameNotFound:
                     reconnect = None
 
@@ -238,16 +259,27 @@ class MazeSocketHandler:
             await self._send(session, reply)
 
     async def _closed(self, session: Session, close_code: Optional[int]) -> None:
-        if self.on_disconnect is not None:
+        if self.on_disconnect is not None:   # 운영 경로 — 추적·재시도·정착 확인 (app/ws/runtime.py)
             await self.on_disconnect(session, close_code)
+            return
+        await self.release_session(session)
+        if session.conn.replaced:
             return
         game_id = await self._current_game(session.user_id)
         if game_id is None:
             return
         try:
-            await self.games.mark_disconnected(game_id, session.user_id)
+            await self.games.mark_disconnected(game_id, session.user_id, owner=session.conn.conn_id)
         except Exception:
             logger.warning("Could not record disconnect of %s in %s", session.user_id, game_id)
+
+    async def release_session(self, session: Session) -> None:
+        """이 연결이 아직 그 유저의 연결이면 `user:{uid}:conn` 을 지운다(CAS) — 키가 있다 = 지금 어딘가 붙어 있다"""
+        try:
+            async with store_errors():
+                await _redis().eval(_RELEASE_CONN_LUA, 1, keys.user_conn(session.user_id), session.conn.conn_id)
+        except StoreUnavailable:
+            pass  # 안전망 TTL 이 지운다
 
     # ----- 보조 -----
 

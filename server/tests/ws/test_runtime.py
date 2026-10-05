@@ -64,7 +64,7 @@ def make_runtime(games, fake_clock, rec: Recorder = None) -> Realtime:
 
 
 def session_of(user_id: int) -> Session:
-    conn = SimpleNamespace(replaced=False, user_id=user_id)
+    conn = SimpleNamespace(replaced=False, user_id=user_id, conn_id="w-test")
     return Session(Identity(user_id, f"n{user_id}", 1000), conn)
 
 
@@ -127,7 +127,7 @@ async def _late_disconnect_then_shutdown(games, fake_clock, *, saw_signal: bool)
     if saw_signal:
         rt.mark_draining()
     fake_clock.advance(3_000)
-    await rt.handler.games.mark_connected(state.game_id, 2, worker_id="w-test")
+    await rt.handler.games.mark_connected(state.game_id, 2, owner="w-test")
     await rt.on_disconnect(session_of(2), 1012)   # 활동은 서비스가 정한다 — 이 유저는 게임 중
     fake_clock.advance(3_000)
     await rt.stop()

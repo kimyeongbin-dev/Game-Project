@@ -15,7 +15,6 @@ import logging
 from typing import Optional
 
 from app.core.time import Clock, redis_clock
-from app.core.worker import WORKER_ID
 from app.db import redis_keys as keys
 from app.db.redis_lock import require_redis
 from app.schemas.ws_messages import WSMessageType as T
@@ -44,14 +43,11 @@ class Delivery:
         room_service: Rooms = rooms,
         match_service: Matchmaking = matchmaking,
         clock: Clock = redis_clock,
-        worker_id: Optional[str] = None,
     ):
         self._games = games
         self._rooms = room_service
         self._matches = match_service
         self._clock = clock
-        # 게임이 시작되면 이 워커에 붙은 좌석의 소유를 기록한다 — 시작 직후 크래시해도 스위퍼가 그 좌석을 찾는다(H4)
-        self._worker_id = worker_id
 
     # ----- 이벤트 -----
 
@@ -76,7 +72,6 @@ class Delivery:
         view = snap.view
 
         if event.kind == events.GAME_STARTED:
-            await self._claim_seat(game_id, user_id)
             return [
                 server_message(T.GAME_START, wire.game_start_payload(snap.meta, view["me"]["seat_no"]), version=v),
                 server_message(T.GAME_STATE, wire.game_state_payload(view), version=v),
@@ -105,11 +100,10 @@ class Delivery:
         return []
 
 
-    async def _claim_seat(self, game_id: str, user_id: int) -> None:
-        if self._worker_id is None:
-            return
+    async def claim_seat(self, game_id: str, user_id: int, owner: str) -> None:
+        """이 연결이 그 좌석의 연결이다 — 게임 시작·재구독 때 버스가 부른다(검토 H4·R4). 크래시하면 스위퍼가 이 좌석을 찾는다"""
         try:
-            await self._games.mark_connected(game_id, user_id, worker_id=self._worker_id)
+            await self._games.mark_connected(game_id, user_id, owner=owner)
         except Exception:  # 다음 재접속·행동이 다시 기록한다 — 전달을 막지 않는다
             logger.warning("Could not record seat owner for user %s in game %s", user_id, game_id)
 
@@ -214,4 +208,4 @@ class Delivery:
         return [server_message(T.GAME_STATE, wire.game_state_payload(snap.view), version=v), last]
 
 
-delivery = Delivery(worker_id=WORKER_ID)
+delivery = Delivery()
