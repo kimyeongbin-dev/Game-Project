@@ -167,3 +167,23 @@ async def test_require_redis_raises_when_unavailable(monkeypatch):
     monkeypatch.setattr(redis_module, "_available", False)
     with pytest.raises(StoreUnavailable):
         require_redis()
+
+
+async def test_killed_pool_connections_are_retried(redis_client):
+    """Redis 쪽에서 풀 연결이 전부 끊겨도(CLIENT KILL·재시작) 다음 명령이 실패하지 않는다 — 발행·전달이 조용히 사라지지 않게
+    (M3 7단계 다중 워커 실측: redis-py 기본 재시도 0회)"""
+    import asyncio
+
+    await asyncio.gather(*(redis_client.ping() for _ in range(8)))      # 풀에 연결 여러 개를 만든다
+    from app.core.config import settings
+
+    test_db = settings.redis_url.rstrip("/").rsplit("/", 1)[1]
+    me = await redis_client.client_id()
+    victims = [c["id"] for c in await redis_client.client_list(_type="normal")
+               if str(c.get("db")) == test_db and str(c["id"]) != str(me)]   # 같은 Redis 의 개발 서버는 건드리지 않는다
+    assert victims
+    for cid in victims:
+        await redis_client.client_kill_filter(_id=cid)
+    results = await asyncio.gather(*(redis_client.set(f"game:retry:{i}", "x") for i in range(8)),
+                                   return_exceptions=True)
+    assert [r for r in results if isinstance(r, Exception)] == []

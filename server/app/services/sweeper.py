@@ -268,6 +268,13 @@ class DeadlineSweeper:
         lease_score = now - timeout + settings.sweeper_claim_lease_ms
         async with store_errors():
             await redis.zadd(keys.workers(), {self._worker_id: now})
+            # 전역 Redis 장애 동안에는 **모든** 워커의 하트비트가 멈춘다. 복구 직후 먼저 돈 워커가 살아 있는 다른 워커를 죽었다고
+            # 보면, 그 워커의 좌석이 장애 시작부터 끊김이 되어 접속 예산을 넘겨 기권패한다(M3 7단계 다중 워커 실측).
+            # 장애가 끝난 뒤 하트비트 타임아웃만큼은 판정하지 않는다 — 그동안 살아 있는 워커는 하트비트를 다시 남긴다
+            last_outage = await redis.zrevrange(keys.store_outages(), 0, 0, withscores=True)
+        if last_outage and now - int(last_outage[0][1]) < timeout:
+            return
+        async with store_errors():
             flat = await redis.eval(_CLAIM_WORKERS_LUA, 1, keys.workers(),
                                     now - timeout, lease_score, settings.sweeper_batch)
         for i in range(0, len(flat), 2):

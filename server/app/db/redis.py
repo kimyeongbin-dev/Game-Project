@@ -15,6 +15,8 @@ import logging
 from typing import Optional
 
 from redis.asyncio import ConnectionPool, Redis
+from redis.asyncio.retry import Retry
+from redis.backoff import NoBackoff
 
 from app.core.config import settings
 
@@ -48,6 +50,18 @@ def get_redis() -> Optional[Redis]:
     return _client if _available else None
 
 
+def _retry() -> Retry:
+    """끊긴 풀 연결에 한 번, 새 연결로 즉시 다시 — redis-py 기본은 0회다
+
+    Redis 가 재시작되거나 연결이 끊기면(`CLIENT KILL`, 네트워크 단절) 풀에 남은 연결이 전부 죽는다. 재시도가 없으면 그
+    연결을 다음에 쓰는 명령이 하나씩 실패한다 — 상태 쓰기는 server_busy 로 클라이언트가 다시 보내지만, **발행·전달 읽기는
+    조용히 사라져** 화면이 멈춘다(M3 7단계 다중 워커 실측). 재시도는 ConnectionError·TimeoutError 에만 돈다.
+    남는 위험: 명령이 실행된 뒤 응답만 잃었으면 한 번 더 실행된다. 상태 쓰기는 같은 값의 펜싱 쓰기·NX 라 무해하고,
+    매칭 Lua(ZPOPMIN)만 두 번 꺼낼 수 있다 — 응답 유실 순간에만이라 수용하고 실측 보고서에 적는다.
+    """
+    return Retry(NoBackoff(), 1)
+
+
 async def init_redis() -> None:
     """Redis 연결 풀 생성 및 헬스 확인 (실패 시 graceful degradation)."""
     global _pool, _client, _limiter_client, _available
@@ -60,6 +74,7 @@ async def init_redis() -> None:
     try:
         _pool = ConnectionPool.from_url(
             settings.redis_url,
+            retry=_retry(),
             max_connections=settings.redis_max_connections,
             socket_timeout=settings.redis_socket_timeout,
             socket_connect_timeout=settings.redis_socket_connect_timeout,
@@ -70,6 +85,7 @@ async def init_redis() -> None:
         await _client.ping()
         _limiter_client = Redis.from_url(
             settings.redis_limiter_url,
+            retry=_retry(),
             max_connections=settings.redis_max_connections,
             socket_timeout=settings.redis_socket_timeout,
             socket_connect_timeout=settings.redis_socket_connect_timeout,

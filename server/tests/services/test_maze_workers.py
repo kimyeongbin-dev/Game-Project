@@ -248,3 +248,37 @@ async def test_ready_after_deadline_is_refused(mm, fake_clock):
     with pytest.raises(MultiplayerError) as exc:
         await mm.mark_ready(match.match_id, 2)
     assert exc.value.code == "not_in_queue"
+
+
+async def test_global_outage_does_not_make_live_workers_look_dead(games, mm, fake_clock, redis_client):
+    """전역 Redis 장애(모든 워커의 하트비트가 함께 멈춤) 뒤 먼저 돈 워커가 살아 있는 다른 워커를 죽었다고 보지 않는다
+    (M3 7단계 다중 워커 실측 — 10 s 정지 뒤 살아 있는 좌석이 접속 예산을 넘겨 기권패했다)"""
+    state, users = await start(games)
+    a, b = worker(games, mm, fake_clock, "w-a"), worker(games, mm, fake_clock, "w-b")
+    await games.mark_connected(state.game_id, users[1], owner="w-a:conn")
+    await a.tick()
+    await b.tick()
+    fake_clock.advance(TIMEOUT + 5 * S)            # Redis 정지 — 아무도 하트비트를 남기지 못했다(store:alive 도 그대로)
+    report = await b.tick()                        # 복구 직후 b 가 먼저 돈다
+    assert report.outage is not None and report.dropped == []
+    await a.tick()
+    await passes(fake_clock, TIMEOUT // 2)
+    assert (await b.tick()).dropped == []
+    assert (await clocks_of(redis_client, state.game_id)).seat(2).connected
+
+
+async def test_worker_that_really_died_during_outage_is_still_reaped(games, mm, fake_clock, redis_client):
+    """대조군 — 장애 뒤에도 하트비트를 남기지 않는 워커는 유예가 끝나면 처리된다"""
+    state, users = await start(games)
+    a, b = worker(games, mm, fake_clock, "w-a"), worker(games, mm, fake_clock, "w-b")
+    await games.mark_connected(state.game_id, users[1], owner="w-a:conn")
+    await a.tick()
+    await b.tick()
+    fake_clock.advance(TIMEOUT + 5 * S)
+    await b.tick()                                 # a 는 장애 중에 죽었다 — 다시 오지 않는다
+    for _ in range(3):
+        await passes(fake_clock, TIMEOUT // 2)
+        report = await b.tick()
+        if report.dropped:
+            break
+    assert report.dropped == [(state.game_id, 2)]
