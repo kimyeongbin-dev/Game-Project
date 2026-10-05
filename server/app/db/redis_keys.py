@@ -15,8 +15,8 @@ Pub/Sub 채널(4단계)도 여기서 만든다. 키가 아니라 채널이다 �
 
 from app.core.config import settings
 
-# 테스트 픽스처가 정리할 접두어. 리미터 키(같은 테스트 DB)는 여기 없다
-PREFIXES = ("game:", "queue:", "match:", "room:", "user:", "deadlines:", "store:")
+# 테스트 픽스처가 정리할 접두어. slowapi 리미터 키는 여기 없다. ws: 는 WS 접속 카운터(테스트는 리미터 DB = 1)
+PREFIXES = ("game:", "queue:", "match:", "room:", "user:", "deadlines:", "store:", "ws:")
 
 
 # ----- 게임 -----

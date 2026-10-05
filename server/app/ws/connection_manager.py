@@ -10,7 +10,6 @@ WebSocket 연결 관리 — 이 워커 프로세스의 소켓만 안다
 
 import logging
 import secrets
-import time
 from typing import Dict, Optional
 from fastapi import WebSocket
 from dataclasses import dataclass, field
@@ -20,16 +19,11 @@ from app.core.time import utcnow
 logger = logging.getLogger(__name__)
 
 
-def _monotonic_ms() -> int:
-    return time.monotonic_ns() // 1_000_000
-
-
 @dataclass
 class PlayerConnection:
     """플레이어 연결 정보
 
     replaced: 같은 계정의 새 연결이 이 연결을 밀어냈다(4000). 핸들러는 이 연결의 끝을 **끊김으로 치지 않는다**.
-    accepted_ms·last_inbound_ms: 단조 시계 — 반개방 끊김 소급(L19)의 하한
     """
     websocket: WebSocket
     user_id: int
@@ -37,11 +31,6 @@ class PlayerConnection:
     connected_at: datetime = field(default_factory=utcnow)
     conn_id: str = field(default_factory=lambda: secrets.token_hex(8))
     replaced: bool = False
-    accepted_ms: int = field(default_factory=_monotonic_ms)
-    last_inbound_ms: int = field(default_factory=_monotonic_ms)
-
-    def touch(self) -> None:
-        self.last_inbound_ms = _monotonic_ms()
 
 
 class ConnectionManager:

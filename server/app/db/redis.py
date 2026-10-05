@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 
 _pool: Optional[ConnectionPool] = None
 _client: Optional[Redis] = None
+# 레이트 리미터 논리 DB(redis_limiter_db) — WS 접속 카운터(M3 7단계). 앱 상태와 같은 DB 에 두지 않는다
+_limiter_client: Optional[Redis] = None
 _available = False
 
 
@@ -31,6 +33,11 @@ def is_redis_available() -> bool:
     Redis 를 필요로 하는 코드는 반드시 이 함수로 먼저 확인한다.
     """
     return _available
+
+
+def get_limiter_redis() -> Optional[Redis]:
+    """리미터 DB 클라이언트. Redis 가 없으면 None"""
+    return _limiter_client if _available else None
 
 
 def get_redis() -> Optional[Redis]:
@@ -43,7 +50,7 @@ def get_redis() -> Optional[Redis]:
 
 async def init_redis() -> None:
     """Redis 연결 풀 생성 및 헬스 확인 (실패 시 graceful degradation)."""
-    global _pool, _client, _available
+    global _pool, _client, _limiter_client, _available
 
     if not settings.redis_enabled:
         logger.info("Redis disabled by configuration (REDIS_ENABLED=false)")
@@ -61,6 +68,13 @@ async def init_redis() -> None:
         )
         _client = Redis(connection_pool=_pool)
         await _client.ping()
+        _limiter_client = Redis.from_url(
+            settings.redis_limiter_url,
+            max_connections=settings.redis_max_connections,
+            socket_timeout=settings.redis_socket_timeout,
+            socket_connect_timeout=settings.redis_socket_connect_timeout,
+            decode_responses=True,
+        )
         _available = True
         logger.info("Redis connection established successfully")
     except Exception as exc:
@@ -100,7 +114,13 @@ async def close_redis() -> None:
 
 
 async def _dispose() -> None:
-    global _pool, _client
+    global _pool, _client, _limiter_client
+    if _limiter_client is not None:
+        try:
+            await _limiter_client.aclose()
+        except Exception as exc:
+            logger.debug("Redis limiter client close failed: %s", exc)
+        _limiter_client = None
     if _client is not None:
         try:
             await _client.aclose()

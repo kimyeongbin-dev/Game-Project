@@ -44,10 +44,12 @@ from app.services.rooms import Rooms, rooms
 from app.ws import wire
 from app.ws.connection_manager import ConnectionManager, PlayerConnection, connection_manager
 from app.ws.delivery import Delivery, delivery
+from app.ws.rate_limit import ConnectLimiter, TokenBucket, connect_limiter, message_bucket
 from app.ws.protocol import (
     CLOSE_INVALID_TOKEN,
     CLOSE_LOGIN_REQUIRED,
     CLOSE_NICKNAME_REQUIRED,
+    CLOSE_POLICY_VIOLATION,
     CLOSE_TRY_AGAIN_LATER,
     ClientMessage,
     ProtocolError,
@@ -70,6 +72,7 @@ class Session:
     """연결 하나 — 인증된 신원과 연결 맵 항목"""
     identity: Identity
     conn: PlayerConnection
+    bucket: TokenBucket = field(default_factory=message_bucket)
 
     @property
     def user_id(self) -> int:
@@ -89,6 +92,8 @@ class MazeSocketHandler:
     identity: IdentityDirectory = identity_directory
     worker_id: str = WORKER_ID
     publisher: Publisher = redis_publisher
+    limiter: ConnectLimiter = connect_limiter
+    bucket_factory: Callable[[], TokenBucket] = message_bucket
     # 소켓이 끝났을 때 — 기본은 바로 끊김을 기록한다. 런타임(B1)이 추적·재시도하는 구현으로 바꾼다
     on_disconnect: Optional[DisconnectHook] = None
     _handlers: dict = field(init=False, repr=False)
@@ -140,10 +145,13 @@ class MazeSocketHandler:
             return await _reject(websocket, CLOSE_NICKNAME_REQUIRED)
         if get_redis() is None:  # 멀티플레이는 Redis 없이 성립하지 않는다
             return await _reject(websocket, CLOSE_TRY_AGAIN_LATER)
+        # 접속 연타 — 재접속마다 mark_connected 가 게임 락을 잡는다. 연결 맵·세션 키를 건드리기 전에 끊는다
+        if not await self.limiter.allow(identity.user_id):
+            return await _reject(websocket, CLOSE_TRY_AGAIN_LATER)
 
         conn = await self.manager.connect(websocket, identity.user_id, identity.nickname)
         conn.conn_id = f"{self.worker_id}:{conn.conn_id}"
-        session = Session(identity, conn)
+        session = Session(identity, conn, self.bucket_factory())
         try:
             await self._claim_session(session)
             await self._welcome(session)
@@ -193,8 +201,13 @@ class MazeSocketHandler:
             message = await websocket.receive()
             if message["type"] == "websocket.disconnect":
                 return message.get("code")
-            session.conn.touch()
             text = message.get("text")
+            if not session.bucket.allow():
+                if session.bucket.exhausted:
+                    await websocket.close(code=CLOSE_POLICY_VIOLATION)
+                    return CLOSE_POLICY_VIOLATION
+                await self._send(session, error_message("rate_limit_exceeded", _peek_seq(text)))
+                continue
             if text is None:  # 바이너리 프레임
                 await self._send(session, error_message("invalid_request"))
                 continue
@@ -358,6 +371,16 @@ class MazeSocketHandler:
             if state is not None and seat_no is not None and state.seat(seat_no).is_eliminated:
                 return error_message("not_in_game", request.seq)
         return error_message("feature_disabled", request.seq)
+
+
+def _peek_seq(text: Optional[str]) -> Optional[int]:
+    """리밋에 걸린 요청의 ack_seq — 봉투만 본다(처리하지 않는다)"""
+    if text is None:
+        return None
+    try:
+        return parse_envelope(text).seq
+    except ProtocolError as exc:
+        return exc.ack_seq
 
 
 def _outcome_reply(rejection: Optional[str], request: ClientMessage) -> Optional[dict]:

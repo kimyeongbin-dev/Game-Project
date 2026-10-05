@@ -136,6 +136,11 @@ class Settings(BaseSettings):
     ws_ping_timeout_sec: float = Field(default=5.0, gt=0)
     # 메시지 하나의 상한(바이트). 클라이언트 메시지는 수십 바이트다 — 기본 16 MiB 는 남용 여지일 뿐이다
     ws_max_size_bytes: int = Field(default=4096, ge=256)
+    # WS 레이트 리밋 (판단 7) — 메시지는 소켓별 토큰 버킷, 위반이 쌓이면 1008, 접속은 유저별 분당
+    ws_msg_burst: int = Field(default=20, ge=1)
+    ws_msg_per_sec: float = Field(default=5.0, gt=0)
+    ws_violation_close: int = Field(default=50, ge=1)
+    ws_connect_per_minute: int = Field(default=20, ge=1)
     # 끊김 기록이 실패(락 경합·Redis 장애)하면 원래 시각으로 이 시간까지 다시 시도한다 (검토 H4)
     disconnect_retry_max_sec: int = Field(default=120, ge=1)
 
