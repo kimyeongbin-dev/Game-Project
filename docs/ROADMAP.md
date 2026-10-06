@@ -189,6 +189,8 @@
    지금은 소켓 전송 시간 상한으로만 막는다) ② WS 핸드셰이크의 IP 단위 리밋(R11 나머지 — 무효 토큰 연타. `X-Forwarded-For`
    실측과 함께)
 7. 부하 — 워커 3개 이상, 수백 동시 게임(M3 하네스는 기능 판정이다. 분배가 치우친다는 E1 을 용량 산정에 반영한다)
+8. **M3 7단계 독립 검토 #2 에서 이관**([검토 보고서](research/2026-10-06-M3-7단계-독립검토-2.md) 채택표) — 재구독 재동기화를
+   수신 루프 밖 유계 태스크로, 이벤트당 Redis 왕복 줄이기(Q12 — 위 6 ① 과 함께)
 
 ---
 
@@ -202,6 +204,7 @@
 | CORS 오리진 제한 | `app/main.py:96`이 `allow_origins=["*"]` | 개발 편의. **프로덕션 배포 전 필수**. M4에서 처리 |
 | WS 라우터 미등록 | maze WS 라우터가 아직 없다. 구 Quoridor 핸들러 `app/ws/ws_game.py` 는 M3 3단계에서 삭제했다 | **완료**(M3 7단계) — `/api/v1/ws/maze`(`app/ws/maze_handler.py`), 버스·스위퍼·큐 티커는 `app/ws/runtime.py` 가 lifespan 에 건다 |
 | CI 비밀번호 생성 단계 첫 실행 확인 | `test-and-merge.yml` server-tests 잡의 `Generate Redis password` 단계(커밋 `e39b806`, compose 비밀번호 기본값 제거)가 아직 한 번도 실행되지 않았다. 워크플로가 `dev-test` push 에서만 돈다 | **재구조화 완료 후 첫 `dev-test` push 때** 확인한다 — 잡 통과, 로그에 비밀번호가 마스킹됨, `docker compose` 가 `:?` 필수값 오류 없이 뜸. 로컬에서는 같은 조건(무작위 비밀번호 + 필수값)으로 확인했다 |
+| `server_busy` 재시도 멱등 키 | 장애 순간 쓰기 응답을 잃으면 `server_busy` 여도 행동이 반영됐을 수 있다. 지금은 maze.md §13 이 "재시도가 `not_your_turn` 이면 반영된 것"을 명시할 뿐 멱등 키가 없다 | M3 7단계 독립 검토 #2 관점 3(a). 프로토콜 필드 추가라 **클라이언트 구현과 함께** 설계한다 |
 | 스케줄러 제거 판단 | `app/services/scheduler/`는 일일 리셋 전용이고, 랭킹이 MMR로 단순화되면 쓰이지 않는다 | **완료**(M3 2단계, 커밋 `3e889a9`). 근거 3개: ① 시계 만료를 ZSET 스위퍼가 처리한다 ② `refresh_tokens` 정리가 주기 작업을 쓰지 않는다 ③ `daily_champions` 폐기로 `daily_reset.py`의 유일한 용도가 소멸한다 → `app/services/scheduler/`와 `apscheduler==3.10.4` 제거, `uv.lock` 재생성(전이 의존성 `pytz`·`tzdata`·`tzlocal` 동반 제거) |
 
 ---
