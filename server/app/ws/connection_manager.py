@@ -43,6 +43,7 @@ class ConnectionManager:
     def __init__(self):
         # user_id -> PlayerConnection
         self._connections: Dict[int, PlayerConnection] = {}
+        self._closing: set[asyncio.Task] = set()
 
     async def connect(self, websocket: WebSocket, user_id: int, nickname: str) -> PlayerConnection:
         """새 연결 등록"""
@@ -119,7 +120,9 @@ class ConnectionManager:
             except Exception as e:
                 logger.warning("Failed to send message to %s: %s", user_id, type(e).__name__)
                 await self.disconnect(user_id, conn.websocket)
-                asyncio.create_task(_close_quietly(conn.websocket, 1013))
+                task = asyncio.create_task(_close_quietly(conn.websocket, 1013))
+                self._closing.add(task)                 # 참조를 잡아 둔다 — 버려진 태스크는 GC 될 수 있다
+                task.add_done_callback(self._closing.discard)
 
     async def broadcast(self, message: dict):
         """이 워커의 모든 연결에 메시지 전송"""

@@ -185,3 +185,62 @@ async def test_retry_older_than_the_game_is_ignored_even_without_a_live_marker(r
     state = await start(real)
     assert await real.redo_disconnect(state.game_id, 2, owner="w1:c0", at_ms=t_gone) is None
     assert (await real.load_clocks(state.game_id)).seat(2).connected
+
+
+# ----- Q7 -----
+
+async def test_resync_reports_an_ending_once(real, redis_client, fake_clock):
+    """끝난 게임을 재동기화로 한 번 알리면 그 활동을 잊는다 — 다음 재구독에서 결과를 다시 보내지 않는다"""
+    state = await start(real)
+    manager = ConnectionManager()
+    bus = EventBus(manager, Delivery(real, None, None, clock=fake_clock))
+    ws = MockWebSocket()
+    conn = await manager.connect(ws, 1, "a")
+    conn.last_activity = ("game", state.game_id)
+    await real.surrender(state.game_id, 2)                        # 끝났다 — 활동이 풀린다
+    await bus._resync_all()
+    assert [m["type"] for m in ws.sent_messages] == ["game_state", "game_end"]
+    assert conn.last_activity is None
+    ws.sent_messages.clear()
+    await bus._resync_all()
+    assert ws.sent_messages == []
+
+
+# ----- Q13 -----
+
+def test_periodic_bursts_cannot_dodge_1008(monkeypatch):
+    """쉬었다 연타하기를 반복해도 위반은 초당 하나씩만 잊는다 — 결국 1008"""
+    from app.core.config import settings
+    from app.ws.rate_limit import TokenBucket
+
+    monkeypatch.setattr(settings, "ws_violation_close", 50)
+    t = {"now": 0.0}
+    bucket = TokenBucket(3, 1.0, lambda: t["now"])
+    closed = False
+    for _ in range(10):
+        t["now"] += 4.0                                           # 버스트를 다시 채울 만큼 쉰다
+        for _ in range(3 + 30):                                   # 버스트 3 + 위반 30
+            bucket.allow()
+        if bucket.exhausted:
+            closed = True
+            break
+    assert closed
+
+
+# ----- Q14 -----
+
+def test_production_health_hides_worker_details(monkeypatch):
+    from app.core.config import settings
+    from tests.ws.test_runtime import FakePart
+    from app.ws.runtime import Realtime
+    from tests.ws.live import build_handler
+
+    parts = SimpleNamespace(calls=[])
+    rt = Realtime(build_handler(SimpleNamespace()), bus=FakePart("b", parts), sweeper=FakePart("s", parts),
+                  ticker=FakePart("t", parts))
+    monkeypatch.setattr(settings, "environment", "production")
+    monkeypatch.setattr(settings, "ws_expose_worker", False)
+    health = rt.health()
+    assert "worker_id" not in health and "connections" not in health and "name" not in health["bus"]
+    monkeypatch.setattr(settings, "ws_expose_worker", True)
+    assert "worker_id" in rt.health()

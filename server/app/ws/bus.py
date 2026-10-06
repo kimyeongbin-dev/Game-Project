@@ -160,6 +160,7 @@ class EventBus:
                 continue
             for message in messages:
                 await self._manager.send_personal(user_id, message)
+            _forget_if_ended(self._manager.get_connection(user_id), messages)
 
     async def _activity(self, user_id: int):
         try:
@@ -222,6 +223,21 @@ class EventBus:
                 continue
             for message in messages:
                 await self._manager.send_personal(user_id, message)
+            _forget_if_ended(conn, messages)
+
+
+def is_ending(message: dict) -> bool:
+    """활동의 끝을 알리는 메시지 — 게임 결과, 방 해산·퇴장, 큐 밖으로(매치 만료)"""
+    payload = message.get("payload", {})
+    return (message.get("type") == "game_end"
+            or (message.get("type") == "player_left" and payload.get("room_closed"))
+            or (message.get("type") == "queue_status" and payload.get("requeued") is False))
+
+
+def _forget_if_ended(conn, messages: list[dict]) -> None:
+    """끝을 알렸으면 그 활동을 잊는다 — 재구독마다 이미 받은 결과를 다시 보내지 않게(독립 검토 #2 Q7)"""
+    if conn is not None and any(is_ending(m) for m in messages):
+        conn.last_activity = None
 
 
 async def _close_quietly(pubsub, client) -> None:

@@ -222,7 +222,8 @@ class Delivery:
             return [server_message(T.GAME_STATE, wire.game_state_payload(snap.view), version=snap.version),
                     self._end(snap, snap.version)]
         if scope == "room":
-            return [server_message(T.PLAYER_LEFT, {"seat_no": None, "room_code": scope_id, "room_closed": True})]
+            # 그 사이 방이 사라졌다 — 해산 통지와 같은 모양(호스트 = 1)
+            return [server_message(T.PLAYER_LEFT, {"seat_no": 1, "room_code": scope_id, "room_closed": True})]
         if scope == "match":
             return [server_message(T.QUEUE_STATUS, wire.queue_payload(None, 0, 0, requeued=False))]
         return []

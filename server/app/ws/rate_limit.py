@@ -26,6 +26,7 @@ from app.db.redis import get_limiter_redis
 logger = logging.getLogger(__name__)
 
 WINDOW_SEC = 60
+VIOLATION_DECAY_PER_SEC = 1.0
 
 
 def _monotonic() -> float:
@@ -40,13 +41,20 @@ class TokenBucket:
         self.tokens = float(burst)
         self._at = clock()
         self.violations = 0
+        self._decay = 0.0
 
     def allow(self) -> bool:
         now = self._clock()
-        self.tokens = min(self.burst, self.tokens + (now - self._at) * self.per_sec)
+        elapsed = now - self._at
+        self.tokens = min(self.burst, self.tokens + elapsed * self.per_sec)
+        # 지난 위반은 초당 하나씩 잊는다 — 오래 산 정상 연결이 가끔의 초과로 1008 을 받지 않고(R14-6), 쉬었다 연타하는 주기로
+        # 1008 을 영구히 피하지도 못한다(독립 검토 #2 Q13)
+        self._decay += elapsed * VIOLATION_DECAY_PER_SEC
+        whole = int(self._decay)                    # 정수 단위로 — 빠른 연타에서 위반 수가 경계에 정확히 닿게
+        if whole:
+            self.violations = max(0, self.violations - whole)
+            self._decay -= whole
         self._at = now
-        if self.tokens >= self.burst:   # 버스트를 다 채울 만큼 조용했다 — 지난 위반은 잊는다(R14-6)
-            self.violations = 0
         if self.tokens >= 1:
             self.tokens -= 1
             return True

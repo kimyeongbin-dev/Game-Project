@@ -359,11 +359,13 @@ class MazeSocketHandler:
             # 시작 후 이탈 — 탈락한 좌석이면 구경을 그만두고 나가고(결과는 그대로), 생존 좌석이면 항복 (§9)
             seat_no = await self.games.leave_eliminated(rest, session.user_id)
             if seat_no is not None:
+                session.conn.last_activity = None   # 스스로 나갔다 — 재구독 때 그 게임의 끝을 다시 알리지 않는다(Q7)
                 return server_message(T.PLAYER_LEFT, {"seat_no": seat_no, "game_id": rest}, ack_seq=request.seq)
             return await self._surrender(session, request)
         if kind != "room":
             raise MultiplayerError("not_in_room")
         result = await self.rooms.leave_room(session.user_id)
+        session.conn.last_activity = None       # 스스로 나갔다 — 남은 방을 "해산"으로 알리지 않는다(Q7)
         return server_message(T.PLAYER_LEFT, {"seat_no": result.seat_no, "room_code": result.room.code,
                                               "room_closed": result.dissolved}, ack_seq=request.seq)
 

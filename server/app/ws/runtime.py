@@ -328,6 +328,14 @@ class Realtime:
     # ----- 관측 -----
 
     def health(self) -> dict:
+        """운영(production)에서는 상태만 — 워커 id(pid)·버스 이름(CLIENT KILL 표적)·연결 수는 내보내지 않는다.
+        하네스·개발은 ws_expose_worker 로 전부 본다(독립 검토 #2 Q14)"""
+        if settings.is_production and not settings.ws_expose_worker:
+            return {
+                "started": self.started,
+                "bus": {"subscribed": self.bus.subscribed},
+                "sweeper": {"running": self.sweeper.running, "last_tick_ok": self.sweeper.last_tick_ok},
+            }
         return {
             "started": self.started,
             "worker_id": self.worker_id,
