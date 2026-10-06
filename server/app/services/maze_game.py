@@ -440,22 +440,24 @@ class MazeGameService:
 
     # ----- 행동 (클라이언트 — 좌석·시각을 받지 않는다) -----
 
-    async def move(self, game_id: str, user_id: int, row: int, col: int) -> ActionOutcome:
+    async def move(self, game_id: str, user_id: int, row: int, col: int, *,
+                   owner: Optional[str] = None) -> ActionOutcome:
         return await self._player_action(
-            game_id, user_id, events.ACTION_MOVE, lambda s, seat: s.move(seat, row, col)
+            game_id, user_id, events.ACTION_MOVE, lambda s, seat: s.move(seat, row, col), owner
         )
 
     async def place_wall(
-        self, game_id: str, user_id: int, row: int, col: int, orientation: str
+        self, game_id: str, user_id: int, row: int, col: int, orientation: str, *,
+        owner: Optional[str] = None,
     ) -> ActionOutcome:
         return await self._player_action(
             game_id, user_id, events.ACTION_WALL,
-            lambda s, seat: s.place_wall(seat, row, col, orientation),
+            lambda s, seat: s.place_wall(seat, row, col, orientation), owner,
         )
 
-    async def surrender(self, game_id: str, user_id: int) -> ActionOutcome:
+    async def surrender(self, game_id: str, user_id: int, *, owner: Optional[str] = None) -> ActionOutcome:
         """즉시 탈락 (§9). 게임이 끝나는지는 엔진의 종료 조건이 정한다"""
-        return await self._player_action(game_id, user_id, events.ACTION_ELIMINATED, None)
+        return await self._player_action(game_id, user_id, events.ACTION_ELIMINATED, None, owner)
 
     async def _fast_reject(self, game_id: str, user_id: int, needs_turn: bool,
                            received: int) -> Optional[ActionOutcome]:
@@ -508,12 +510,23 @@ class MazeGameService:
 
     async def _disconnect(self, game_id: str, user_id: int, owner: Optional[str],
                           at_ms: Optional[int]) -> Optional[Disconnection]:
+        # 좌석 owner 가 아직 없으면(게임 시작 직후 기록 전) 연결 id 를 대조할 수 없다 — 그 유저의 지금 연결 표시로 본다.
+        # 다른 연결이 붙어 있으면 이 끊김은 옛 연결의 것이다(독립 검토 #2 Q2). 연결이 끝나면 표시는 먼저 지워진다(release_session)
+        live = None
+        if owner is not None:
+            async with store_errors():
+                live = await require_redis().get(keys.user_conn(user_id))
+
         def step(tx: _Tx) -> Optional[Disconnection]:
             seat_no = tx.meta.seat_of(user_id)
             if seat_no is None or tx.closed or tx.state.seat(seat_no).is_eliminated:
                 return None
+            if at_ms is not None and tx.clocks.started_at_ms > at_ms:
+                return None  # 끊긴 뒤에 시작한 게임 — 그 끊김은 이 게임의 것이 아니다(Q2)
             current = tx.clocks.seat(seat_no).owner
             if owner is not None and current is not None and current != owner:
+                return None
+            if owner is not None and current is None and live is not None and live != owner:
                 return None
             when = tx.now if at_ms is None else min(tx.now, max(at_ms, tx.clocks.latest_ms()))
             fresh = tx.clocks.disconnect(seat_no, when)
@@ -663,7 +676,9 @@ class MazeGameService:
 
     # ----- 내부 -----
 
-    async def _player_action(self, game_id: str, user_id: int, action: str, apply) -> ActionOutcome:
+    async def _player_action(self, game_id: str, user_id: int, action: str, apply,
+                             owner: Optional[str] = None) -> ActionOutcome:
+        """owner: 행동이 온 연결의 id — 행동 = 재접속이므로 좌석 소유도 그 연결로 기록한다(독립 검토 #2 Q11)"""
         # 서버 수신 시각 — 락을 기다린 시간을 행위자에게 물리지 않는다(§8 "서버 수신 시각", 검토 H8)
         received = await self._clock.now_ms()
         fast = await self._fast_reject(game_id, user_id, apply is not None, received)
@@ -678,6 +693,8 @@ class MazeGameService:
             if seat_no is None or tx.state.seat(seat_no).is_eliminated:
                 return "not_in_game"
             self._reconnect(tx, seat_no)  # 행동을 보냈다는 것이 연결의 증거다
+            if owner is not None:
+                tx.clocks.set_owner(seat_no, owner)
             if apply is None:
                 rejection = self._eliminate(tx, seat_no, "surrender")
                 return rejection.value if rejection else None

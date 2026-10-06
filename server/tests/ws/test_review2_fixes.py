@@ -1,0 +1,187 @@
+"""
+독립 검토 #2 회귀 — 재구독 claim 이 소유를 되돌리지 않음(Q1), 끊긴 뒤 시작한 게임·남의 연결(Q2), 락 자기 교착(Q5),
+행동 경로 소유(Q11), 연결 표시 해제 재시도(Q10)  (docs/research/2026-10-06-M3-7단계-독립검토-2.md)
+
+검토자의 재현 테스트(저장소 밖)를 옮겼다. 실제 Redis(논리 DB 1), DB 없음.
+"""
+
+import asyncio
+from types import SimpleNamespace
+
+import pytest
+
+from app.db import redis_keys as keys
+from app.db.redis_lock import redis_lock
+from app.services.identity import Identity
+from app.services.maze_game import MazeGameService, SeatPlayer
+from app.ws.bus import EventBus
+from app.ws.connection_manager import ConnectionManager
+from app.ws.delivery import Delivery
+from app.ws.maze_handler import Session
+from tests.ws.conftest import MockWebSocket
+from tests.ws.test_review_fixes import Flaky, rt_for, session
+
+
+@pytest.fixture
+def real(redis_client, fake_clock) -> MazeGameService:
+    return MazeGameService(lambda: None, clock=fake_clock)
+
+
+async def start(games):
+    return await games.create_game(mode="duel", is_ranked=False,
+                                   players=[SeatPlayer(1, 1, "a"), SeatPlayer(2, 2, "b")])
+
+
+# ----- Q1 -----
+
+async def test_resubscribe_does_not_hand_the_seat_back_to_a_stale_connection(real, redis_client, fake_clock):
+    state = await start(real)
+    manager = ConnectionManager()
+    bus = EventBus(manager, Delivery(real, None, None, clock=fake_clock))
+    ws = MockWebSocket()
+    old = await manager.connect(ws, 2, "b")
+    old.conn_id = "wA:old"
+    await real.mark_connected(state.game_id, 2, owner="wA:old")
+    # 구독이 끊긴 사이 같은 계정이 다른 워커로 — 교체 통지를 놓쳤다
+    await redis_client.set(keys.user_conn(2), "wB:new")
+    await real.mark_connected(state.game_id, 2, owner="wB:new")
+
+    await bus._resync_all()                                   # 재구독 직후
+    await asyncio.sleep(0.05)
+    assert ws.closed and ws.close_code == 4000                # 옛 연결은 닫힌다
+    assert (await real.load_clocks(state.game_id)).seat(2).owner == "wB:new"
+
+    bus._claim(state.game_id, 2)                              # 남은 연결이 없으니 아무 일도 없다
+    await asyncio.sleep(0.05)
+    assert (await real.load_clocks(state.game_id)).seat(2).owner == "wB:new"
+
+
+async def test_claim_only_for_the_current_connection(real, redis_client, fake_clock):
+    state = await start(real)
+    manager = ConnectionManager()
+    bus = EventBus(manager, Delivery(real, None, None, clock=fake_clock))
+    conn = await manager.connect(MockWebSocket(), 2, "b")
+    conn.conn_id = "wA:old"
+    await redis_client.set(keys.user_conn(2), "wB:new")       # Redis 가 아는 현재 연결은 다른 것
+    bus._claim(state.game_id, 2)
+    await asyncio.sleep(0.05)
+    assert (await real.load_clocks(state.game_id)).seat(2).owner is None
+    await redis_client.set(keys.user_conn(2), "wA:old")
+    bus._claim(state.game_id, 2)
+    await asyncio.sleep(0.05)
+    assert (await real.load_clocks(state.game_id)).seat(2).owner == "wA:old"
+
+
+# ----- Q2 -----
+
+async def test_late_resolved_retry_does_not_hit_a_game_started_after_it(real, redis_client, fake_clock):
+    """방에서 Redis 순간 장애 중 끊긴 연결 c0 → 같은 유저가 c1 로 돌아와 새 게임 시작 → c0 재시도가 그 게임에 닿지 않는다"""
+    rt = rt_for(real, fake_clock)
+    calls = {"n": 0}
+    original = rt.handler._activity
+
+    async def blip(uid):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            from app.db.redis_lock import StoreUnavailable
+            raise StoreUnavailable("blip")
+        return await original(uid)
+
+    rt.handler._activity = blip
+    await rt._record_disconnect(session(2, "w1:c0"), 1006)
+    assert len(rt.pending) == 1
+    fake_clock.advance(800)
+    await redis_client.set(keys.user_conn(2), "w1:c1")
+    state = await start(real)                                 # 그 뒤 시작 — 좌석 owner 는 아직 기록 전(None)
+    fake_clock.advance(300)
+    await rt.retry_pending()
+    if rt._retry_task:
+        rt._retry_task.cancel()
+    assert (await real.load_clocks(state.game_id)).seat(2).connected
+
+
+async def test_unowned_seat_ignores_a_disconnect_from_another_connection(real, redis_client):
+    """owner 기록 전 좌석 — 그 유저의 지금 연결 표시가 다른 연결이면 그 끊김은 옛 연결의 것이다"""
+    state = await start(real)
+    await redis_client.set(keys.user_conn(2), "wA:live")
+    assert await real.mark_disconnected(state.game_id, 2, owner="wA:stale") is None
+    assert (await real.load_clocks(state.game_id)).seat(2).connected
+    await redis_client.delete(keys.user_conn(2))              # 표시가 지워졌다 = 진짜로 떠났다
+    assert await real.mark_disconnected(state.game_id, 2, owner="wA:live") is not None
+
+
+# ----- Q5 -----
+
+async def test_lock_whose_set_already_landed_is_mine(redis_client, monkeypatch):
+    """SET NX 가 실행된 뒤 응답만 잃고 재시도했다 — 값이 내 토큰이면 기다리지 않고 획득이다"""
+    import secrets as real_secrets
+
+    monkeypatch.setattr(real_secrets, "token_hex", lambda n=16: "fixed-token")
+    await redis_client.set("game:q5:lock", "fixed-token", px=5_000)   # 첫 시도가 남긴 락
+    loop = asyncio.get_running_loop()
+    t = loop.time()
+    async with redis_lock(redis_client, "game:q5:lock", wait_ms=2_000) as token:
+        assert token == "fixed-token"
+    assert loop.time() - t < 0.5
+    assert await redis_client.get("game:q5:lock") is None             # 해제도 된다
+
+
+def test_retry_only_on_connection_errors():
+    from redis.exceptions import ConnectionError, TimeoutError
+
+    from app.db.redis import _retry
+
+    retry = _retry()
+    assert retry._retries == 1
+    assert ConnectionError in retry._supported_errors and TimeoutError not in retry._supported_errors
+
+
+# ----- Q11 -----
+
+async def test_action_records_the_connection_as_owner(real, fake_clock):
+    state = await start(real)
+    await real.mark_disconnected(state.game_id, 1)
+    target = state.get_valid_pawn_moves()[0]
+    outcome = await real.move(state.game_id, 1, target.row, target.col, owner="wA:c9")
+    assert outcome.rejection is None
+    seat = (await real.load_clocks(state.game_id)).seat(1)
+    assert seat.connected and seat.owner == "wA:c9"            # 행동 = 재접속 — 크래시 때 스위퍼가 찾는다
+
+
+# ----- Q10 -----
+
+async def test_failed_release_is_retried_before_recording(real, redis_client, fake_clock, monkeypatch):
+    state = await start(real)
+    await redis_client.set(keys.user_conn(2), "w1:c2")
+    await real.mark_connected(state.game_id, 2, owner="w1:c2")
+    rt = rt_for(real, fake_clock)
+    results = iter([False, False])                            # 연결이 끝날 때와 첫 기록 시도 때 해제가 실패한다(Redis 순간 장애)
+    original = rt.handler.release_session
+
+    async def flaky_release(s):
+        if next(results, True) is False:
+            return False
+        return await original(s)
+
+    monkeypatch.setattr(rt.handler, "release_session", flaky_release)
+    s = Session(Identity(2, "b", 1000), SimpleNamespace(replaced=False, user_id=2, conn_id="w1:c2"))
+    t0 = fake_clock.ms
+    await rt._record_disconnect(s, 1006)
+    assert len(rt.pending) == 1 and rt.pending[0].session is s    # 표시를 못 지웠으면 기록도 미룬다
+    fake_clock.advance(1_000)
+    assert await rt.retry_pending() == 1
+    if rt._retry_task:
+        rt._retry_task.cancel()
+    seat = (await real.load_clocks(state.game_id)).seat(2)
+    assert not seat.connected and seat.disconnected_at_ms == t0    # 원래 시각
+    assert await redis_client.get(keys.user_conn(2)) is None
+    assert rt.pending == []
+
+
+async def test_retry_older_than_the_game_is_ignored_even_without_a_live_marker(real, fake_clock):
+    """연결 표시가 없어 대조가 불가능해도(이미 떠났다) 끊긴 시각이 게임 시작 전이면 그 게임의 좌석에 적용하지 않는다(Q2)"""
+    t_gone = fake_clock.ms
+    fake_clock.advance(1_000)
+    state = await start(real)
+    assert await real.redo_disconnect(state.game_id, 2, owner="w1:c0", at_ms=t_gone) is None
+    assert (await real.load_clocks(state.game_id)).seat(2).connected

@@ -17,6 +17,7 @@ from typing import Optional
 from redis.asyncio import ConnectionPool, Redis
 from redis.asyncio.retry import Retry
 from redis.backoff import NoBackoff
+from redis.exceptions import ConnectionError
 
 from app.core.config import settings
 
@@ -55,11 +56,13 @@ def _retry() -> Retry:
 
     Redis 가 재시작되거나 연결이 끊기면(`CLIENT KILL`, 네트워크 단절) 풀에 남은 연결이 전부 죽는다. 재시도가 없으면 그
     연결을 다음에 쓰는 명령이 하나씩 실패한다 — 상태 쓰기는 server_busy 로 클라이언트가 다시 보내지만, **발행·전달 읽기는
-    조용히 사라져** 화면이 멈춘다(M3 7단계 다중 워커 실측). 재시도는 ConnectionError·TimeoutError 에만 돈다.
-    남는 위험: 명령이 실행된 뒤 응답만 잃었으면 한 번 더 실행된다. 상태 쓰기는 같은 값의 펜싱 쓰기·NX 라 무해하고,
-    매칭 Lua(ZPOPMIN)만 두 번 꺼낼 수 있다 — 응답 유실 순간에만이라 수용하고 실측 보고서에 적는다.
+    조용히 사라져** 화면이 멈춘다(M3 7단계 다중 워커 실측). 재시도는 **ConnectionError 에만** 돈다 — TimeoutError(느린
+    Redis)에 돌면 이미 실행된 명령을 다시 보낸다(독립 검토 #2 Q5).
+    남는 위험: 연결이 응답 도중 끊기면(ConnectionError) 실행된 명령이 한 번 더 실행될 수 있다. 펜싱 쓰기는 같은 값이라 무해하고,
+    게임 락은 "이미 내 토큰이면 획득"으로 판정하며(redis_lock), 세션 키는 GET 뒤 SET 이다. 매칭 Lua(ZPOPMIN)와 PUBLISH(같은
+    version 의 중복 통지 — 클라이언트가 version 으로 거른다)만 남는다 — 연결이 응답 도중 끊기는 순간에만이라 수용한다.
     """
-    return Retry(NoBackoff(), 1)
+    return Retry(NoBackoff(), 1, supported_errors=(ConnectionError,))
 
 
 async def init_redis() -> None:

@@ -177,13 +177,24 @@ class EventBus:
         await self._manager.replace_if_stale(user_id, current or announced)
 
     def _claim(self, game_id: str, user_id: int) -> None:
-        """좌석 소유 기록은 게임 락을 잡는다 — 수신 루프를 막지 않게 따로 돈다(검토 R8). 그때도 연결이 있을 때만(R4)"""
+        """좌석 소유 기록은 게임 락을 잡는다 — 수신 루프를 막지 않게 따로 돈다(검토 R8). 그때도 연결이 있을 때만(R4)
+
+        그리고 **그 유저의 현재 연결이 이 연결일 때만**(Redis `user:{uid}:conn` 이 권위) — 교체 통지를 놓친 옛 연결이
+        소유를 되찾아 오지 않게 한다(독립 검토 #2 Q1).
+        """
         conn = self._manager.get_connection(user_id)
         if conn is None:
             return
 
         async def claim():
-            if self._manager.get_connection(user_id) is conn:
+            if self._manager.get_connection(user_id) is not conn:
+                return
+            try:
+                async with store_errors():
+                    current = await require_redis().get(keys.user_conn(user_id))
+            except StoreUnavailable:
+                return  # 다음 재접속·행동이 기록한다
+            if current == conn.conn_id:
                 await self._delivery.claim_seat(game_id, user_id, conn.conn_id)
 
         task = asyncio.create_task(claim())
@@ -192,6 +203,14 @@ class EventBus:
 
     async def _resync_all(self) -> None:
         for user_id in sorted(self._manager.local_user_ids()):
+            # 끊긴 사이 같은 계정이 다른 워커로 붙었으면(교체 통지 유실, E5) 이 연결은 옛 것이다 — 닫는다(Q1)
+            try:
+                async with store_errors():
+                    owner = await require_redis().get(keys.user_conn(user_id))
+            except StoreUnavailable:
+                owner = None
+            if owner is not None and await self._manager.replace_if_stale(user_id, owner):
+                continue
             current = await self._activity(user_id)
             if current is not None and keys.parse_activity(current)[0] == "game":
                 self._claim(keys.parse_activity(current)[1], user_id)  # 그 사이 시작된 게임(game_started 유실 — R4)

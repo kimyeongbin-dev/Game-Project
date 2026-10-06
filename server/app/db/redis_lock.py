@@ -114,6 +114,9 @@ async def redis_lock(
     deadline = loop.time() + wait_ms / 1000
     async with store_errors():
         while not await redis.set(key, token, nx=True, px=ttl_ms):
+            # 실행된 SET NX 의 응답만 잃고 재시도했으면 락은 이미 내 것이다 — 기다리다 스스로 교착하지 않는다(독립 검토 #2 Q5)
+            if await redis.get(key) == token:
+                break
             if loop.time() >= deadline:
                 raise LockTimeout(key)
             await asyncio.sleep(_RETRY_INTERVAL_SEC)

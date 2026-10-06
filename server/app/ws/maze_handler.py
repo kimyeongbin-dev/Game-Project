@@ -185,9 +185,10 @@ class MazeSocketHandler:
         같은 워커의 이전 연결은 connection_manager.connect 가 이미 닫았다. 이벤트는 이 워커에도 오지만 연결 id 가
         같으므로 아무 일도 없다.
         """
+        # GET 뒤 SET — SET … GET 을 재시도하면 이전 값 대신 자기 값을 돌려받아 교체 통지를 잃는다(독립 검토 #2 Q5)
         async with store_errors():
-            previous = await _redis().set(keys.user_conn(session.user_id), session.conn.conn_id, get=True,
-                                          ex=USER_CONN_TTL_SEC)
+            previous = await _redis().get(keys.user_conn(session.user_id))
+            await _redis().set(keys.user_conn(session.user_id), session.conn.conn_id, ex=USER_CONN_TTL_SEC)
         if previous is not None and previous != session.conn.conn_id:
             await self.publisher.publish(events.session_replaced(session.user_id, session.conn.conn_id))
 
@@ -273,13 +274,15 @@ class MazeSocketHandler:
         except Exception:
             logger.warning("Could not record disconnect of %s in %s", session.user_id, game_id)
 
-    async def release_session(self, session: Session) -> None:
-        """이 연결이 아직 그 유저의 연결이면 `user:{uid}:conn` 을 지운다(CAS) — 키가 있다 = 지금 어딘가 붙어 있다"""
+    async def release_session(self, session: Session) -> bool:
+        """이 연결이 아직 그 유저의 연결이면 `user:{uid}:conn` 을 지운다(CAS) — 키가 있다 = 지금 어딘가 붙어 있다.
+        실패하면 False — 런타임이 끊김 재시도와 함께 다시 지운다(독립 검토 #2 Q10)"""
         try:
             async with store_errors():
                 await _redis().eval(_RELEASE_CONN_LUA, 1, keys.user_conn(session.user_id), session.conn.conn_id)
+            return True
         except StoreUnavailable:
-            pass  # 안전망 TTL 이 지운다
+            return False
 
     # ----- 보조 -----
 
@@ -381,17 +384,19 @@ class MazeSocketHandler:
 
     async def _move(self, session: Session, request: ClientMessage) -> Optional[dict]:
         body = parse_payload(request)
-        outcome = await self.games.move(await self._game_of(session), session.user_id, body.row, body.col)
+        outcome = await self.games.move(await self._game_of(session), session.user_id, body.row, body.col,
+                                        owner=session.conn.conn_id)
         return _outcome_reply(outcome.rejection, request)
 
     async def _wall(self, session: Session, request: ClientMessage) -> Optional[dict]:
         body = parse_payload(request)
         outcome = await self.games.place_wall(await self._game_of(session), session.user_id,
-                                              body.row, body.col, body.orientation)
+                                              body.row, body.col, body.orientation, owner=session.conn.conn_id)
         return _outcome_reply(outcome.rejection, request)
 
     async def _surrender(self, session: Session, request: ClientMessage) -> Optional[dict]:
-        outcome = await self.games.surrender(await self._game_of(session), session.user_id)
+        outcome = await self.games.surrender(await self._game_of(session), session.user_id,
+                                             owner=session.conn.conn_id)
         return _outcome_reply(outcome.rejection, request)
 
     async def _chat(self, session: Session, request: ClientMessage) -> dict:

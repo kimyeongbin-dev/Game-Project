@@ -58,7 +58,8 @@ async def test_disconnect_at_original_time_is_clamped(games, fake_clock):
     assert gone.disconnected_at_ms == t0 + 1_000                      # 늦게 기록해도 원래 시각
     state2 = await start(games, (3, 4))
     early = await games.redo_disconnect(state2.game_id, 4, owner="w1", at_ms=t0 - 60_000)
-    assert early.disconnected_at_ms == fake_clock.ms                 # 시작(정산된 가장 늦은 시각) 전으로 되감지 않는다
+    assert early is None                                              # 끊긴 뒤에 시작한 게임 — 적용하지 않는다(독립 검토 #2 Q2)
+    assert (await games.load_clocks(state2.game_id)).seat(2).connected
 
 
 # ----- 런타임: 재시도 (H4) -----

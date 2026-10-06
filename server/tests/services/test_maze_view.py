@@ -251,11 +251,14 @@ async def test_finished_game_stays_fogged(games):
 # ----- 좌석 위조 (계획서 판단 9) -----
 
 def test_no_seat_or_vision_input_in_service_api():
-    """MUST NOT 3 — 클라이언트가 좌석·시야를 넘길 인자가 없다"""
+    """MUST NOT 3 — 클라이언트가 좌석·시야를 넘길 인자가 없다
+
+    owner 는 좌석이 아니라 **서버가 넘기는 연결 id**(핸들러의 session.conn.conn_id)다 — 행동 = 재접속의 소유 기록(M3 7단계
+    독립 검토 #2 Q11). 클라이언트 페이로드에는 이 필드가 없다(app/schemas/ws_messages.py)."""
     expected = {
-        MazeGameService.move: ["self", "game_id", "user_id", "row", "col"],
-        MazeGameService.place_wall: ["self", "game_id", "user_id", "row", "col", "orientation"],
-        MazeGameService.surrender: ["self", "game_id", "user_id"],
+        MazeGameService.move: ["self", "game_id", "user_id", "row", "col", "owner"],
+        MazeGameService.place_wall: ["self", "game_id", "user_id", "row", "col", "orientation", "owner"],
+        MazeGameService.surrender: ["self", "game_id", "user_id", "owner"],
         game_view: ["game_id", "user_id", "games"],
     }
     for fn, params in expected.items():

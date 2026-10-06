@@ -37,7 +37,7 @@ from app.services.sweeper import DeadlineSweeper
 from app.ws.bus import EventBus
 from app.ws.connection_manager import ConnectionManager
 from app.ws.delivery import Delivery
-from app.ws.maze_handler import MazeSocketHandler, Session, maze_handler
+from app.ws.maze_handler import USER_CONN_TTL_SEC, MazeSocketHandler, Session, maze_handler
 from app.ws.server_grace import RecentDisconnects, apply_on_shutdown
 
 logger = logging.getLogger(__name__)
@@ -62,6 +62,7 @@ class PendingDisconnect:
     at_mono_ms: int
     conn_id: str
     not_before_mono_ms: int = 0     # 밀려난 연결은 새 연결이 자리 잡을 때까지 기다린다
+    session: Optional[Session] = None   # 연결 표시(user:{uid}:conn) 해제에 실패했으면 다시 지운다(독립 검토 #2 Q10)
 
 
 class QueueTicker:
@@ -101,6 +102,11 @@ class QueueTicker:
         if not users or client is None:
             return 0
         values = await client.mget(*(keys.user_activity(u) for u in users))
+        # 붙어 있는 동안 연결 표시(user:{uid}:conn)의 안전망 TTL 을 늘린다 — 하루 넘는 연결도 표시를 잃지 않는다(독립 검토 #2 Q10)
+        async with client.pipeline(transaction=False) as pipe:
+            for user_id in users:
+                pipe.expire(keys.user_conn(user_id), USER_CONN_TTL_SEC)
+            await pipe.execute()
         sent = 0
         for user_id, value in zip(users, values):
             if value is None or keys.parse_activity(value)[0] != "queue":
@@ -197,7 +203,8 @@ class Realtime:
     async def _record_disconnect(self, session: Session, close_code: Optional[int]) -> None:
         at_mono = self._monotonic_ms()
         item = PendingDisconnect(None, session.user_id, at_mono, session.conn.conn_id)
-        await self.handler.release_session(session)
+        if not await self.handler.release_session(session):
+            item.session = session
         if session.conn.replaced:
             # 밀려난 연결 — 보통은 새 연결이 이미 좌석을 가져갔다(그러면 아래 기록은 무시된다). 새 연결이 소유를 못 가져간
             # 채 끝났으면(검토 R3) 이 기록이 끊김을 남긴다. 새 연결이 자리 잡을 시간을 주고 확인한다
@@ -209,6 +216,11 @@ class Realtime:
 
     async def _try_record(self, item: PendingDisconnect, *, first: bool) -> bool:
         """한 번 시도. 끝났으면(기록·무시·게임 없음) True, 다시 시도해야 하면 False"""
+        if item.session is not None:
+            # 연결 표시를 먼저 지운다 — 남아 있으면 그 연결이 아직 붙어 있는 것으로 보여 끊김 기록이 걸러진다(Q2 대조)
+            if not await self.handler.release_session(item.session):
+                return False
+            item.session = None
         try:
             if item.game_id is None:  # 활동 읽기도 실패할 수 있다(Redis 순간 장애 — 검토 R2)
                 kind, rest = await self.handler._activity(item.user_id)
