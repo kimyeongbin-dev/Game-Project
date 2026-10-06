@@ -215,6 +215,7 @@ class _Tx:
     raw_meta: str = ""
     version: int = 0               # 마지막으로 커밋된 이벤트 번호 (검토 L23)
     prev_owners: dict[int, Optional[str]] = field(default_factory=dict)
+    extra: dict[str, Optional[str]] = field(default_factory=dict)   # 락 안에서 함께 읽은 키 (예: user:{uid}:conn)
     outbox: list[events.Event] = field(default_factory=list)
     expired: list[tuple[int, str]] = field(default_factory=list)
     observe: bool = False
@@ -539,7 +540,8 @@ class MazeGameService:
         result, _, _ = await self._run(game_id, step)
         return result
 
-    async def mark_connected(self, game_id: str, user_id: int, *, owner: Optional[str] = None) -> bool:
+    async def mark_connected(self, game_id: str, user_id: int, *, owner: Optional[str] = None,
+                             only_if_current: bool = False) -> bool:
         """재접속 — 끊긴 구간을 접속 시계에서 차감한다(리셋 없음). 끊김 상태였으면 True
 
         owner 는 이 연결의 id(`<worker_id>:<연결>`, 서버가 넘긴다). 그 워커가 죽으면 다른 워커의 스위퍼가 이 좌석을
@@ -561,6 +563,10 @@ class MazeGameService:
             seat_no = tx.meta.seat_of(user_id)
             if seat_no is None or tx.closed or tx.state.seat(seat_no).is_eliminated:
                 return False
+            if only_if_current and tx.extra.get(keys.user_conn(user_id)) != owner:
+                # 게임 시작·재구독의 소유 기록 — 그 유저의 지금 연결이 이 연결일 때만. 확인을 락 안에서 한다: 락 밖에서
+                # 확인하면 그 사이 새 연결이 소유를 가져간 뒤 이 기록이 옛 연결로 되돌린다(다중 워커 실측 S8, 게임 시작 0.05 s 뒤 재접속)
+                return False
             seat = tx.clocks.seat(seat_no)
             prev = owner_worker(seat.owner)
             if owner is not None and seat.connected and prev is not None and prev != owner_worker(owner):
@@ -575,7 +581,8 @@ class MazeGameService:
                 tx.clocks.set_owner(seat_no, owner)
             return reconnected
 
-        result, _, _ = await self._run(game_id, step)
+        extra = (keys.user_conn(user_id),) if only_if_current else ()
+        result, _, _ = await self._run(game_id, step, extra_keys=extra)
         return result
 
     async def leave_eliminated(self, game_id: str, user_id: int) -> Optional[int]:
@@ -736,7 +743,7 @@ class MazeGameService:
         return ActionOutcome(rejection, tx.state, ended)
 
     async def _run(self, game_id: str, step, *, void_before_ms: Optional[int] = None,
-                   received_at: Optional[int] = None):
+                   received_at: Optional[int] = None, extra_keys: Sequence[str] = ()):
         """락 → 읽기(state·meta·clocks·하트비트) → 시각 → (장기 장애면 무효) 만료 정산 → step → 펜싱 쓰기 한 번
         → (종료 시) 기록 → 발행
 
@@ -750,9 +757,9 @@ class MazeGameService:
         try:
             async with redis_lock(redis, lock_key) as token:
                 async with store_errors():
-                    raw_state, raw_meta, raw_clocks, raw_alive, raw_version = await redis.mget(
+                    raw_state, raw_meta, raw_clocks, raw_alive, raw_version, *raw_extra = await redis.mget(
                         keys.game_state(game_id), keys.game_meta(game_id), keys.game_clocks(game_id),
-                        keys.store_alive(), keys.game_version(game_id),
+                        keys.store_alive(), keys.game_version(game_id), *extra_keys,
                     )
                 if raw_state is None or raw_meta is None:
                     raise GameNotFound(game_id)
@@ -779,7 +786,8 @@ class MazeGameService:
                 ])
                 tx = _Tx(state=state, meta=GameMeta.from_json(raw_meta), clocks=clocks,
                          now=now, outages=exempt, raw_meta=raw_meta, version=int(raw_version or 0),
-                         prev_owners={s.seat_no: s.owner for s in clocks.seats})
+                         prev_owners={s.seat_no: s.owner for s in clocks.seats},
+                         extra=dict(zip(extra_keys, raw_extra)))
                 was_closed = tx.closed
                 if not was_closed and self._void_due(tx, void_before_ms):
                     self._void_in_place(tx)  # 정산하지 않는다 — 장애 시간으로 탈락시키지 않는다

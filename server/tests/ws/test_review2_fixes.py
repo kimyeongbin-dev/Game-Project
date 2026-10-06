@@ -244,3 +244,18 @@ def test_production_health_hides_worker_details(monkeypatch):
     assert "worker_id" not in health and "connections" not in health and "name" not in health["bus"]
     monkeypatch.setattr(settings, "ws_expose_worker", True)
     assert "worker_id" in rt.health()
+
+
+async def test_claim_checks_the_current_connection_under_the_game_lock(real, redis_client):
+    """게임 시작의 소유 기록이 확인 뒤 락을 기다리는 사이 새 연결이 소유를 가져갔다 — 그 기록은 소유를 되돌리지 않는다
+    (다중 워커 실측 S8: 게임 시작 0.05 s 뒤 다른 워커로 재접속)"""
+    state = await start(real)
+    await redis_client.set(keys.user_conn(2), "wB:new")            # 새 연결이 표시를 쓰고
+    await real.mark_connected(state.game_id, 2, owner="wB:new")    # 소유를 가져갔다
+    # 옛 워커의 claim — 락 밖 확인은 이미 지났다(그때는 옛 연결이 현재였다)
+    assert not await real.mark_connected(state.game_id, 2, owner="wA:old", only_if_current=True)
+    assert (await real.load_clocks(state.game_id)).seat(2).owner == "wB:new"
+    # 현재 연결의 기록은 된다
+    await redis_client.set(keys.user_conn(1), "wA:c1")
+    await real.mark_connected(state.game_id, 1, owner="wA:c1", only_if_current=True)
+    assert (await real.load_clocks(state.game_id)).seat(1).owner == "wA:c1"

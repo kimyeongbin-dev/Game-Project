@@ -105,7 +105,7 @@ class Delivery:
     async def claim_seat(self, game_id: str, user_id: int, owner: str) -> None:
         """이 연결이 그 좌석의 연결이다 — 게임 시작·재구독 때 버스가 부른다(검토 H4·R4). 크래시하면 스위퍼가 이 좌석을 찾는다"""
         try:
-            await self._games.mark_connected(game_id, user_id, owner=owner)
+            await self._games.mark_connected(game_id, user_id, owner=owner, only_if_current=True)
         except Exception:  # 다음 재접속·행동이 다시 기록한다 — 전달을 막지 않는다
             logger.warning("Could not record seat owner for user %s in game %s", user_id, game_id)
 

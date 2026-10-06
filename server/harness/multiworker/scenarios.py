@@ -662,8 +662,11 @@ async def s8(pool: Pool) -> Result:
     res.check(code == 4000, f"old connection close code {code}")
     # 밀려난 연결의 끊김 확인은 정착 시간(3 s) 뒤 재시도 회차(1 s)에 돈다 — 그 뒤까지 본다(독립 검토 #2 Q3)
     noise = [m for m in await pa.drain(3.0 + 1.0 + 1.5) if m["type"] == "player_left"]
-    res.check(not noise, "replacement announced as a disconnect")
     raw = await clocks(gid)
+    res.metrics["seat2"] = {k: seat_clock(raw, 2)[k] for k in ("owner", "disconnected_at_ms", "conn_remaining_ms")}
+    res.metrics["conns"] = {"old": old.connected["payload"].get("worker"), "new": newer.worker,
+                            "tries": len([c for c in pool.clients if c.user_id == pb.user_id])}
+    res.check(not noise, "replacement announced as a disconnect")
     res.check(seat_clock(raw, 2)["disconnected_at_ms"] is None, "replacement charged the connection clock")
     return res
 
