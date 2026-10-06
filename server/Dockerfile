@@ -108,19 +108,19 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status==200 else 1)"
 
-# 워커는 1개로 고정한다.
+# 워커 2개 (M3 완료 판정, 2026-10-06).
 #
-# 현재 WebSocket 계층(app/ws/)의 매치메이킹 큐·방 상태·연결 맵이 모두
-# 프로세스 내 모듈 전역 dict 이므로, 워커가 2개 이상이면 워커마다 별개의
-# 큐와 방이 생겨 매칭이 깨진다.
-#
-# 워커를 늘리려면 PLATFORM_ARCHITECTURE.md §2.2 대로 상태를 Redis 로 옮기고
-# 워커 간 브로드캐스트를 Pub/Sub 으로 처리하는 작업이 선행되어야 한다.
+# 큐·방·게임 상태는 Redis 가 권위이고(M3 3단계), 워커 간 전달은 Pub/Sub(4단계), 좌석 소유는 연결 단위·
+# 크래시는 워커 하트비트로 처리한다(6·7단계). 실제 uvicorn 워커 2개로 매칭·좌석별 전달·구독 끊김·워커 kill·
+# 스위퍼 이중 처리·Redis 재시작/정지·SIGTERM 배포를 확인했다 —
+# docs/research/2026-10-06-M3-7단계-다중워커-실측.md (하네스 server/harness/multiworker).
+# 워커 분배는 고르지 않다(실측 E1, 85~99% 한 워커) — 용량 산정에 워커 수 × 균등을 가정하지 않는다.
+# tests/test_dockerfile_flags.py 가 워커 수 하한(2)을 검사한다.
 #
 # WS 플래그는 app/core/config.py 의 ws_ping_interval_sec·ws_ping_timeout_sec·ws_max_size_bytes 와
 # 같아야 한다(tests/test_dockerfile_flags.py). 반개방 끊김은 간격 + 타임아웃 + 10 s 뒤에 감지된다.
 CMD ["uvicorn", "app.main:app", \
      "--host", "0.0.0.0", "--port", "8000", \
-     "--workers", "1", \
+     "--workers", "2", \
      "--ws-ping-interval", "5", "--ws-ping-timeout", "5", "--ws-max-size", "4096", \
      "--proxy-headers", "--forwarded-allow-ips", "*"]

@@ -123,10 +123,10 @@ games/ ┘
 | 디렉토리 | 책임 |
 | :-- | :-- |
 | `main.py` | FastAPI 엔트리포인트, lifespan (DB 초기화 / 스케줄러) |
-| `core/` | 환경변수, 카카오 OIDC 검증, JWT, 보안 *(골격 — 미구현)* |
+| `core/` | 환경변수, JWT access token 검증, 로그 마스킹, 시계·워커 id *(카카오 OIDC·토큰 발급은 미구현 — 인증 작업)* |
 | `db/` | PostgreSQL (SQLAlchemy 2.0 async) 설정·모델·리포지토리 |
 | `api/` | REST 라우터 |
-| `ws/` | 실시간 멀티플레이 WebSocket 핸들러 *(골격 — 미구현)* |
+| `ws/` | 실시간 멀티플레이 WebSocket — 핸들러·와이어·런타임(lifespan)·레이트 리밋·구독 버스 |
 | `schemas/` | Pydantic 요청·응답 스키마 |
 | `services/` | 비즈니스 로직, 서버 권위 검증 |
 | `games/maze/` | 1인칭 미로 **서버 권위 판정 엔진** (순수 Python, 프레임워크 무의존) |
@@ -141,7 +141,7 @@ games/ ┘
 - **하드웨어 금고 키 보관**: AES/HMAC 키를 소스에 하드코딩하지 않는다. 앱 최초 실행 시 기기 내부에서 난수 생성해 Keystore/Keychain에만 보관한다 (§3.2).
 - **개수를 박지 않는다**: 인원·게임·모드 수를 코드나 스키마에 고정값으로 쓰지 않는다. 판단 기준은 "인원이 4명이 되면 무엇을 고쳐야 하는가?" — 행 추가 외에 변경이 필요하면 하드코딩이다 (`docs/api/platform.md` §5 확장성 원칙).
 
-## 진행 상태 — 리팩토링 중
+## 진행 상태 — 리팩토링 중 (인프라 M3 완료, 다음 M4)
 
 | 영역 | 상태 |
 | :-- | :-- |
@@ -150,11 +150,11 @@ games/ ┘
 | 구 REST `/api/v1/quoridor/*` | **폐기 완료**(M3 1단계). shim `quoridor_service` 도 3단계에서 삭제 |
 | 큐·방·게임 상태 | **Redis 이전 완료**(M3 3단계) — 게임별 락 + 펜싱 쓰기, Lua 원자 매칭, N인 좌석. 종료 시 `game_sessions` 기록. 2·3·4좌석 파라미터화 테스트 |
 | `server/app/db/` | **2인 전제 제거 완료**(M3 2단계) — `game_sessions` 는 시작·종료 기록만, 좌석은 `game_participants` 행. `match_queue`·`game_rooms`·`daily_champions`·스케줄러 폐기. 마이그레이션 도구 없음(`create_all`) — Alembic 은 첫 운영 배포 전 |
-| `server/app/core/` | `config.py`(환경변수 단일 진입점), `time.py`(표준 utcnow) |
+| `server/app/core/` | `config.py`(환경변수 단일 진입점), `time.py`(표준 utcnow·Redis TIME 시계), `security.py`(access token **검증만** — 발급은 인증 작업), `redaction.py`(로그의 `token=` 마스킹), `worker.py`(워커 id) |
 | Redis | 연결 계층(`app/db/redis.py`) + lifespan 배선 완료. graceful degradation |
 | 레이트 리미터 | **배선 완료** — Redis 저장소, 커스텀 429, `main.py` 등록. 테스트 10건 |
-| `server/app/ws/` | **Pub/Sub 전달 완료**(M3 4단계) — `connection_manager`(연결 맵만), `bus`(패턴 구독·재구독·재동기화), `delivery`(좌석별 화면 §6 자리, 시야는 5단계). maze WS 핸들러·lifespan 배선은 7단계 신규 작성 |
-| 시간 체계 | **완료**(M3 6단계) — `services/maze_clock.py`(두 시계 분리, 지연 정산), `services/sweeper.py`(리스 클레임, 장애 구간, 유실 점검), `ws/server_grace.py`(서버 유예 소급). Redis 장애는 전역 하트비트(`store:alive`), 크래시 워커의 좌석은 워커 하트비트(`store:workers`)로 처리. 독립 검토 반영(`docs/research/2026-10-04-M3-6단계-독립검토.md`). 스위퍼·유예의 lifespan 배선은 7단계 |
+| `server/app/ws/` | **완료**(M3 7단계) — `maze_handler`(`/api/v1/ws/maze`, §12 10종·인증 4001~4003·accept 후 close), `delivery`·`wire`(내부 이벤트 → §12 와이어, 게임별 `version`), `runtime`(lifespan: 버스·스위퍼·큐 티커·SIGTERM 기준 서버 유예·끊김 재시도), `rate_limit`(소켓 버킷·접속 카운터), `connection_manager`(연결 맵, 같은 계정은 클러스터에 하나). 좌석 소유는 연결 id 단위. 독립 검토 #1 반영 |
+| 시간 체계 | **완료**(M3 6단계) — `services/maze_clock.py`(두 시계 분리, 지연 정산), `services/sweeper.py`(리스 클레임, 장애 구간, 유실 점검), `ws/server_grace.py`(서버 유예 소급). Redis 장애는 전역 하트비트(`store:alive`), 크래시 워커의 좌석은 워커 하트비트(`store:workers`)로 처리. 독립 검토 반영(`docs/research/2026-10-04-M3-6단계-독립검토.md`). 스위퍼·유예의 lifespan 배선은 7단계 완료 |
 | `client/lib/**` | 디렉토리 골격 + 허브 placeholder만 존재 |
 | 나머지 5종 게임 | 미착수 |
 
@@ -213,6 +213,6 @@ git show origin/develop:<구 경로> > <새 구조의 경로>
 
 ## 주의사항
 - `docs/quoridor/`는 재설계 대기 중인 **구 API 문서**다. 새 작업의 근거로 삼지 않는다.
-- `server/app/ws/` 에는 연결 맵·구독 버스·전달(`connection_manager`·`bus`·`delivery`)만 있고 WS 라우터가 없다. 버스·스위퍼(`services/sweeper.py`)·서버 유예(`ws/server_grace.py`)는 아직 lifespan 에 배선되지 않았다. maze WS 핸들러는 M3 7단계에서 `services/` 를 대상으로 새로 작성한다. 구 Quoridor 핸들러는 git 히스토리에서만 참고한다.
+- **prod 는 `--workers 2`** 다(M3 완료 판정, `docs/research/2026-10-06-M3-7단계-다중워커-실측.md`). 다중 워커 동작을 바꾸면 하네스 `server/harness/multiworker/`(실제 워커 2개 + Redis 장애)를 다시 돌린다 — pytest 는 한 프로세스라 워커 간 경합·신호·실제 장애를 재현하지 못한다. 좌석 owner 는 **연결 id**(`<worker_id>:<토큰>`)이고 끊김은 그 연결일 때만 기록된다.
 - `client/android/key.properties`와 keystore는 절대 커밋하지 않는다. 릴리스 빌드 시 볼륨 마운트로 주입한다.
 - 배포 빌드에는 `--obfuscate` 옵션을 적용한다 (§3.2).

@@ -32,3 +32,8 @@ def test_ws_flags_match_settings(stage):
     assert float(flag(cmd, "--ws-ping-interval")) == defaults.ws_ping_interval_sec
     assert float(flag(cmd, "--ws-ping-timeout")) == defaults.ws_ping_timeout_sec
     assert int(flag(cmd, "--ws-max-size")) == defaults.ws_max_size_bytes
+
+
+def test_prod_runs_at_least_two_workers():
+    """M3 완료 판정 — 실제 워커 2개로 검증했다(docs/research/2026-10-06-M3-7단계-다중워커-실측.md). 1로 되돌리지 않는다"""
+    assert int(flag(stage_cmd("prod"), "--workers")) >= 2

@@ -18,7 +18,7 @@
 | **인프라** | `M1`~`M4` | 이 문서 | 개발·배포 기반 정비 |
 
 두 축은 독립이다. 현재 위치는 **출시 `Phase 1`(Android) 진행 중 + 인프라
-`M2` 완료 + `M3` 6단계(시간 체계) 완료**다.
+`M3` 완료**(2026-10-06 — 실제 워커 2개 완료 판정, prod `--workers 2`)다. 다음은 `M4`.
 
 > ⚠️ **git log 읽을 때 주의:** 커밋 `f831c0b`·`e189199`의 제목은 각각
 > "Phase 1"·"Phase 2"로 적혀 있다. 이 표기가 굳기 전에 작성된 것이며,
@@ -52,7 +52,10 @@
 - `/health`가 `dependencies.database` / `dependencies.redis` / `rate_limit` 보고
 - 테스트 10건으로 배선 고정 (`tests/api/test_rate_limit.py`)
 
-### M3 — WebSocket 상태 Redis 이전 + 1:1:1 확장
+### M3 — WebSocket 상태 Redis 이전 + 1:1:1 확장 ✅ 완료
+
+계획서 [`plans/2026-10-05-M3-7단계-WS핸들러.md`](plans/2026-10-05-M3-7단계-WS핸들러.md)(마지막 단계), 완료 판정 실측
+[`research/2026-10-06-M3-7단계-다중워커-실측.md`](research/2026-10-06-M3-7단계-다중워커-실측.md).
 
 **선행 조건:** `docs/api/games/maze.md` 확정 — **완료**(2026-10-01, 계획서:
 [`plans/2026-10-01-이동규칙확정.md`](plans/2026-10-01-이동규칙확정.md)). 이동 규칙
@@ -112,7 +115,7 @@
 | 4 ✅ | 워커 간 전달을 Pub/Sub으로 — 서비스가 상태를 쓴 직후 발행, 워커당 패턴 구독 1개 + 재구독 후 재동기화, `connection_manager` 는 연결 맵만 | 2 | 3 |
 | 5 ✅ | 시야 엔진 — 3×3 + 벽 차폐(반지름 1.25 원 모델의 이산화), 변 원소에 `wall` 여부, 좌석별 누적 관측 `game:{id}:vision:{seat_no}` 를 state 와 한 번의 펜싱 쓰기로, 탈락 좌석 동결 + 친구 방 관전 패킷 | 6 | 1, 3 |
 | 6 ✅ | 시간 체계 — Fischer 게임 시계·접속 시계 분리(지연 정산, Redis `TIME`), `game:{id}:clocks`·`deadlines:{game}` 을 state 와 한 번의 펜싱 쓰기로, 워커별 스위퍼(리스 클레임 + 락 안 재계산), 서버 유예 소급, Redis 장애 구간 면제·120 s 무효, 상태 유실 점검 | 7 | 0, 4 |
-| 7 | **maze WS 핸들러(§12) 신규 작성**(3단계 서비스 대상) + `main.py` 라우터 등록 + 구독 버스 lifespan 배선 + `--workers 2` 완료 판정. **실제 다중 프로세스 확인 포함** — 4단계는 한 프로세스 안에 버스 2개를 띄워 흉내 냈을 뿐이다. 아래 "완료 판정" 참조 | 5 | 전부 |
+| 7 ✅ | **maze WS 핸들러(§12) 신규 작성**(3단계 서비스 대상) + `main.py` 라우터 등록 + 구독 버스 lifespan 배선 + `--workers 2` 완료 판정. **실제 다중 프로세스 확인 포함** — 4단계는 한 프로세스 안에 버스 2개를 띄워 흉내 냈을 뿐이다. 아래 "완료 판정" 참조 | 5 | 전부 |
 
 > 작업 3(엔진)이 작업 1·4보다 먼저다. 좌석 모델(`seat_no`, `goals[]`, `eliminated`)이
 > Redis 키 스키마와 DB 스키마 양쪽의 입력이기 때문이다. 뒤에 하면 둘 다 2인용으로
@@ -140,8 +143,10 @@
 > 전제로 적었다가 거부된 일이 계기다.
 
 **완료 판정:** `server/Dockerfile` prod의 `--workers`를 2 이상으로 올리고
-매칭이 정상 동작해야 한다. 현재 `Dockerfile:120`에서 `1`로 고정되어 있고,
-그 이유가 바로 이 마일스톤이다.
+매칭이 정상 동작해야 한다. — **충족(2026-10-06).** 아래 항목 전부를 실제 uvicorn 워커 2개 + 실제 Redis·PostgreSQL 하네스
+(`server/harness/multiworker/`)로 3회씩 확인했고 prod 는 `--workers 2` 다(가드 `tests/test_dockerfile_flags.py`). 하네스가 찾은
+서버 결함 4건(스키마 생성 경합, 죽은 풀 연결 재시도 0회, 전역 장애 직후 워커 사망 오판정, 정지 직전 게임의 무효 누락)을 고쳤다 —
+[실측 보고서](research/2026-10-06-M3-7단계-다중워커-실측.md).
 
 7단계에서 **실제 uvicorn 워커 2개**로 아래를 확인한다(4단계 테스트는 한 프로세스 안의 버스 2개였다):
 
@@ -179,6 +184,11 @@
    prod CMD의 `--proxy-headers --forwarded-allow-ips *`가 교정하지만 실측이 필요하다
 4. 다중 워커 환경에서 매칭·리미팅 정확성 E2E 검증
 5. 프로덕션 CORS 오리진 제한 (아래 TODO)
+6. **M3 7단계 독립 검토 #1 에서 이관**([검토 보고서](research/2026-10-06-M3-7단계-독립검토-1.md) 채택표) —
+   ① 버스 수신자별 전송 큐(유계, 넘치면 연결 종료)와 게임별 스냅샷 읽기 공유(R8 나머지 — 한 루프가 워커의 모든 통지를 보낸다.
+   지금은 소켓 전송 시간 상한으로만 막는다) ② WS 핸드셰이크의 IP 단위 리밋(R11 나머지 — 무효 토큰 연타. `X-Forwarded-For`
+   실측과 함께)
+7. 부하 — 워커 3개 이상, 수백 동시 게임(M3 하네스는 기능 판정이다. 분배가 치우친다는 E1 을 용량 산정에 반영한다)
 
 ---
 
@@ -190,7 +200,7 @@
 | :--- | :--- | :--- |
 | Alembic 도입 | 스키마 생성이 `app/db/config.py` 의 `create_all` 뿐이다. `create_all` 은 기존 테이블을 바꾸지도 지우지도 않아 스키마 변경 시 DB 를 손으로 리셋해야 한다(M3 2단계에서 개발 DB 를 1회 리셋했다) | **첫 운영 배포 전 필수.** 지금 도입하지 않은 이유: 운영 DB·보존할 데이터가 없고, `users` 가 인증 작업에서 다시 전면 개편된다 — 베이스라인을 지금 만들면 곧 다시 쓴다 (2026-10-02 사용자 결정) |
 | CORS 오리진 제한 | `app/main.py:96`이 `allow_origins=["*"]` | 개발 편의. **프로덕션 배포 전 필수**. M4에서 처리 |
-| WS 라우터 미등록 | maze WS 라우터가 아직 없다. 구 Quoridor 핸들러 `app/ws/ws_game.py` 는 M3 3단계에서 삭제했다 | 의도적. M3 7단계에서 §12 핸들러를 새로 작성해 `main.py` 에 등록하고, 구독 버스(`app/ws/bus.py`) start/stop 도 lifespan 에 함께 건다. 현황은 `app/ws/__init__.py` docstring |
+| WS 라우터 미등록 | maze WS 라우터가 아직 없다. 구 Quoridor 핸들러 `app/ws/ws_game.py` 는 M3 3단계에서 삭제했다 | **완료**(M3 7단계) — `/api/v1/ws/maze`(`app/ws/maze_handler.py`), 버스·스위퍼·큐 티커는 `app/ws/runtime.py` 가 lifespan 에 건다 |
 | CI 비밀번호 생성 단계 첫 실행 확인 | `test-and-merge.yml` server-tests 잡의 `Generate Redis password` 단계(커밋 `e39b806`, compose 비밀번호 기본값 제거)가 아직 한 번도 실행되지 않았다. 워크플로가 `dev-test` push 에서만 돈다 | **재구조화 완료 후 첫 `dev-test` push 때** 확인한다 — 잡 통과, 로그에 비밀번호가 마스킹됨, `docker compose` 가 `:?` 필수값 오류 없이 뜸. 로컬에서는 같은 조건(무작위 비밀번호 + 필수값)으로 확인했다 |
 | 스케줄러 제거 판단 | `app/services/scheduler/`는 일일 리셋 전용이고, 랭킹이 MMR로 단순화되면 쓰이지 않는다 | **완료**(M3 2단계, 커밋 `3e889a9`). 근거 3개: ① 시계 만료를 ZSET 스위퍼가 처리한다 ② `refresh_tokens` 정리가 주기 작업을 쓰지 않는다 ③ `daily_champions` 폐기로 `daily_reset.py`의 유일한 용도가 소멸한다 → `app/services/scheduler/`와 `apscheduler==3.10.4` 제거, `uv.lock` 재생성(전이 의존성 `pytz`·`tzdata`·`tzlocal` 동반 제거) |
 
