@@ -74,3 +74,13 @@ async def test_injected_clock_does_not_start_the_server_time_heartbeat(redis_cli
         assert sweeper._alive_task is None
     finally:
         await sweeper.stop()
+
+
+def test_heartbeat_client_fails_fast_without_client_retry():
+    """복구 뒤 첫 성공이 늦지 않게 — 시도 하나가 묶는 시간 = 타임아웃 하나(재시도 없음). 루프가 주기마다 다시 한다"""
+    from app.db.redis import new_heartbeat_client
+    client = new_heartbeat_client()
+    kwargs = client.connection_pool.connection_kwargs
+    retry = client.get_retry()
+    assert retry is None or retry.get_retries() == 0
+    assert kwargs["socket_connect_timeout"] <= 0.5 and kwargs["socket_timeout"] <= 0.5

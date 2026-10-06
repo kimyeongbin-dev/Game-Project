@@ -112,7 +112,7 @@ class Settings(BaseSettings):
     # 전역 하트비트 전용 루프 — 주기와 그 연결의 타임아웃. 장애 구간의 양 끝 오차가 이 주기 단위다(스위퍼 회차 1 s 에
     # 묶으면 ≈2 s 재시작이 3 s 장애로 기록되고 10 s 정지가 2~3 s 더 면제됐다 — M3 7단계 다중 워커 실측 S5)
     store_heartbeat_interval_ms: int = Field(default=200, ge=10)
-    store_heartbeat_timeout_sec: float = Field(default=1.0, gt=0)
+    store_heartbeat_timeout_sec: float = Field(default=0.5, gt=0)
     # 기록한 장애 구간 보존 기간 (시계 정산에 쓰인다)
     outage_retention_sec: int = Field(default=86_400, ge=1)
 

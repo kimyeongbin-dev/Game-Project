@@ -128,13 +128,15 @@ def new_heartbeat_client() -> Redis:
     """전역 하트비트 전용 클라이언트 — 앱 풀과 따로 둔다 (`app/services/sweeper.py`)
 
     장애 중 앱 풀의 연결은 걸린 명령으로 묶이고 타임아웃(5 s)도 길다. 하트비트는 복구 즉시 다시 성공해야 장애 끝이 실제
-    복구에 붙는다 — 짧은 타임아웃의 연결 하나로 따로 돈다.
+    복구에 붙는다 — 짧은 타임아웃의 연결 하나로 따로 돈다. **클라이언트 재시도는 두지 않는다**(루프가 주기마다 다시 한다):
+    재시도가 있으면 꺼진 Redis 로의 연결 시도 하나가 타임아웃 × 2 를 묶어, 복구 뒤 첫 성공이 그만큼 늦게 찍혔다(실측 S5 —
+    2.3 s 재시작이 4.3 s 장애로).
     """
     return Redis.from_url(
         settings.redis_url,
         socket_timeout=settings.store_heartbeat_timeout_sec,
         socket_connect_timeout=settings.store_heartbeat_timeout_sec,
-        retry=_retry(),
+        retry=Retry(NoBackoff(), 0),
         decode_responses=True,
     )
 
