@@ -11,8 +11,13 @@ PostgreSQL 과 동일한 graceful degradation 원칙을 따른다:
 계속 가능하지만, 멀티플레이 기능은 `is_redis_available()` 로 가드해야 한다.
 """
 
+import asyncio
+import ipaddress
 import logging
-from typing import Optional
+import socket
+from concurrent.futures import ThreadPoolExecutor
+from typing import Callable, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from redis.asyncio import ConnectionPool, Redis
 from redis.asyncio.retry import Retry
@@ -124,21 +129,101 @@ def new_pubsub_client(client_name: str) -> Redis:
     )
 
 
-def new_heartbeat_client() -> Redis:
-    """전역 하트비트 전용 클라이언트 — 앱 풀과 따로 둔다 (`app/services/sweeper.py`)
-
-    장애 중 앱 풀의 연결은 걸린 명령으로 묶이고 타임아웃(5 s)도 길다. 하트비트는 복구 즉시 다시 성공해야 장애 끝이 실제
-    복구에 붙는다 — 짧은 타임아웃의 연결 하나로 따로 돈다. **클라이언트 재시도는 두지 않는다**(루프가 주기마다 다시 한다):
-    재시도가 있으면 꺼진 Redis 로의 연결 시도 하나가 타임아웃 × 2 를 묶어, 복구 뒤 첫 성공이 그만큼 늦게 찍혔다(실측 S5 —
-    2.3 s 재시작이 4.3 s 장애로).
-    """
+def _heartbeat_redis(host: Optional[str]) -> Redis:
+    url = settings.redis_url
+    if host is not None:  # 해석해 둔 주소로 — URL 의 이름 대신
+        parts = urlsplit(url)
+        userinfo, _, _ = parts.netloc.rpartition("@")
+        port = f":{parts.port}" if parts.port else ""
+        literal = f"[{host}]" if ":" in host else host
+        url = urlunsplit(parts._replace(netloc=(f"{userinfo}@" if userinfo else "") + literal + port))
     return Redis.from_url(
-        settings.redis_url,
+        url,
         socket_timeout=settings.store_heartbeat_timeout_sec,
         socket_connect_timeout=settings.store_heartbeat_timeout_sec,
         retry=Retry(NoBackoff(), 0),
         decode_responses=True,
     )
+
+
+class HeartbeatConnection:
+    """전역 하트비트 전용 연결 — 앱 풀과 따로 둔다 (`app/services/sweeper.py` `_alive_loop`)
+
+    하트비트는 복구 즉시 다시 성공해야 장애 끝이 실제 복구에 붙는다(M3 7단계 다중 워커 실측 S5). 그래서
+
+    - **짧은 타임아웃, 클라이언트 재시도 없음.** 루프가 주기마다 다시 한다. 재시도가 있으면 시도 하나가 타임아웃 × 2 를 묶는다
+    - **해석한 주소로 직접 접속, 이름 조회는 전용 스레드 하나.** Redis 가 꺼진 동안 이름 조회 하나가 수 초 걸리고(Docker 내장
+      DNS 실측 3.3 s) 연결 타임아웃이 끝나도 조회 스레드는 계속 돈다. 워커의 모든 재접속이 asyncio 기본 스레드 풀을 그렇게 채워,
+      복구 뒤 하트비트 연결의 조회가 그 뒤에 줄을 섰다(복구 뒤 1.4 s 동안 두 워커 모두 하트비트 0건 — ≈2.3 s 재시작이 4.3 s
+      장애로). 실패하면 주소를 다시 조회하되(주소가 바뀌었을 수 있다) 결과가 올 때까지 마지막 주소로 계속 시도한다
+    """
+
+    def __init__(self, resolve: Callable[[str, int], list] = socket.getaddrinfo):
+        parts = urlsplit(settings.redis_url)
+        self._name, self._port = parts.hostname, parts.port or 6379
+        self._resolve = resolve
+        self._executor: Optional[ThreadPoolExecutor] = None
+        self._lookup: Optional[asyncio.Future] = None
+        self._address: Optional[str] = None
+        self._client: Optional[Redis] = None
+        if self._name is not None and _is_ip(self._name):
+            self._address = self._name
+        else:
+            self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="store-heartbeat-dns")
+
+    @property
+    def address(self) -> Optional[str]:
+        return self._address
+
+    async def client(self) -> Redis:
+        if self._address is None and self._executor is not None:
+            self.refresh()
+            await asyncio.wait({self._lookup})  # 아직 쓸 주소가 없다 — 조회를 기다린다
+        self._adopt_lookup()
+        if self._client is None:
+            self._client = _heartbeat_redis(self._address)
+        return self._client
+
+    def refresh(self) -> None:
+        """시도가 실패했다 — 주소를 다시 조회한다(진행 중이면 그대로). 결과는 다음 `client()` 가 반영한다"""
+        if self._executor is not None and (self._lookup is None or self._lookup.done()):
+            self._lookup = asyncio.get_running_loop().run_in_executor(
+                self._executor, self._resolve, self._name, self._port)
+
+    def _adopt_lookup(self) -> None:
+        if self._lookup is None or not self._lookup.done():
+            return
+        lookup, self._lookup = self._lookup, None
+        if lookup.cancelled() or lookup.exception() is not None:
+            return  # 조회 실패(Redis 가 꺼진 동안의 NXDOMAIN 등) — 마지막 주소를 유지한다
+        address = lookup.result()[0][4][0]
+        if address != self._address:
+            self._address = address
+            client, self._client = self._client, None
+            if client is not None:
+                asyncio.ensure_future(_close_client(client))
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await _close_client(self._client)
+            self._client = None
+        if self._executor is not None:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _is_ip(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
+async def _close_client(client: Redis) -> None:
+    try:
+        await client.aclose()
+    except Exception as exc:
+        logger.debug("Store heartbeat client close failed: %s", exc)
 
 
 async def close_redis() -> None:

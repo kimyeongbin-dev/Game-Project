@@ -10,6 +10,9 @@ import asyncio
 from app.core.config import settings
 from app.core.time import redis_clock
 from app.db import redis_keys as keys
+from urllib.parse import urlsplit
+
+from app.db.redis import HeartbeatConnection
 from app.services import outages
 from app.services.sweeper import DeadlineSweeper
 from tests.conftest import FakeClock
@@ -76,11 +79,61 @@ async def test_injected_clock_does_not_start_the_server_time_heartbeat(redis_cli
         await sweeper.stop()
 
 
-def test_heartbeat_client_fails_fast_without_client_retry():
+async def test_heartbeat_client_fails_fast_without_client_retry():
     """복구 뒤 첫 성공이 늦지 않게 — 시도 하나가 묶는 시간 = 타임아웃 하나(재시도 없음). 루프가 주기마다 다시 한다"""
-    from app.db.redis import new_heartbeat_client
-    client = new_heartbeat_client()
-    kwargs = client.connection_pool.connection_kwargs
-    retry = client.get_retry()
-    assert retry is None or retry.get_retries() == 0
-    assert kwargs["socket_connect_timeout"] <= 0.5 and kwargs["socket_timeout"] <= 0.5
+    conn = HeartbeatConnection(resolve=lambda host, port: [(None, None, None, "", ("10.9.8.7", port))])
+    try:
+        client = await conn.client()
+        kwargs = client.connection_pool.connection_kwargs
+        retry = client.get_retry()
+        assert retry is None or retry.get_retries() == 0
+        assert kwargs["socket_connect_timeout"] <= 0.5 and kwargs["socket_timeout"] <= 0.5
+    finally:
+        await conn.aclose()
+
+
+async def test_heartbeat_connects_by_resolved_address_and_keeps_it_when_lookup_fails():
+    """이름 조회는 전용 스레드에서 — 연결은 그 주소로. Redis 가 꺼진 동안 조회가 실패해도 마지막 주소로 계속 시도하고,
+    조회가 다른 주소를 주면 바꾼다(실측 S5: 꺼진 동안 조회 하나가 3.3 s, 기본 스레드 풀 포화로 복구 뒤 1.4 s 하트비트 0건)"""
+    answers = [("10.0.0.5", None), (None, OSError("Name or service not known")), ("10.0.0.6", None)]
+    calls = []
+
+    def resolve(host, port):
+        calls.append(host)
+        address, error = answers[min(len(calls), len(answers)) - 1]
+        if error is not None:
+            raise error
+        return [(None, None, None, "", (address, port))]
+
+    conn = HeartbeatConnection(resolve=resolve)
+    try:
+        first = await conn.client()
+        assert first.connection_pool.connection_kwargs["host"] == "10.0.0.5"
+        assert calls == [urlsplit(settings.redis_url).hostname]
+        conn.refresh()                                   # 실패 → 다시 조회(이번엔 실패)
+        await asyncio.sleep(0.05)
+        assert (await conn.client()) is first            # 마지막 주소 유지
+        conn.refresh()                                   # 다시 조회 → 새 주소
+        await asyncio.sleep(0.05)
+        moved = await conn.client()
+        assert moved.connection_pool.connection_kwargs["host"] == "10.0.0.6" and moved is not first
+    finally:
+        await conn.aclose()
+
+
+async def test_heartbeat_lookup_runs_off_the_default_executor():
+    """기본 스레드 풀이 막혀 있어도(다른 재접속들의 느린 조회) 하트비트의 조회는 기다리지 않는다"""
+    import threading
+    loop = asyncio.get_running_loop()
+    gate = threading.Event()
+    blockers = [loop.run_in_executor(None, gate.wait, 5) for _ in range(64)]   # 기본 풀 포화
+    try:
+        conn = HeartbeatConnection(resolve=lambda host, port: [(None, None, None, "", ("10.1.2.3", port))])
+        try:
+            client = await asyncio.wait_for(conn.client(), 1.0)
+            assert client.connection_pool.connection_kwargs["host"] == "10.1.2.3"
+        finally:
+            await conn.aclose()
+    finally:
+        gate.set()
+        await asyncio.gather(*blockers)

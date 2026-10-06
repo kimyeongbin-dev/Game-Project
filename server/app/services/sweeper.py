@@ -35,7 +35,7 @@ from app.core.time import Clock, redis_clock
 from app.core.worker import WORKER_ID
 from app.db import redis_keys as keys
 from app.db.config import get_session_factory, is_db_available
-from app.db.redis import new_heartbeat_client
+from app.db.redis import HeartbeatConnection
 from app.db.redis_lock import StoreUnavailable, require_redis, store_errors
 from app.db.repository import GameSessionRepository
 from app.services import outages
@@ -187,25 +187,23 @@ class DeadlineSweeper:
         시각으로 양 끝 오차를 이 주기 단위로 줄인다. 공백 기록·긴 장애 무효는 같은 Lua 라 회차의 `_heartbeat` 와 겹쳐도
         한 번만 일어난다(무효 훑기는 회차가 한다).
         """
-        client = new_heartbeat_client()
+        conn = HeartbeatConnection()
         try:
             while True:
                 try:
-                    outage = await outages.beat(client, min_ms=settings.store_outage_min_ms,
+                    outage = await outages.beat(await conn.client(), min_ms=settings.store_outage_min_ms,
                                                 retention_ms=settings.outage_retention_sec * 1000)
                     if outage is not None:
                         logger.warning("Recorded store outage %d..%d (%d ms)",
                                        outage[0], outage[1], outage[1] - outage[0])
                 except asyncio.CancelledError:
                     raise
-                except Exception as exc:  # 장애 중 — 다음 주기에 다시
+                except Exception as exc:  # 장애 중 — 다음 주기에 다시. 주소가 바뀌었을 수 있다
                     logger.debug("Store heartbeat failed: %s", exc)
+                    conn.refresh()
                 await asyncio.sleep(settings.store_heartbeat_interval_ms / 1000)
         finally:
-            try:
-                await client.aclose()
-            except Exception as exc:
-                logger.debug("Store heartbeat client close failed: %s", exc)
+            await conn.aclose()
 
     async def _loop(self) -> None:
         while True:
