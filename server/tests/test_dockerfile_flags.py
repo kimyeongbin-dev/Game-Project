@@ -37,3 +37,12 @@ def test_ws_flags_match_settings(stage):
 def test_prod_runs_at_least_two_workers():
     """M3 완료 판정 — 실제 워커 2개로 검증했다(docs/research/2026-10-06-M3-7단계-다중워커-실측.md). 1로 되돌리지 않는다"""
     assert int(flag(stage_cmd("prod"), "--workers")) >= 2
+
+
+@pytest.mark.parametrize("stage", ["prod", "dev"])
+def test_no_cmd_trusts_forwarded_headers_from_everyone(stage):
+    """`--forwarded-allow-ips *` 면 서버에 직접 닿는 누구든 X-Forwarded-For 로 IP 를 위조한다(레이트 리밋 우회·공유, M4-1).
+    신뢰 주소는 환경변수 FORWARDED_ALLOW_IPS(= 프록시 주소)로만 — 플래그가 있으면 환경변수를 덮는다"""
+    cmd = stage_cmd(stage)
+    assert "--forwarded-allow-ips" not in cmd
+    assert "--no-proxy-headers" not in cmd

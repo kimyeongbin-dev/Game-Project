@@ -119,8 +119,12 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 #
 # WS 플래그는 app/core/config.py 의 ws_ping_interval_sec·ws_ping_timeout_sec·ws_max_size_bytes 와
 # 같아야 한다(tests/test_dockerfile_flags.py). 반개방 끊김은 간격 + 타임아웃 + 10 s 뒤에 감지된다.
+#
+# 프록시 신뢰(M4-1): X-Forwarded-For 를 믿을 주소는 **환경변수 FORWARDED_ALLOW_IPS** — uvicorn 이 직접 읽는다(앱의
+# app/core/config.py 단일 진입점 원칙의 예외). 값은 바로 앞 프록시(Caddy) 주소뿐이다. 미설정이면 uvicorn 기본 127.0.0.1 —
+# 아무 XFF 도 믿지 않는다(fail-closed). `--forwarded-allow-ips *` 는 쓰지 않는다: 서버에 직접 닿는 누구든 IP 를 위조한다.
 CMD ["uvicorn", "app.main:app", \
      "--host", "0.0.0.0", "--port", "8000", \
      "--workers", "2", \
      "--ws-ping-interval", "5", "--ws-ping-timeout", "5", "--ws-max-size", "4096", \
-     "--proxy-headers", "--forwarded-allow-ips", "*"]
+     "--proxy-headers"]

@@ -3,7 +3,8 @@
 # PLATFORM_ARCHITECTURE.md §2.2 (FastAPI + PostgreSQL + Redis 8)
 #
 # 기본 서비스 (profile 없음)
-#   docker compose up -d                        db + redis + server
+#   docker compose up -d                        db + redis + server + proxy(Caddy)
+#   호스트 :8000 은 Caddy 다(M4-1). server 는 호스트에 포트를 열지 않는다 — 로컬·CI·배포가 같은 경로(Caddy → uvicorn)
 #
 # profile 서비스
 #   docker compose run --rm server-test         서버/게임엔진 pytest
@@ -91,9 +92,10 @@ services:
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-}
       RATE_LIMIT_ENABLED: "true"
       RATE_LIMIT_PER_MINUTE: "${RATE_LIMIT_PER_MINUTE:-60}"
-    ports:
-      # 0.0.0.0 바인딩: Android 에뮬레이터(10.0.2.2) 및 실기기에서 접속 가능
-      - "${SERVER_PORT:-8000}:8000"
+      # X-Forwarded-For 를 믿을 주소 — proxy(Caddy) 하나뿐. uvicorn 이 직접 읽는 변수다(app/core/config.py 가 아니다).
+      # 다른 컨테이너가 보낸 XFF 는 무시된다. 미설정이면 uvicorn 기본 127.0.0.1(아무 XFF 도 믿지 않는다)
+      FORWARDED_ALLOW_IPS: ${GAMEMOA_PROXY_IP:-172.30.0.10}
+    # 호스트 포트 없음 — 접속은 proxy 로만(M4-1). 직접 열면 XFF 신뢰 경계를 우회하는 경로가 생긴다
     volumes:
       # 소스 볼륨 마운트로 --reload 동작 (의존성은 이미지의 /opt/venv 사용)
       - ./server:/srv/gamemoa
@@ -103,6 +105,36 @@ services:
       redis:
         condition: service_healthy
     networks: [gamemoa]
+
+  # ---------------------------------------------------------------------------
+  # 리버스 프록시 (M4-1) — infra/caddy/Caddyfile. 로컬·CI·배포가 같은 파일·같은 이미지
+  # 고정 주소: server 의 FORWARDED_ALLOW_IPS 가 이 주소만 믿는다
+  # ---------------------------------------------------------------------------
+  proxy:
+    # 다이제스트 고정 — 갱신은 scripts/update-image-digests.sh
+    image: caddy:2.11-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
+    container_name: gamemoa-proxy
+    restart: unless-stopped
+    environment:
+      CADDY_UPSTREAM: server:8000
+      # 앞단 프록시(엣지) 대역 — 로컬·CI 는 없다(빈 값이면 Caddyfile 기본 루프백). 들어온 XFF 는 버려진다
+      CADDY_TRUSTED_PROXIES: ${CADDY_TRUSTED_PROXIES:-127.0.0.1/32}
+    ports:
+      # 0.0.0.0 바인딩: Android 에뮬레이터(10.0.2.2) 및 실기기에서 접속 가능
+      - "${SERVER_PORT:-8000}:8080"
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+    healthcheck:
+      # 프록시 경유 /health — 업스트림까지 닿아야 healthy
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    depends_on:
+      - server
+    networks:
+      gamemoa:
+        ipv4_address: ${GAMEMOA_PROXY_IP:-172.30.0.10}
 
   # ---------------------------------------------------------------------------
   # pytest 실행 전용 (서버 API + 게임 엔진). 개발 DB와 분리된 gamemoa_test 사용
@@ -206,3 +238,7 @@ volumes:
 networks:
   gamemoa:
     driver: bridge
+    # 고정 서브넷 — proxy 의 고정 주소(FORWARDED_ALLOW_IPS)를 위해. 호스트의 다른 네트워크와 겹치면 GAMEMOA_SUBNET 으로 바꾼다
+    ipam:
+      config:
+        - subnet: ${GAMEMOA_SUBNET:-172.30.0.0/24}

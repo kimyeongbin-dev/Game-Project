@@ -47,7 +47,7 @@ services:
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000",
               "--workers", "2",
               "--ws-ping-interval", "5", "--ws-ping-timeout", "5", "--ws-max-size", "4096",
-              "--proxy-headers", "--forwarded-allow-ips", "*"]
+              "--proxy-headers"]
     environment:
       ENVIRONMENT: production
       DATABASE_URL: postgresql+asyncpg://postgres:harness@db:5432/gamemoa

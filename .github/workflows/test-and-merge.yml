@@ -64,6 +64,10 @@ jobs:
         # Actions 커밋 SHA / Android SDK 명시 고정을 검사한다.
         run: bash scripts/check-version-pinning.sh
 
+      - name: Guard — 프록시 신뢰 경계·토큰 로그
+        # Caddyfile 접속 로그 금지, server 호스트 포트 없음, XFF 신뢰 = proxy 주소, '--forwarded-allow-ips *' 금지 (M4-1)
+        run: bash scripts/check-proxy-config.sh
+
   # ===================================================
   # Job 1: Server Tests (FastAPI + 게임 엔진 + PostgreSQL + Redis)
   # ===================================================

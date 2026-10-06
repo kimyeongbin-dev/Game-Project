@@ -7,6 +7,7 @@
 #   - server 이미지가 prod 타겟 (non-root, --reload 없음, 소스를 이미지에 포함)
 #   - 소스 볼륨 마운트 없음 → 컨테이너가 불변(immutable) 산출물
 #   - DB/Redis 포트를 호스트로 노출하지 않음
+#   - server 포트도 노출하지 않음(기본 compose 와 같다) — 접속은 proxy(Caddy) 로만
 #
 # 실제 배포처(Fly.io / AWS ECS)에서는 db/redis 를 관리형 서비스로 대체하고
 # server 이미지만 올린다. 이 파일은 프로덕션 이미지의 로컬 검증용이다.
