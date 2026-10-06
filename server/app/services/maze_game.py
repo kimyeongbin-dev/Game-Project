@@ -511,12 +511,13 @@ class MazeGameService:
 
     async def _disconnect(self, game_id: str, user_id: int, owner: Optional[str],
                           at_ms: Optional[int]) -> Optional[Disconnection]:
-        # 좌석 owner 가 아직 없으면(게임 시작 직후 기록 전) 연결 id 를 대조할 수 없다 — 그 유저의 지금 연결 표시로 본다.
-        # 다른 연결이 붙어 있으면 이 끊김은 옛 연결의 것이다(독립 검토 #2 Q2). 연결이 끝나면 표시는 먼저 지워진다(release_session)
-        live = None
+        # 그 유저의 지금 연결 표시(`user:{uid}:conn`)는 **락 안에서** 읽는다(extra_keys). 다른 연결이 현재이고 그 워커가
+        # 살아 있으면 이 끊김은 옛 연결의 것이다 — 좌석 owner 가 옛 연결로 남아 있어도(독립 검토 #2 Q2, #3 높음 1).
+        # 현재 연결의 워커가 죽었으면 그 연결은 끊김을 기록하지 못한다 — 이 끊김을 그대로 기록한다
+        beats: dict[str, float] = {}
         if owner is not None:
             async with store_errors():
-                live = await require_redis().get(keys.user_conn(user_id))
+                beats = dict(await require_redis().zrange(keys.workers(), 0, -1, withscores=True))
 
         def step(tx: _Tx) -> Optional[Disconnection]:
             seat_no = tx.meta.seat_of(user_id)
@@ -527,7 +528,8 @@ class MazeGameService:
             current = tx.clocks.seat(seat_no).owner
             if owner is not None and current is not None and current != owner:
                 return None
-            if owner is not None and current is None and live is not None and live != owner:
+            live = tx.extra.get(keys.user_conn(user_id))
+            if owner is not None and live is not None and live != owner and self._worker_alive(beats, live, tx.now):
                 return None
             when = tx.now if at_ms is None else min(tx.now, max(at_ms, tx.clocks.latest_ms()))
             fresh = tx.clocks.disconnect(seat_no, when)
@@ -537,8 +539,15 @@ class MazeGameService:
                 tx.outbox.append(events.seat_disconnected(tx.meta, seat_no, remaining, len(tx.state.survivors)))
             return Disconnection(seat_no, seat.disconnected_at_ms, remaining)
 
-        result, _, _ = await self._run(game_id, step)
+        extra = (keys.user_conn(user_id),) if owner is not None else ()
+        result, _, _ = await self._run(game_id, step, extra_keys=extra)
         return result
+
+    @staticmethod
+    def _worker_alive(beats: dict[str, float], conn_id: str, now_ms: int) -> bool:
+        """그 연결을 가진 워커가 하트비트를 남기고 있다 — 기록이 없으면(테스트·기동 직후) 살아 있다고 본다"""
+        beat = beats.get(owner_worker(conn_id))
+        return beat is None or beat >= now_ms - settings.worker_heartbeat_timeout_ms
 
     async def mark_connected(self, game_id: str, user_id: int, *, owner: Optional[str] = None,
                              only_if_current: bool = False) -> bool:
@@ -546,7 +555,13 @@ class MazeGameService:
 
         owner 는 이 연결의 id(`<worker_id>:<연결>`, 서버가 넘긴다). 그 워커가 죽으면 다른 워커의 스위퍼가 이 좌석을
         끊김으로 처리한다(검토 H4). 연결 상태 그대로 연결만 바뀌는 재접속도 기록한다 — 옛 연결의 끊김을 거르는 기준이다.
+
+        **그 유저의 지금 연결(`user:{uid}:conn`)이 다른 연결이면 아무것도 하지 않는다** — 락 안에서 대조한다. 늦게 도착한
+        옛 연결의 기록이 새 연결의 소유를 되돌리면, 옛 연결이 닫힐 때 그 끊김이 기록된다(다중 워커 실측 X6, 독립 검토 #3
+        높음 1). 표시가 없으면(연결이 이미 해제됐다) 기록한다. only_if_current: 표시가 없어도 거부한다(게임 시작 claim).
         """
+        if only_if_current and owner is None:
+            raise ValueError("only_if_current requires owner")  # None == None 으로 대조를 통과하지 않게(검토 #3)
         # 좌석이 아직 "연결 중"인데 그 연결의 워커가 하트비트를 멈췄다 — 크래시한 워커의 좌석에 스위퍼가 처리하기 전에 다시
         # 붙었다. 그 워커의 마지막 하트비트부터 끊겨 있었던 것이다(§8). 그대로 소유만 옮기면 끊긴 시간이 과금되지 않는다
         # (독립 검토 #2 Q3 분석 — 크래시 뒤 하트비트 타임아웃 안의 재접속은 무료였다). 전역 장애 직후의 판정 유예는 스위퍼와 같다
@@ -563,9 +578,10 @@ class MazeGameService:
             seat_no = tx.meta.seat_of(user_id)
             if seat_no is None or tx.closed or tx.state.seat(seat_no).is_eliminated:
                 return False
-            if only_if_current and tx.extra.get(keys.user_conn(user_id)) != owner:
-                # 게임 시작·재구독의 소유 기록 — 그 유저의 지금 연결이 이 연결일 때만. 확인을 락 안에서 한다: 락 밖에서
-                # 확인하면 그 사이 새 연결이 소유를 가져간 뒤 이 기록이 옛 연결로 되돌린다(다중 워커 실측 S8, 게임 시작 0.05 s 뒤 재접속)
+            live = tx.extra.get(keys.user_conn(user_id))
+            if owner is not None and live is not None and live != owner:
+                return False  # 옛 연결의 늦은 기록 — 락 밖에서 확인하면 그 사이 새 연결이 소유를 가져간다(실측 S8)
+            if only_if_current and live != owner:
                 return False
             seat = tx.clocks.seat(seat_no)
             prev = owner_worker(seat.owner)
@@ -581,7 +597,7 @@ class MazeGameService:
                 tx.clocks.set_owner(seat_no, owner)
             return reconnected
 
-        extra = (keys.user_conn(user_id),) if only_if_current else ()
+        extra = (keys.user_conn(user_id),) if owner is not None else ()
         result, _, _ = await self._run(game_id, step, extra_keys=extra)
         return result
 
@@ -721,7 +737,9 @@ class MazeGameService:
             if seat_no is None or tx.state.seat(seat_no).is_eliminated:
                 return "not_in_game"
             self._reconnect(tx, seat_no)  # 행동을 보냈다는 것이 연결의 증거다
-            if owner is not None:
+            live = tx.extra.get(keys.user_conn(user_id))
+            if owner is not None and (live is None or live == owner):
+                # 교체 통지가 닿기 전 옛 연결이 보낸 행동은 받되 소유는 옮기지 않는다(독립 검토 #3 높음 1)
                 tx.clocks.set_owner(seat_no, owner)
             if apply is None:
                 rejection = self._eliminate(tx, seat_no, "surrender")
@@ -739,7 +757,8 @@ class MazeGameService:
             ))
             return None
 
-        rejection, tx, ended = await self._run(game_id, step, received_at=received)
+        extra = (keys.user_conn(user_id),) if owner is not None else ()
+        rejection, tx, ended = await self._run(game_id, step, received_at=received, extra_keys=extra)
         return ActionOutcome(rejection, tx.state, ended)
 
     async def _run(self, game_id: str, step, *, void_before_ms: Optional[int] = None,

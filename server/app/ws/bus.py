@@ -195,7 +195,7 @@ class EventBus:
                     current = await require_redis().get(keys.user_conn(user_id))
             except StoreUnavailable:
                 return  # 다음 재접속·행동이 기록한다
-            if current == conn.conn_id:
+            if current == conn.conn_id:  # 미리 거르는 최적화일 뿐 — 권위 있는 대조는 claim_seat 의 락 안(실측 X6)
                 await self._delivery.claim_seat(game_id, user_id, conn.conn_id)
 
         task = asyncio.create_task(claim())

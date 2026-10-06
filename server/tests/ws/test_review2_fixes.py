@@ -259,3 +259,67 @@ async def test_claim_checks_the_current_connection_under_the_game_lock(real, red
     await redis_client.set(keys.user_conn(1), "wA:c1")
     await real.mark_connected(state.game_id, 1, owner="wA:c1", only_if_current=True)
     assert (await real.load_clocks(state.game_id)).seat(1).owner == "wA:c1"
+
+
+
+# ----- 독립 검토 #3 높음 1 — 소유 불변식(owner = 그 유저의 현재 연결)을 welcome·행동·끊김 모두 락 안에서 -----
+
+async def test_late_welcome_of_a_replaced_connection_does_not_take_the_seat_back(real, redis_client):
+    """C2·C3 순으로 재접속, C3 의 welcome 이 먼저 커밋되고 C2 의 welcome 이 늦게 — 소유는 C3 그대로, C2 의 끊김은 무시"""
+    state = await start(real)
+    await redis_client.set(keys.user_conn(2), "wB:c3")                 # C3 가 표시를 마지막으로 썼다
+    await real.mark_connected(state.game_id, 2, owner="wB:c3")
+    assert not await real.mark_connected(state.game_id, 2, owner="wA:c2")   # 늦은 C2 welcome
+    assert (await real.load_clocks(state.game_id)).seat(2).owner == "wB:c3"
+    assert await real.mark_disconnected(state.game_id, 2, owner="wA:c2") is None   # 밀려난 C2 가 닫힌다
+    assert (await real.load_clocks(state.game_id)).seat(2).disconnected_at_ms is None
+
+
+async def test_action_from_a_replaced_connection_is_played_but_does_not_move_ownership(real, redis_client):
+    state = await start(real)
+    await redis_client.set(keys.user_conn(1), "wB:new")
+    await real.mark_connected(state.game_id, 1, owner="wB:new")
+    target = state.get_valid_pawn_moves()[0]
+    result = await real.move(state.game_id, 1, target.row, target.col, owner="wA:old")   # 교체 통지 전 옛 연결의 행동
+    assert result.rejection is None
+    assert (await real.load_clocks(state.game_id)).seat(1).owner == "wB:new"
+
+
+async def test_disconnect_while_another_live_connection_is_current_is_ignored_even_if_owner_matches(
+        real, redis_client, fake_clock):
+    """소유가 (어떤 경로로든) 옛 연결로 남았어도, 지금 연결이 다른 살아 있는 워커에 있으면 옛 연결의 끊김은 기록하지 않는다"""
+    state = await start(real)
+    await real.mark_connected(state.game_id, 2, owner="wA:old")       # 표시 없음 → 기록된다
+    await redis_client.set(keys.user_conn(2), "wB:new")
+    await redis_client.zadd(keys.workers(), {"wB": fake_clock.ms})    # wB 는 살아 있다
+    assert await real.mark_disconnected(state.game_id, 2, owner="wA:old") is None
+    assert (await real.load_clocks(state.game_id)).seat(2).disconnected_at_ms is None
+
+
+async def test_disconnect_is_recorded_when_the_current_connection_belongs_to_a_dead_worker(
+        real, redis_client, fake_clock):
+    """지금 연결의 워커가 죽었다 — 그 연결은 끊김을 기록하지 못한다. 옛 연결의 끊김을 버리면 좌석이 영영 "연결 중"이다"""
+    state = await start(real)
+    await real.mark_connected(state.game_id, 2, owner="wA:old")
+    await redis_client.set(keys.user_conn(2), "wB:new")
+    await redis_client.zadd(keys.workers(), {"wB": fake_clock.ms - 60_000})
+    assert await real.mark_disconnected(state.game_id, 2, owner="wA:old") is not None
+
+
+async def test_only_if_current_without_owner_is_refused(real):
+    state = await start(real)
+    with pytest.raises(ValueError):
+        await real.mark_connected(state.game_id, 1, owner=None, only_if_current=True)
+
+
+async def test_claim_seat_uses_the_in_lock_current_connection_check():
+    """배선 — Delivery.claim_seat 가 락 안 대조(only_if_current)를 켠다(검토 #3: 서비스 직접 호출 테스트만 있었다)"""
+    calls = []
+
+    class Games:
+        async def mark_connected(self, game_id, user_id, **kw):
+            calls.append(kw)
+            return False
+
+    await Delivery(Games(), None, None).claim_seat("g", 7, "wA:c")
+    assert calls == [{"owner": "wA:c", "only_if_current": True}]
