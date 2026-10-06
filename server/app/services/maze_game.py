@@ -774,14 +774,14 @@ class MazeGameService:
     def _void_due(tx: _Tx, void_before_ms: Optional[int]) -> bool:
         """긴 장애(store_outage_void_sec 이상)가 이 게임이 살아 있는 동안 났다 — 스스로 무효 처리한다(검토 M12)
 
-        장애 구간의 시작은 마지막으로 성공한 하트비트다. 그 시각 이전(포함)에 시작한 게임이 장애를 겪었다.
+        장애 구간의 시작은 마지막으로 성공한 하트비트다. 그 직후 하한 안에 시작한 게임까지 장애를 겪었다(outages.void_boundary).
         장애 중에는 게임을 만들 수 없으므로 복구 뒤에 생긴 게임은 시작이 구간 끝 이후다(검토 M10).
         """
         started = tx.clocks.started_at_ms
         if void_before_ms is not None and started <= void_before_ms:
             return True
         void_ms = settings.store_outage_void_sec * 1000
-        return any(end - start >= void_ms and started <= start for start, end in tx.outages)
+        return any(end - start >= void_ms and started <= outages.void_boundary(start) for start, end in tx.outages)
 
     def _void_in_place(self, tx: _Tx) -> None:
         """무효 — 시계를 멈추고 표시만 한다. state·시야는 종료 TTL 로 보존한다(`full_board`, 검토 M13)"""

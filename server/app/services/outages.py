@@ -18,6 +18,7 @@ from typing import Optional
 
 from redis.asyncio import Redis
 
+from app.core.config import settings
 from app.db import redis_keys as keys
 from app.db.redis_lock import store_errors
 from app.services.maze_clock import Interval, merge
@@ -43,6 +44,17 @@ return out
 def _parse(member: str) -> Interval:
     start, _, end = member.partition("-")
     return int(start), int(end)
+
+
+def void_boundary(outage_start_ms: int) -> int:
+    """긴 장애로 무효 처리할 게임의 시작 상한 (M3 7단계 다중 워커 실측)
+
+    장애 시작은 마지막 하트비트로 추정한다. 하트비트는 스위퍼 주기마다라 실제 정지는 그 뒤 최대 `store_outage_min_ms`
+    안에 일어난다(그보다 긴 공백은 이미 장애다). 그 사이에 시작한 게임도 장애를 겪었다 — 실측에서 정지 0.7 s 전에 생긴
+    게임이 126 s 장애에도 무효가 되지 않았다. 장애 중에는 게임을 만들 수 없고 복구 뒤 게임은 시작이 구간 끝(시작 + 120 s 이상)
+    이후이므로, 이 경계가 복구 뒤 게임을 잘못 닫지 않는다(검토 M10).
+    """
+    return outage_start_ms + settings.store_outage_min_ms
 
 
 async def heartbeat(redis: Redis, now_ms: int, *, min_ms: int, retention_ms: int) -> Optional[Interval]:

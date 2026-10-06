@@ -551,3 +551,16 @@ def test_recent_disconnects_keeps_only_recent():
     recent.record("g", 3, 2000)
     assert [e.user_id for e in recent.since(0)] == [3]
     assert [e.user_id for e in recent.since(2000)] == [3]
+
+
+async def test_game_started_just_before_the_outage_is_voided(games, mm, clock, source, pub, redis_client):
+    """장애 시작은 마지막 하트비트로 추정한다 — 그 직후(정지 직전) 시작한 게임도 장애를 겪었다
+    (M3 7단계 다중 워커 실측: 정지 0.7 s 전에 생긴 게임이 126 s 장애에도 무효가 되지 않았다)"""
+    a = make_sweeper(games, mm, clock, source)
+    await a.tick()                                                  # 마지막 하트비트
+    clock.advance(700)
+    late, _ = await start(games)                                    # 다음 회차 전에 생겼다 — 그리고 Redis 가 멈춘다
+    clock.advance(settings.store_outage_void_sec * 1000 + S)
+    report = await a.tick()
+    assert report.voided == [late.game_id]
+    assert (await clocks_of(redis_client, late.game_id)).voided

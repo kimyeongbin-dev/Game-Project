@@ -38,6 +38,7 @@ from app.db.config import get_session_factory, is_db_available
 from app.db.redis_lock import StoreUnavailable, require_redis, store_errors
 from app.db.repository import GameSessionRepository
 from app.services import outages
+from app.services.outages import void_boundary
 from app.services.matchmaking import Matchmaking, matchmaking
 from app.services.maze_game import (
     GAME,
@@ -254,7 +255,7 @@ class DeadlineSweeper:
         start, end = outage
         logger.warning("Recorded store outage %d..%d (%d ms)", start, end, end - start)
         if end - start >= settings.store_outage_void_sec * 1000:
-            report.voided += await self._void_running(started_before_ms=start)
+            report.voided += await self._void_running(started_before_ms=void_boundary(start))
         return outage
 
     async def _reap_dead_workers(self, now: int, report: TickReport) -> None:
