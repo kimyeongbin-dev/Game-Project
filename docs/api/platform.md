@@ -837,13 +837,13 @@ Redis와 이중 기록이 되고 정합성 문제가 생긴다. 방 기록이 �
 | `deadlines:{game}` | ZSET | member=`clock:<game_id>` \| `grace:<game_id>:<seat_no>` \| `ready:<match_id>`, score=소진 예정 시각(epoch ms, Redis TIME) | 없음 | 게임 서비스(펜싱 쓰기 Lua 안), 매치메이킹(매치 기록과 MULTI), 스위퍼(리스 클레임) | 스위퍼 |
 | `deadlines:{game}:scan` | STRING | 토큰 — 상태 유실 점검을 주기마다 한 워커만 | `PX lost_scan_interval_sec` | 스위퍼 | 스위퍼 |
 | `game:{id}:result` | STRING | 종료 결과 `{end_reason, winner_seat_no, turn_count, results}` — DB 기록에 실패했을 때만 | 없음(기록 재시도 성공 시 삭제) | 게임 서비스(종료 처리) | 스위퍼 유실 점검(무효 대신 재시도) |
-| `store:alive` | STRING | 전역 하트비트 — 어느 워커든 스위퍼 회차가 Redis 에 마지막으로 성공한 시각(epoch ms). 이후 공백 = 장애 | 없음 | 스위퍼(하트비트 Lua — 공백이면 `store:outages` 에 함께 기록) | 시계 정산(잠정 면제) |
+| `store:alive` | STRING | 전역 하트비트 — 어느 워커든 Redis 에 마지막으로 성공한 시각(epoch ms). 이후 공백 = 장애 | 없음 | 스위퍼 전용 하트비트 루프(200 ms, 전용 연결)·스위퍼 회차·게임 서비스의 복구 뒤 첫 성공 처리 — 모두 같은 하트비트 Lua(공백이면 `store:outages` 에 함께 기록, 시각을 되감지 않음) | 시계 정산(잠정 면제) |
 | `store:workers` | ZSET | member=워커 id(`app/core/worker.py`), score=그 워커의 마지막 하트비트 | 없음(다 처리한 죽은 워커는 제거) | 스위퍼(자기 하트비트, 죽은 워커 리스 클레임) | 스위퍼 |
 | `store:workers:{wid}:seats` | ZSET | member=`<game_id>:<seat_no>` — 그 워커가 연결을 가진 좌석 | 없음 | 게임 서비스 — **시계와 같은 펜싱 쓰기**(소유가 바뀐 만큼 이동) | 스위퍼(죽은 워커의 좌석을 끊김으로) |
 | `game:{id}:version` | STRING | 게임 이벤트 번호(정수) — 커밋되는 이벤트마다 +1, 와이어 `version`([`games/maze.md`](games/maze.md) §1) | state 와 같다 | 게임 서비스 — **state 와 같은 펜싱 쓰기**(M3 7단계, 검토 L23) | 게임 서비스, 좌석별 화면(재동기화 번호) |
-| `user:{uid}:conn` | STRING | 그 유저의 현재 WS 연결 id `<worker_id>:<토큰>` — 클러스터에 연결 하나 | 없음(다음 접속이 덮는다) | WS 핸들러(접속 시 `SET … GET`) | WS 핸들러(이전 연결이 다른 워커면 `session_replaced` 발행) |
+| `user:{uid}:conn` | STRING | 그 유저의 현재 WS 연결 id `<worker_id>:<토큰>` — 클러스터에 연결 하나 | `EX 86400`(큐 티커가 로컬 연결의 TTL 갱신) | WS 핸들러(접속 시 `GET` 뒤 `SET` — 재시도에 이전 값을 잃지 않게. 연결이 끝나면 자기 값일 때만 삭제) | WS 핸들러(이전 연결이 다른 워커면 `session_replaced` 발행), 버스(교체·재구독 확인), 게임 서비스(**락 안** — 좌석 소유는 그 유저의 현재 연결만 기록, 다른 살아 있는 연결이 현재면 끊김 무시) |
 | `ws:{ns}:connect:{uid}` | STRING | 분당 WS 접속 수 — **리미터 논리 DB**(앱 상태 DB 가 아니다) | `EX 60`(첫 INCR 때) | WS 핸들러(INCR) | WS 핸들러(`ws_connect_per_minute` 초과면 1013) |
-| `store:outages` | ZSET | member=`"<start_ms>-<end_ms>"`, score=end_ms — 스위퍼가 관측한 Redis 장애 구간 | 원소별 `outage_retention_sec`(86400) 뒤 정리 | 스위퍼 | 시계 정산(면제 구간) |
+| `store:outages` | ZSET | member=`"<start_ms>-<end_ms>"`, score=end_ms — 전역 하트비트 공백으로 관측한 Redis 장애 구간 | 원소별 `outage_retention_sec`(86400) 뒤 정리 | `store:alive` 와 같은 하트비트 Lua(쓰는 쪽도 같다) | 시계 정산(면제 구간), 스위퍼(긴 장애 무효 훑기·사망 판정 유예) |
 
 **설계 근거**
 

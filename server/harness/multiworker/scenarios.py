@@ -15,6 +15,7 @@ import re
 import time
 import traceback
 from pathlib import Path
+from typing import Optional
 
 from harness import (
     Client, Docker, Pool, clocks, db_status, friend_game, health_by_worker, legal_move, raw_ws_handshake,
@@ -371,8 +372,10 @@ async def s4(pool: Pool, variant: str = "plain", games: int = 20) -> Result:
 
 # ----- S5 실제 Redis 장애 -----
 
-async def measure_downtime(limit_sec: float) -> int:
-    """Redis 가 PING 에 답하지 못한 가장 긴 구간(ms) — 서버의 기록과 독립적인 측정(재시도 없는 연결, 100 ms 간격)"""
+async def measure_downtime(limit_sec: float, recovered: Optional[list] = None) -> int:
+    """Redis 가 PING 에 답하지 못한 가장 긴 구간(ms) — 서버의 기록과 독립적인 측정(재시도 없는 연결, 100 ms 간격)
+
+    recovered: 주면 복구 순간(time.monotonic)을 덧붙인다 — 행동 재개 지연을 잰다(독립 검토 #3 높음 2)"""
     from redis.asyncio import Redis
     client = Redis.from_url(os.environ["REDIS_URL"], socket_timeout=0.5, socket_connect_timeout=0.5)
     down_since, longest = None, 0
@@ -384,6 +387,8 @@ async def measure_downtime(limit_sec: float) -> int:
                 if down_since is not None:
                     longest = max(longest, int((time.monotonic() - down_since) * 1000))
                     down_since = None
+                    if recovered is not None:
+                        recovered.append(time.monotonic())
                     if longest:
                         break
             except Exception:
@@ -439,10 +444,12 @@ async def s5(pool: Pool, long: bool = False) -> Result:
     res.metrics["recover_after_client_kill_sec"] = round(time.monotonic() - t, 3)
 
     t = time.monotonic()
-    probe = asyncio.create_task(measure_downtime(30.0))   # 하네스가 공백을 직접 잰다(독립 검토 #2 Q4)
+    recovered_at: list = []
+    probe = asyncio.create_task(measure_downtime(30.0, recovered_at))   # 하네스가 공백을 직접 잰다(독립 검토 #2 Q4)
     await asyncio.sleep(0.3)
     await docker.action("redis", "restart", t=10)
     await move_current(players, res, retry_busy_sec=10.0, strict=False)
+    action_ok = time.monotonic()
     await resync_views(players, 2.0)
     res.metrics["recover_after_restart_sec"] = round(time.monotonic() - t, 3)
     await asyncio.sleep(2)
@@ -457,6 +464,16 @@ async def s5(pool: Pool, long: bool = False) -> Result:
     gaps = [int(m.split("-")[1]) - int(m.split("-")[0]) for m in new]
     downtime_ms = await probe
     res.metrics["restart_outages_ms"], res.metrics["restart_downtime_ms"] = gaps, downtime_ms
+    # 장애 정의는 하트비트 전용 연결 기준이다(maze.md §8). 행동이 그보다 얼마나 늦게 되살아나는지 — 그만큼은 면제 없이
+    # 흐른다(독립 검토 #3 높음 2). 실측 0.2~0.4 s. 행동 재시도 간격 0.2 s + 처리 시간을 넘는 지연이면 실패
+    if recovered_at:
+        lag_ms = int((action_ok - recovered_at[0]) * 1000)
+        res.metrics["action_after_recovery_ms"] = lag_ms
+        res.check(lag_ms <= 1_000, f"actions resumed {lag_ms} ms after Redis answered PING")
+    # 기록됐다면 그 길이가 직접 잰 공백에 붙어야 한다 — 기록은 마지막 성공 → 첫 성공, 공백은 첫 실패 → 첫 성공이라
+    # 하트비트 간격(200 ms) + 탐침 간격(100 ms)만큼 길 수 있다(검토 #3 중간: 재시작 구간도 면제량을 본다)
+    for gap in gaps:
+        res.check(downtime_ms - 500 <= gap <= downtime_ms + 1_000, f"restart recorded {gap} ms for {downtime_ms} ms down")
     # 직접 잰 공백이 하한(3 s)보다 확실히 길면 정확히 한 건, 확실히 짧으면 0건 — 경계 근처(±0.5 s)는 어느 쪽도 허용
     if downtime_ms >= 3_500:
         res.check(len(new) == 1, f"restart down {downtime_ms} ms but outage records {gaps}")
@@ -493,6 +510,9 @@ async def s5(pool: Pool, long: bool = False) -> Result:
     res.metrics["paused_sec"], res.metrics["exempt_overlap_ms"] = round(paused, 2), overlap
     # 면제량은 실제 정지에 붙어야 한다 — 하트비트 주기(200 ms) 단위 오차 + 명령 지연만 허용(독립 검토 #2 Q4: 예전에는 2~5 s 더 면제됐다)
     res.check(overlap <= paused * 1000 + 1_000, f"exempted {overlap} ms for a {paused:.1f} s stop")
+    # 하한도 — 서버 기록끼리의 대조(clock_error_ms)는 장애 끝을 이르게 찍는 과소 면제를 못 잡는다(독립 검토 #3 중간).
+    # paused 는 하네스가 pause/unpause 호출로 잰 외부 기준이다
+    res.check(overlap >= paused * 1000 - 1_000, f"exempted only {overlap} ms for a {paused:.1f} s stop")
     await move_current(players, res, retry_busy_sec=5.0, strict=False)
     after = next(c["remaining_ms"] for c in players[0].turn["clocks"] if c["seat_no"] == current.seat_no)
     expected = start_remaining - (t_send_ms - turn_start - overlap) + 2000
