@@ -153,7 +153,7 @@ games/ ┘
 | `server/app/core/` | `config.py`(환경변수 단일 진입점), `time.py`(표준 utcnow·Redis TIME 시계), `security.py`(access token **검증만** — 발급은 인증 작업), `redaction.py`(로그의 `token=` 마스킹), `worker.py`(워커 id) |
 | Redis | 연결 계층(`app/db/redis.py`) + lifespan 배선 완료. graceful degradation |
 | 레이트 리미터 | **배선 완료** — Redis 저장소, 커스텀 429, `main.py` 등록. 테스트 10건 |
-| `server/app/ws/` | **완료**(M3 7단계) — `maze_handler`(`/api/v1/ws/maze`, §12 10종·인증 4001~4003·accept 후 close), `delivery`·`wire`(내부 이벤트 → §12 와이어, 게임별 `version`), `runtime`(lifespan: 버스·스위퍼·큐 티커·SIGTERM 기준 서버 유예·끊김 재시도), `rate_limit`(소켓 버킷·접속 카운터), `connection_manager`(연결 맵, 같은 계정은 클러스터에 하나). 좌석 소유는 연결 id 단위. 독립 검토 #1·#2 반영 |
+| `server/app/ws/` | **완료**(M3 7단계) — `maze_handler`(`/api/v1/ws/maze`, §12 10종·인증 4001~4003·accept 후 close), `delivery`·`wire`(내부 이벤트 → §12 와이어, 게임별 `version`), `runtime`(lifespan: 버스·스위퍼·큐 티커·SIGTERM 기준 서버 유예·끊김 재시도), `rate_limit`(소켓 버킷·접속 카운터), `connection_manager`(연결 맵, 같은 계정은 클러스터에 하나). 좌석 소유는 연결 id 단위. 독립 검토 #1~#3 반영 |
 | 시간 체계 | **완료**(M3 6단계) — `services/maze_clock.py`(두 시계 분리, 지연 정산), `services/sweeper.py`(리스 클레임, 장애 구간, 유실 점검), `ws/server_grace.py`(서버 유예 소급). Redis 장애는 전역 하트비트(`store:alive` — 워커마다 전용 200 ms 루프·전용 연결, 7단계 실측), 크래시 워커의 좌석은 워커 하트비트(`store:workers`)로 처리. 독립 검토 반영(`docs/research/2026-10-04-M3-6단계-독립검토.md`). 스위퍼·유예의 lifespan 배선은 7단계 완료 |
 | `client/lib/**` | 디렉토리 골격 + 허브 placeholder만 존재 |
 | 나머지 5종 게임 | 미착수 |
