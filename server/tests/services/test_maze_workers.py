@@ -267,6 +267,21 @@ async def test_global_outage_does_not_make_live_workers_look_dead(games, mm, fak
     assert (await clocks_of(redis_client, state.game_id)).seat(2).connected
 
 
+async def test_slow_recovering_worker_is_not_reaped(games, mm, fake_clock, redis_client):
+    """복구 뒤 하트비트를 늦게 재개하는 워커(장애 중 걸린 명령이 socket_timeout 을 다 쓴다)도 죽었다고 보지 않는다(검토 #2 Q6)"""
+    state, users = await start(games)
+    a, b = worker(games, mm, fake_clock, "w-a"), worker(games, mm, fake_clock, "w-b")
+    await games.mark_connected(state.game_id, users[1], owner="w-a:conn")
+    await a.tick()
+    await b.tick()
+    fake_clock.advance(TIMEOUT + 5 * S)            # 전역 장애
+    await b.tick()                                 # b 가 먼저 회복해 장애를 기록
+    await passes(fake_clock, TIMEOUT + 2 * S)      # a 는 12 s 뒤에야 하트비트를 재개 — 예전 창(10 s)이면 죽은 것으로 봤다
+    assert (await b.tick()).dropped == []
+    await a.tick()
+    assert (await clocks_of(redis_client, state.game_id)).seat(2).connected
+
+
 async def test_worker_that_really_died_during_outage_is_still_reaped(games, mm, fake_clock, redis_client):
     """대조군 — 장애 뒤에도 하트비트를 남기지 않는 워커는 유예가 끝나면 처리된다"""
     state, users = await start(games)
@@ -276,7 +291,7 @@ async def test_worker_that_really_died_during_outage_is_still_reaped(games, mm, 
     await b.tick()
     fake_clock.advance(TIMEOUT + 5 * S)
     await b.tick()                                 # a 는 장애 중에 죽었다 — 다시 오지 않는다
-    for _ in range(3):
+    for _ in range(8):                             # 판정 유예(타임아웃 + 2 × socket_timeout + 주기) 뒤
         await passes(fake_clock, TIMEOUT // 2)
         report = await b.tick()
         if report.dropped:

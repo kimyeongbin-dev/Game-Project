@@ -366,7 +366,11 @@ async def test_action_right_after_recovery_is_exempt_before_recording(games, swe
     assert outcome.rejection is None            # 시간패가 아니다
     c = await clocks_of(redis_client, state.game_id)
     assert c.seat(1).remaining_ms == 10 * S + settings.clock_increment_ms
-    assert (await sweeper.tick()).outage is not None    # 나중에 기록돼도 이중 면제는 없다(이미 정산됨)
+    # 복구 뒤 첫 처리가 공백을 직접 닫았다(독립 검토 #2 Q4) — 끝은 그 처리 시각이고, 스위퍼는 다시 적지 않는다
+    [member] = await redis_client.zrange(keys.store_outages(), 0, -1)
+    assert int(member.split("-")[1]) == clock.ms
+    assert (await sweeper.tick()).outage is None
+    assert await redis_client.zcard(keys.store_outages()) == 1
 
 
 async def test_short_outage_is_not_recorded(sweeper, clock, redis_client):
@@ -564,3 +568,19 @@ async def test_game_started_just_before_the_outage_is_voided(games, mm, clock, s
     report = await a.tick()
     assert report.voided == [late.game_id]
     assert (await clocks_of(redis_client, late.game_id)).voided
+
+
+async def test_long_outage_closed_by_a_game_still_voids_idle_games(games, mm, clock, source, pub, redis_client):
+    """긴 장애를 복구 뒤 첫 게임 처리가 기록해도(검토 #2 Q4) 손대지 않은 다른 게임까지 스위퍼가 무효로 닫는다"""
+    busy, users = await start(games)
+    idle, _ = await start(games)
+    a = make_sweeper(games, mm, clock, source)
+    await a.tick()
+    clock.advance(settings.store_outage_void_sec * 1000 + S)   # 긴 장애
+    target = busy.get_valid_pawn_moves()[0]
+    await games.move(busy.game_id, users[0], target.row, target.col)   # 첫 처리가 공백을 닫는다(스스로 무효)
+    report = await a.tick()
+    assert report.outage is None and idle.game_id in report.voided
+    assert (await clocks_of(redis_client, idle.game_id)).voided
+    assert (await clocks_of(redis_client, busy.game_id)).voided
+    assert (await a.tick()).voided == []                        # 한 번만

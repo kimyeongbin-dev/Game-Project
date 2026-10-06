@@ -745,6 +745,13 @@ class MazeGameService:
                 # 저장된 시각보다 이르게 정산하지 않는다 — 수신 뒤 다른 처리가 먼저 끝났거나 시각 출처가 뒤로
                 # 뛰었다(검토 L21). 정산은 이 시각 하나로 한다
                 now = max(now, clocks.latest_ms())
+                if outages.provisional(raw_alive, now, settings.store_outage_min_ms):
+                    # 복구 뒤 첫 성공 처리 — 하트비트 공백을 지금 닫는다(구간 기록 + 하트비트 갱신, Lua 한 번). 스위퍼의 첫
+                    # 하트비트를 기다리면 장애 끝이 실제 복구보다 수 초 늦게 찍혀, 그 사이 시작된 차례가 더 면제된다
+                    # (M3 7단계 독립 검토 #2 Q4 — 실측 2~5 s). 긴 장애의 일괄 무효는 스위퍼가 기록을 훑어 처리한다
+                    await outages.heartbeat(redis, now, min_ms=settings.store_outage_min_ms,
+                                            retention_ms=settings.outage_retention_sec * 1000)
+                    raw_alive = str(now)
                 exempt = merge([
                     *await outages.read(redis, clocks.open_since()),
                     *outages.provisional(raw_alive, now, settings.store_outage_min_ms),

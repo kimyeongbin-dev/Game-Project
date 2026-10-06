@@ -86,6 +86,8 @@ InProgressSource = Callable[[], Awaitable[list[tuple[str, int]]]]
 
 
 IN_PROGRESS_PAGE = 100
+# 긴 장애 기록을 훑는 범위 — 기록 직후 몇 회차 안에 처리된다. 그보다 오래된 기록은 이미 처리됐다
+LONG_OUTAGE_SCAN_MS = 600_000
 
 
 async def paged(fetch_page: Callable[[int, int], Awaitable[list]], page_size: int = IN_PROGRESS_PAGE) -> list:
@@ -144,6 +146,7 @@ class DeadlineSweeper:
         self._in_progress = in_progress_source
         self._worker_id = worker_id
         self._next_scan_ms: Optional[int] = None
+        self._voided_outages: set[str] = set()
         self._task: Optional[asyncio.Task] = None
         # 관측용 — /health 가 보고한다
         self.last_tick_ok: Optional[bool] = None
@@ -250,12 +253,18 @@ class DeadlineSweeper:
             require_redis(), now,
             min_ms=settings.store_outage_min_ms, retention_ms=settings.outage_retention_sec * 1000,
         )
-        if outage is None:
-            return None
-        start, end = outage
-        logger.warning("Recorded store outage %d..%d (%d ms)", start, end, end - start)
-        if end - start >= settings.store_outage_void_sec * 1000:
-            report.voided += await self._void_running(started_before_ms=void_boundary(start))
+        if outage is not None:
+            logger.warning("Recorded store outage %d..%d (%d ms)", outage[0], outage[1], outage[1] - outage[0])
+        # 긴 장애는 누가 기록했든(이 스위퍼든, 복구 뒤 첫 게임 처리든 — 독립 검토 #2 Q4) 한 번씩 그 전에 시작한 게임을 닫는다.
+        # 처리한 구간은 이 프로세스가 기억한다 — 재기동하면 다시 훑지만 무효는 멱등이다
+        void_ms = settings.store_outage_void_sec * 1000
+        async with store_errors():
+            recent = await require_redis().zrangebyscore(keys.store_outages(), now - LONG_OUTAGE_SCAN_MS, "+inf")
+        for member in recent:
+            start, end = outages._parse(member)
+            if end - start >= void_ms and member not in self._voided_outages:
+                report.voided += await self._void_running(started_before_ms=void_boundary(start))
+                self._voided_outages.add(member)
         return outage
 
     async def _reap_dead_workers(self, now: int, report: TickReport) -> None:
@@ -273,7 +282,10 @@ class DeadlineSweeper:
             # 보면, 그 워커의 좌석이 장애 시작부터 끊김이 되어 접속 예산을 넘겨 기권패한다(M3 7단계 다중 워커 실측).
             # 장애가 끝난 뒤 하트비트 타임아웃만큼은 판정하지 않는다 — 그동안 살아 있는 워커는 하트비트를 다시 남긴다
             last_outage = await redis.zrevrange(keys.store_outages(), 0, 0, withscores=True)
-        if last_outage and now - int(last_outage[0][1]) < timeout:
+        # 창 = 하트비트 타임아웃 + 장애 중 걸린 명령이 끝나는 최장(socket_timeout × (1 + 재시도 1)) + 스위퍼 주기 —
+        # 복구 뒤 늦게 회복하는 워커도 그 안에 하트비트를 다시 남긴다(독립 검토 #2 Q6)
+        settle = timeout + int(2 * settings.redis_socket_timeout * 1000) + settings.sweeper_interval_ms
+        if last_outage and now - int(last_outage[0][1]) < settle:
             return
         async with store_errors():
             flat = await redis.eval(_CLAIM_WORKERS_LUA, 1, keys.workers(),
