@@ -66,7 +66,14 @@ class Docker:
 # ----- 저장소 -----
 
 def redis() -> Redis:
-    return Redis.from_url(os.environ["REDIS_URL"], decode_responses=True)
+    """하네스의 관찰용 연결 — 재시작 직후 AOF 를 다시 읽는 동안(BusyLoadingError)·끊긴 연결은 잠깐 기다렸다 다시 묻는다"""
+    from redis.asyncio.retry import Retry
+    from redis.backoff import ConstantBackoff
+    from redis.exceptions import BusyLoadingError, ConnectionError, TimeoutError
+
+    return Redis.from_url(os.environ["REDIS_URL"], decode_responses=True,
+                          retry=Retry(ConstantBackoff(0.25), 40),
+                          retry_on_error=[BusyLoadingError, ConnectionError, TimeoutError])
 
 
 async def seed_users(n: int, prefix: str) -> list[int]:

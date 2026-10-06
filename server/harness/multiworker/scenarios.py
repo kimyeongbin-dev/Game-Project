@@ -404,8 +404,7 @@ async def s5(pool: Pool, long: bool = False) -> Result:
     res.check(not any(x["elimination_reason"] for x in state["seats"]), "a seat was eliminated across the restart")
 
     current = next(p for p in players if p.seat_no == pa.turn["current_seat_no"])
-    r0 = next(c["remaining_ms"] for c in current.turn["clocks"] if c["seat_no"] == current.seat_no)
-    t_turn = current.received[-1]["_t"]
+    gid = players[0].view["game_id"]
     await docker.action("redis", "pause")
     t_pause = time.monotonic()
     await asyncio.sleep(10)
@@ -413,10 +412,22 @@ async def s5(pool: Pool, long: bool = False) -> Result:
     paused = time.monotonic() - t_pause
     await resync_views(players, 2.5)
     res.check(await outage_count() == base + 1, f"outages recorded: {await outage_count() - base}")
-    t_send = time.monotonic()
+    # 기대값은 서버의 정산식 그대로 — 차례 시작 시 잔량 − (보낸 시각 − 차례 시작 − 기록된 장애 구간과의 겹침) + 증분.
+    # 겹침은 이번 정지만이 아니다: 장애 끝은 복구 뒤 첫 하트비트라(1 s 주기) 직전 재시작 구간이 이 차례의 앞부분과 겹칠 수 있다
+    ck = await clocks(gid)
+    seat = seat_clock(ck, current.seat_no)
+    turn_start, start_remaining = ck["turn_started_at_ms"], seat["remaining_ms"]
+    t_send_ms = await redis_ms()
+    r = redis()
+    try:
+        recorded = [tuple(map(int, m.split("-"))) for m in await r.zrangebyscore("store:outages", turn_start, "+inf")]
+    finally:
+        await r.aclose()
+    overlap = sum(max(0, min(e, t_send_ms) - max(s_, turn_start)) for s_, e in recorded)
+    res.metrics["paused_sec"], res.metrics["exempt_overlap_ms"] = round(paused, 2), overlap
     await move_current(players, res, retry_busy_sec=5.0, strict=False)
     after = next(c["remaining_ms"] for c in players[0].turn["clocks"] if c["seat_no"] == current.seat_no)
-    expected = r0 - (t_send - t_turn - paused) * 1000 + 2000
+    expected = start_remaining - (t_send_ms - turn_start - overlap) + 2000
     res.metrics["clock_error_ms"] = round(after - expected)
     res.check(abs(after - expected) <= 1500, f"outage not exempt: remaining {after} vs expected {expected:.0f}")
     return res
