@@ -142,6 +142,9 @@ class MazeSocketHandler:
             logger.info("WS rejected: origin not allowed")
             await websocket.close(code=CLOSE_POLICY_VIOLATION)
             return None
+        # IP 별 접속 연타 — 토큰을 보기 전에(무효 토큰 연타가 서명 검증·로그를 태우지 못하게, 검토 #1 R11 나머지 · M4-1)
+        if not await self.limiter.allow_ip(websocket.client.host if websocket.client else None):
+            return await _reject(websocket, CLOSE_TRY_AGAIN_LATER)
         try:
             claims = verify_access_token(websocket.query_params.get("token"))
         except InvalidToken as exc:

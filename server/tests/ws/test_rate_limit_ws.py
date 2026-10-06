@@ -169,3 +169,52 @@ async def test_connect_flood_is_cut_before_identity_lookup(server, redis, monkey
         c = await Client(server, 970).open(mint_token(970), expect_connected=False)
         await c.close()
     assert seen.count(970) == 2
+
+
+# ----- M4-1 IP 별 접속 리밋 — 토큰 검증 전 -----
+
+async def test_ip_flood_is_cut_before_the_token_is_even_checked(server, redis, monkeypatch):
+    """무효 토큰 연타 — 한도 안에서는 4001, 넘으면 토큰을 보지 않고 1013. 유효 토큰도 같은 IP 면 막힌다"""
+    import app.ws.maze_handler as handler_module
+    monkeypatch.setattr(settings, "ws_connect_per_minute_ip", 3)
+    checked = []
+    real_verify = handler_module.verify_access_token
+
+    def counting_verify(token):
+        checked.append(token)
+        return real_verify(token)
+
+    monkeypatch.setattr(handler_module, "verify_access_token", counting_verify)
+    codes = []
+    for _ in range(5):
+        c = await Client(server, 1).open("garbage", expect_connected=False)
+        codes.append(await c.closed_code())
+    assert codes == [4001, 4001, 4001, 1013, 1013]
+    assert len(checked) == 3                                   # 넘은 접속은 서명 검증을 하지 않았다
+    c = await Client(server, 7).open(mint_token(7), expect_connected=False)
+    assert await c.closed_code() == 1013
+
+
+async def test_ip_limit_is_independent_of_the_user_limit(redis, monkeypatch):
+    """한도와 카운터가 따로다 — 유저 한도(작다)를 IP 에 쓰면 NAT 뒤 여럿이 막히고, 한 카운터를 나눠 쓰면 서로를 깎는다"""
+    from app.db import redis_keys as keys
+    from app.ws.rate_limit import ConnectLimiter
+
+    monkeypatch.setattr(settings, "ws_connect_per_minute", 1)
+    monkeypatch.setattr(settings, "ws_connect_per_minute_ip", 3)
+    limiter = ConnectLimiter(lambda: redis)
+    assert [await limiter.allow_ip("203.0.113.9") for _ in range(4)] == [True, True, True, False]
+    assert await limiter.allow(4_243) and not await limiter.allow(4_243)   # 유저 한도 1 — IP 카운터와 무관
+    assert 0 < await redis.ttl(keys.ws_connect_ip_rate("203.0.113.9")) <= 60
+
+
+async def test_ip_limiter_fails_open_when_the_store_is_down():
+    from redis.exceptions import ConnectionError
+    from app.ws.rate_limit import ConnectLimiter
+
+    class Down:
+        def pipeline(self, **kw):
+            raise ConnectionError("down")
+
+    assert await ConnectLimiter(lambda: Down()).allow_ip("203.0.113.9")
+    assert await ConnectLimiter(lambda: None).allow_ip("203.0.113.9")

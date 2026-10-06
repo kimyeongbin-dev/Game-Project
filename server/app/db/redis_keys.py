@@ -180,6 +180,12 @@ def ws_connect_rate(user_id: int) -> str:
     return f"ws:{settings.pubsub_namespace}:connect:{user_id}"
 
 
+def ws_connect_ip_rate(ip: str) -> str:
+    """STRING int — 리미터 DB 의 클라이언트 IP 별 분당 WS 접속 횟수(INCR + EX 60). 토큰 검증 전에 센다(M4-1).
+    IP 는 프록시 헤더로 교정된 값(uvicorn FORWARDED_ALLOW_IPS = 프록시 주소만 신뢰)"""
+    return f"ws:{settings.pubsub_namespace}:connect-ip:{ip}"
+
+
 # ----- user_activity 의 값 -----
 # 유저는 동시에 하나의 활동에만 속한다 (maze.md §3). 값 자체가 대상 키를 가리킨다
 
