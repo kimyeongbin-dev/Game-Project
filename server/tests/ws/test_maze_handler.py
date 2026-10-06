@@ -356,3 +356,20 @@ async def test_ready_then_gone_seat_starts_disconnected(server, clients, redis):
     assert seat["disconnected_at_ms"] is not None
     view = (await a.recv("game_state"))["payload"]
     assert next(c for c in view["clocks"] if c["seat_no"] == b_seat)["connected"] is False
+
+
+# ----- M4-1 브라우저 오리진 — 토큰을 보기 전에 거른다 -----
+
+async def test_ws_from_a_disallowed_origin_is_refused_before_the_token(server, redis, monkeypatch):
+    from websockets.asyncio.client import connect
+    from websockets.exceptions import InvalidStatus
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "cors_allowed_origins", ["https://app.example"])
+    with pytest.raises(InvalidStatus) as refused:
+        await connect(server.url(mint_token(1)), origin="https://evil.example")
+    assert refused.value.response.status_code == 403
+    c = await Client(server, 1).open()            # Origin 없음(네이티브 앱) — 통과
+    await c.close()
+    ok = await connect(server.url(mint_token(2)), origin="https://app.example")
+    await ok.close()

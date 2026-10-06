@@ -9,7 +9,7 @@
 """
 
 from functools import lru_cache
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -151,6 +151,13 @@ class Settings(BaseSettings):
     disconnect_retry_max_sec: int = Field(default=120, ge=1)
 
     # -----------------------------------------------------------------------
+    # 브라우저 오리진 (M4-1, app/core/origins.py) — HTTP CORS 와 WS 핸드셰이크가 같은 목록을 쓴다
+    # -----------------------------------------------------------------------
+    # 환경변수는 JSON 목록: CORS_ALLOWED_ORIGINS='["https://gamemoa.example"]'. 비우면 환경별 기본값 —
+    # local·ci 는 "*", production 은 빈 목록(브라우저 오리진 없음). production 에 "*" 를 넣으면 기동 거부
+    cors_allowed_origins: Optional[list[str]] = None
+
+    # -----------------------------------------------------------------------
     # 레이트 리미팅
     # -----------------------------------------------------------------------
     rate_limit_enabled: bool = True
@@ -182,6 +189,13 @@ class Settings(BaseSettings):
         """비밀키가 비거나 짧으면 운영 서버가 모든 토큰을 거부하거나(빈 값) 위조에 약하다(짧은 값)"""
         if self.environment == "production" and len(self.jwt_secret_key) < 32:
             raise ValueError("JWT_SECRET_KEY must be at least 32 characters in production")
+        return self
+
+    @model_validator(mode="after")
+    def _production_never_allows_every_origin(self) -> "Settings":
+        """운영에서 모든 오리진 허용은 실수다 — 웹 클라이언트 오리진을 명시하거나 비운다(네이티브 앱은 Origin 이 없다)"""
+        if self.environment == "production" and self.cors_allowed_origins and "*" in self.cors_allowed_origins:
+            raise ValueError('CORS_ALLOWED_ORIGINS must not contain "*" in production')
         return self
 
     @property

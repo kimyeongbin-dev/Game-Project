@@ -20,6 +20,7 @@ from fastapi import APIRouter, WebSocket
 from starlette.websockets import WebSocketState
 
 from app.core.config import settings
+from app.core.origins import origin_allowed
 from app.core.security import InvalidToken, verify_access_token
 from app.core.worker import WORKER_ID
 from app.db import redis_keys as keys
@@ -135,6 +136,12 @@ class MazeSocketHandler:
             await self._closed(session, close_code)
 
     async def _open(self, websocket: WebSocket) -> Optional[Session]:
+        # 브라우저 오리진 — 토큰을 보기 전에. accept 전 close 는 HTTP 403 이다(브라우저는 어차피 close 코드를 못 읽는다).
+        # Starlette CORS 미들웨어는 WS 에 적용되지 않는다 (M4-1, app/core/origins.py)
+        if not origin_allowed(websocket.headers.get("origin")):
+            logger.info("WS rejected: origin not allowed")
+            await websocket.close(code=CLOSE_POLICY_VIOLATION)
+            return None
         try:
             claims = verify_access_token(websocket.query_params.get("token"))
         except InvalidToken as exc:

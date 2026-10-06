@@ -18,6 +18,7 @@ from app.ws.maze_handler import router as maze_ws_router
 from app.ws.runtime import realtime
 from app.core import redaction
 from app.core.config import settings
+from app.core.origins import allowed_origins
 from app.db import close_db, init_db, is_db_available
 from app.db.redis import close_redis, init_redis, is_redis_available, redis_health
 from app.middleware.rate_limiter import (
@@ -93,13 +94,13 @@ app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 app.add_middleware(RateLimitMiddleware)
 
 # ---------------------------------------------------------------------------
-# CORS
-# TODO: 프로덕션에서는 허용 오리진을 명시한다 (현재 개발 편의로 전체 허용)
+# CORS (M4-1) — 허용 오리진은 app/core/origins.py(production 기본 = 없음). WS 는 핸들러가 같은 목록으로 거른다.
+# 인증은 bearer 토큰이고 쿠키를 쓰지 않는다 — credentials 를 허용하지 않는다
 # ---------------------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=allowed_origins(),
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
