@@ -15,9 +15,9 @@ import asyncio
 import ipaddress
 import logging
 import socket
-from concurrent.futures import ThreadPoolExecutor
+import threading
 from typing import Callable, Optional
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from redis.asyncio import ConnectionPool, Redis
 from redis.asyncio.retry import Retry
@@ -129,21 +129,29 @@ def new_pubsub_client(client_name: str) -> Redis:
     )
 
 
+# 하트비트 연결의 타임아웃은 이 모듈이 정한다 — URL 쿼리 값이 kwargs 를 이기므로(redis-py from_url) 걷어낸다(독립 검토 #3)
+_HEARTBEAT_OVERRIDDEN_QUERY = ("socket_timeout", "socket_connect_timeout", "retry_on_timeout")
+
+
 def _heartbeat_redis(host: Optional[str]) -> Redis:
-    url = settings.redis_url
+    parts = urlsplit(settings.redis_url)
+    query = urlencode([(k, v) for k, v in parse_qsl(parts.query) if k not in _HEARTBEAT_OVERRIDDEN_QUERY])
+    parts = parts._replace(query=query)
     if host is not None:  # 해석해 둔 주소로 — URL 의 이름 대신
-        parts = urlsplit(url)
         userinfo, _, _ = parts.netloc.rpartition("@")
         port = f":{parts.port}" if parts.port else ""
         literal = f"[{host}]" if ":" in host else host
-        url = urlunsplit(parts._replace(netloc=(f"{userinfo}@" if userinfo else "") + literal + port))
+        parts = parts._replace(netloc=(f"{userinfo}@" if userinfo else "") + literal + port)
     return Redis.from_url(
-        url,
+        urlunsplit(parts),
         socket_timeout=settings.store_heartbeat_timeout_sec,
         socket_connect_timeout=settings.store_heartbeat_timeout_sec,
         retry=Retry(NoBackoff(), 0),
         decode_responses=True,
     )
+
+
+Resolver = Callable[..., list]
 
 
 class HeartbeatConnection:
@@ -152,63 +160,116 @@ class HeartbeatConnection:
     하트비트는 복구 즉시 다시 성공해야 장애 끝이 실제 복구에 붙는다(M3 7단계 다중 워커 실측 S5). 그래서
 
     - **짧은 타임아웃, 클라이언트 재시도 없음.** 루프가 주기마다 다시 한다. 재시도가 있으면 시도 하나가 타임아웃 × 2 를 묶는다
-    - **해석한 주소로 직접 접속, 이름 조회는 전용 스레드 하나.** Redis 가 꺼진 동안 이름 조회 하나가 수 초 걸리고(Docker 내장
+    - **해석한 주소로 직접 접속, 이름 조회는 따로 도는 daemon 스레드.** Redis 가 꺼진 동안 이름 조회 하나가 수 초 걸리고(Docker 내장
       DNS 실측 3.3 s) 연결 타임아웃이 끝나도 조회 스레드는 계속 돈다. 워커의 모든 재접속이 asyncio 기본 스레드 풀을 그렇게 채워,
       복구 뒤 하트비트 연결의 조회가 그 뒤에 줄을 섰다(복구 뒤 1.4 s 동안 두 워커 모두 하트비트 0건 — ≈2.3 s 재시작이 4.3 s
-      장애로). 실패하면 주소를 다시 조회하되(주소가 바뀌었을 수 있다) 결과가 올 때까지 마지막 주소로 계속 시도한다
+      장애로, 실측 X7). 실패하면 다음 주소로 넘기고 다시 조회한다(주소가 바뀌었을 수 있다). 결과가 올 때까지 아는 주소로 계속
+      시도하고, **아는 주소가 없으면 그 주기는 건너뛴다** — 호스트명으로 되돌아가면 기본 스레드 풀의 조회로 돌아간다
+    - IP 고정은 **평문 `redis://` 에 이름이 있을 때만.** TLS(`rediss://`)는 인증서 호스트명 검증·SNI 가 이름을 필요로 하고,
+      unix 소켓은 조회가 없다 — 그때는 URL 그대로(독립 검토 #3)
+    - 조회 스레드는 daemon 이다 — 장애 중 종료(SIGTERM)가 걸린 조회를 기다리지 않는다
     """
 
-    def __init__(self, resolve: Callable[[str, int], list] = socket.getaddrinfo):
+    def __init__(self, resolve: Resolver = socket.getaddrinfo):
         parts = urlsplit(settings.redis_url)
         self._name, self._port = parts.hostname, parts.port or 6379
+        self._pin = parts.scheme == "redis" and self._name is not None and not _is_ip(self._name)
         self._resolve = resolve
-        self._executor: Optional[ThreadPoolExecutor] = None
         self._lookup: Optional[asyncio.Future] = None
-        self._address: Optional[str] = None
+        self._addresses: list[str] = []
+        self._index = 0
         self._client: Optional[Redis] = None
-        if self._name is not None and _is_ip(self._name):
-            self._address = self._name
-        else:
-            self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="store-heartbeat-dns")
+        self._closing: set[asyncio.Task] = set()
 
     @property
     def address(self) -> Optional[str]:
-        return self._address
+        return self._addresses[self._index] if self._addresses else None
 
-    async def client(self) -> Redis:
-        if self._address is None and self._executor is not None:
-            self.refresh()
-            await asyncio.wait({self._lookup})  # 아직 쓸 주소가 없다 — 조회를 기다린다
+    @property
+    def pinned(self) -> bool:
+        return self._pin
+
+    async def client(self) -> Optional[Redis]:
+        """이번 주기에 쓸 클라이언트. None 이면 쓸 주소가 아직 없다 — 조회를 걸어 두고 이번 주기는 건너뛴다"""
+        if not self._pin:
+            if self._client is None:
+                self._client = _heartbeat_redis(None)
+            return self._client
         self._adopt_lookup()
+        if not self._addresses:
+            self.refresh()
+            return None
         if self._client is None:
-            self._client = _heartbeat_redis(self._address)
+            self._client = _heartbeat_redis(self._addresses[self._index])
         return self._client
 
+    def failed(self) -> None:
+        """시도가 실패했다 — 주소가 여럿이면 다음으로 넘기고(IPv6 우선·다중 주소), 다시 조회한다"""
+        if self._pin and len(self._addresses) > 1:
+            self._index = (self._index + 1) % len(self._addresses)
+            self._drop_client()
+        self.refresh()
+
     def refresh(self) -> None:
-        """시도가 실패했다 — 주소를 다시 조회한다(진행 중이면 그대로). 결과는 다음 `client()` 가 반영한다"""
-        if self._executor is not None and (self._lookup is None or self._lookup.done()):
-            self._lookup = asyncio.get_running_loop().run_in_executor(
-                self._executor, self._resolve, self._name, self._port)
+        """주소를 다시 조회한다(진행 중이면 그대로). 결과는 다음 `client()` 가 반영한다"""
+        if not self._pin or (self._lookup is not None and not self._lookup.done()):
+            return
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        name, port, resolve = self._name, self._port, self._resolve
+
+        def work() -> None:
+            try:
+                result, error = resolve(name, port, type=socket.SOCK_STREAM), None
+            except BaseException as exc:  # 조회 실패(NXDOMAIN 등)는 결과로 넘긴다
+                result, error = None, exc
+            try:
+                loop.call_soon_threadsafe(_settle, future, result, error)
+            except RuntimeError:  # 루프가 이미 닫혔다(종료 중)
+                pass
+
+        threading.Thread(target=work, name="store-heartbeat-dns", daemon=True).start()
+        self._lookup = future
 
     def _adopt_lookup(self) -> None:
         if self._lookup is None or not self._lookup.done():
             return
         lookup, self._lookup = self._lookup, None
         if lookup.cancelled() or lookup.exception() is not None:
-            return  # 조회 실패(Redis 가 꺼진 동안의 NXDOMAIN 등) — 마지막 주소를 유지한다
-        address = lookup.result()[0][4][0]
-        if address != self._address:
-            self._address = address
-            client, self._client = self._client, None
-            if client is not None:
-                asyncio.ensure_future(_close_client(client))
+            return  # 조회 실패(Redis 가 꺼진 동안의 NXDOMAIN 등) — 아는 주소를 유지한다
+        addresses = list(dict.fromkeys(info[4][0] for info in lookup.result()))
+        if not addresses or addresses == self._addresses:
+            return
+        current = self.address
+        self._addresses = addresses
+        if current in addresses:
+            self._index = addresses.index(current)
+        else:
+            self._index = 0
+            self._drop_client()
+
+    def _drop_client(self) -> None:
+        client, self._client = self._client, None
+        if client is not None:
+            task = asyncio.ensure_future(_close_client(client))
+            self._closing.add(task)
+            task.add_done_callback(self._closing.discard)
 
     async def aclose(self) -> None:
-        if self._client is not None:
-            await _close_client(self._client)
-            self._client = None
-        if self._executor is not None:
-            self._executor.shutdown(wait=False, cancel_futures=True)
+        self._drop_client()
+        if self._closing:
+            await asyncio.gather(*self._closing, return_exceptions=True)
+        if self._lookup is not None:
+            self._lookup.cancel()
+
+
+def _settle(future: asyncio.Future, result, error) -> None:
+    if future.done():
+        return
+    if error is not None:
+        future.set_exception(error)
+    else:
+        future.set_result(result)
 
 
 def _is_ip(host: str) -> bool:

@@ -89,6 +89,8 @@ InProgressSource = Callable[[], Awaitable[list[tuple[str, int]]]]
 IN_PROGRESS_PAGE = 100
 # 긴 장애 기록을 훑는 범위 — 기록 직후 몇 회차 안에 처리된다. 그보다 오래된 기록은 이미 처리됐다
 LONG_OUTAGE_SCAN_MS = 600_000
+# 전용 하트비트가 이만큼 연속 실패하면 경고한다(200 ms × 25 ≈ 5 s — 짧은 재시작은 조용히 넘긴다)
+HEARTBEAT_WARN_AFTER = 25
 
 
 async def paged(fetch_page: Callable[[int, int], Awaitable[list]], page_size: int = IN_PROGRESS_PAGE) -> list:
@@ -168,16 +170,12 @@ class DeadlineSweeper:
             self._alive_task = asyncio.create_task(self._alive_loop(), name="store-heartbeat")
 
     async def stop(self) -> None:
-        for name in ("_task", "_alive_task"):
-            task = getattr(self, name)
-            if task is None:
-                continue
+        # 둘 다 먼저 취소하고 함께 기다린다. stop 자신의 취소는 삼키지 않는다(예전 except CancelledError 가 삼켰다 — 검토 #3)
+        tasks = [t for t in (self._task, self._alive_task) if t is not None]
+        self._task = self._alive_task = None
+        for task in tasks:
             task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-            setattr(self, name, None)
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _alive_loop(self) -> None:
         """전역 하트비트만 짧은 주기로 — 회차(만료 처리·사망 판정)와 떼어 둔다
@@ -188,19 +186,28 @@ class DeadlineSweeper:
         한 번만 일어난다(무효 훑기는 회차가 한다).
         """
         conn = HeartbeatConnection()
+        failures = 0
         try:
             while True:
                 try:
-                    outage = await outages.beat(await conn.client(), min_ms=settings.store_outage_min_ms,
-                                                retention_ms=settings.outage_retention_sec * 1000)
-                    if outage is not None:
-                        logger.warning("Recorded store outage %d..%d (%d ms)",
-                                       outage[0], outage[1], outage[1] - outage[0])
+                    client = await conn.client()
+                    if client is not None:
+                        outage = await outages.beat(client, min_ms=settings.store_outage_min_ms,
+                                                    retention_ms=settings.outage_retention_sec * 1000)
+                        if outage is not None:
+                            logger.warning("Recorded store outage %d..%d (%d ms)",
+                                           outage[0], outage[1], outage[1] - outage[0])
+                        if failures >= HEARTBEAT_WARN_AFTER:
+                            logger.warning("Store heartbeat recovered after %d failures", failures)
+                        failures = 0
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # 장애 중 — 다음 주기에 다시. 주소가 바뀌었을 수 있다
-                    logger.debug("Store heartbeat failed: %s", exc)
-                    conn.refresh()
+                    failures += 1
+                    # 계속 실패하면 조용히 두지 않는다 — 회차 하트비트(1 s)로 퇴행해 장애 양 끝이 다시 어긋난다(검토 #3, TLS 등)
+                    log = logger.warning if failures == HEARTBEAT_WARN_AFTER else logger.debug
+                    log("Store heartbeat failed (%d in a row, address %s): %s", failures, conn.address, exc)
+                    conn.failed()
                 await asyncio.sleep(settings.store_heartbeat_interval_ms / 1000)
         finally:
             await conn.aclose()
