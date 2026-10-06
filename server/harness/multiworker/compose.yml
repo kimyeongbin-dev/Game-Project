@@ -7,7 +7,7 @@
 #   docker compose -p m3s7 -f server/harness/multiworker/compose.yml down -v
 #
 # 서버는 server/Dockerfile 의 **prod 타깃 그대로**(이미지에 소스 포함) + --workers 2. 플래그는 prod CMD 와 같고 워커만 다르다.
-# 짧은 시계(초기 30 s·증분 2 s, 접속 5 s)로 만료를 빨리 본다 — 규칙이 아니라 숫자만 바꾼다(운영 조정 항목).
+# 짧은 시계(초기 30 s·증분 2 s, 접속 30 s)로 만료를 빨리 본다 — 규칙이 아니라 숫자만 바꾼다(운영 조정 항목).
 # 포트를 호스트에 열지 않는다(Redis 침입 이력, CLAUDE.md). client 만 같은 네트워크에서 접속한다.
 # client 는 Docker 엔진 소켓으로 워커 kill·Redis pause·서버 stop 을 한다 — 로컬 하네스 전용이다.
 # =============================================================================
@@ -59,7 +59,7 @@ services:
       WS_EXPOSE_WORKER: "true"
       CLOCK_INITIAL_MS: "30000"
       CLOCK_INCREMENT_MS: "2000"
-      CONNECTION_BUDGET_MS: "5000"
+      CONNECTION_BUDGET_MS: "30000"
       RATE_LIMIT_ENABLED: "false"
     depends_on:
       redis: {condition: service_healthy}

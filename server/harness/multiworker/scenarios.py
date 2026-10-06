@@ -137,6 +137,28 @@ async def move_current(players, res: Result, *, retry_busy_sec: float = 0.0, str
     return players[0].turn
 
 
+async def vision_check(players, res: Result) -> None:
+    """좌석별 화면의 누적 관측이 Redis 의 **그 좌석** vision 과 같다 — 다른 좌석의 기록을 보내지 않는다(독립 검토 #2 Q9, 관점 4)"""
+    gid = players[0].view["game_id"]
+    r = redis()
+    try:
+        for p in players:
+            raw = json.loads(await r.get(f"game:{gid}:vision:{p.seat_no}"))
+            stored = {(e[0], e[1], "horizontal" if e[2] == "h" else "vertical", e[3]) for e in raw["edges"]}
+            shown = {(e["row"], e["col"], e["orientation"], e["wall"]) for e in p.view["discovered_edges"]}
+            res.check(shown == stored, f"seat {p.seat_no}: discovered_edges differ from its own vision record")
+            stored_seen = {(x["seat_no"], x["row"], x["col"], x["turn"]) for x in raw["last_seen"]}
+            shown_seen = {(x["seat_no"], x["position"]["row"], x["position"]["col"], x["seen_at_turn"])
+                          for x in p.view["last_seen_players"]}
+            res.check(shown_seen == stored_seen, f"seat {p.seat_no}: last_seen_players differ from its own record")
+            others = {o["seat_no"] for o in p.view["others"]}
+            res.check(p.seat_no not in others and "position" not in json.dumps(p.view["others"]),
+                      f"seat {p.seat_no}: others carry positions")
+    finally:
+        await r.aclose()
+    res.metrics["vision_checked_seats"] = len(players)
+
+
 def leak_check(players, res: Result) -> None:
     for p in players:
         end_at = next((i for i, m in enumerate(p.received) if m["type"] == "game_end"), len(p.received))
@@ -165,6 +187,7 @@ async def s1(pool: Pool, mode: str = "duel") -> Result:
     for _ in range(20):
         await move_current(players, res)
         moves += 1
+    await vision_check(players, res)
     for p in players[1:]:
         await p.send("surrender")
     for p in players:
@@ -257,7 +280,7 @@ async def s3(pool: Pool) -> Result:
     left = await qb.recv("player_left", timeout=HEARTBEAT_DETECT_MAX_SEC + 5, state="reconnecting")
     res.metrics["dead_seat_detected_sec"] = round(left["_t"] - t_kill, 2)
     res.check(left["_t"] - t_kill <= HEARTBEAT_DETECT_MAX_SEC, "dead worker's seat detected too late")
-    gone = await qb.recv("player_left", timeout=15, state="eliminated")
+    gone = await qb.recv("player_left", timeout=40, state="eliminated")   # 접속 예산 30 s 뒤
     res.check(gone["payload"]["reason"] == "disconnect_forfeit", f"reason {gone['payload']['reason']}")
     await qb.recv("game_end", timeout=5)
     extra = [m for m in await qb.drain(2.0) if m["type"] == "player_left" and m["payload"]["state"] == "eliminated"]
@@ -337,10 +360,44 @@ async def s4(pool: Pool, variant: str = "plain", games: int = 20) -> Result:
         await r.aclose()
     if killed_pid:
         await wait_two_workers(killed_pid)
+    else:
+        # 두 워커의 스위퍼가 모두 돌고 있었다 — 한쪽이 죽은 채 다른 쪽 혼자 처리한 "정확히 한 번"이 아니다(독립 검토 #2 Q9)
+        seen = await health_by_worker()
+        res.metrics["sweepers"] = {w: (rt["sweeper"]["running"], rt["sweeper"]["last_tick_ok"]) for w, rt in seen.items()}
+        res.check(len(seen) == 2 and all(rt["sweeper"]["running"] and rt["sweeper"]["last_tick_ok"] for rt in seen.values()),
+                  "both workers' sweepers must be running")
     return res
 
 
 # ----- S5 실제 Redis 장애 -----
+
+async def measure_downtime(limit_sec: float) -> int:
+    """Redis 가 PING 에 답하지 못한 가장 긴 구간(ms) — 서버의 기록과 독립적인 측정(재시도 없는 연결, 100 ms 간격)"""
+    from redis.asyncio import Redis
+    client = Redis.from_url(os.environ["REDIS_URL"], socket_timeout=0.5, socket_connect_timeout=0.5)
+    down_since, longest = None, 0
+    deadline = time.monotonic() + limit_sec
+    try:
+        while time.monotonic() < deadline:
+            try:
+                await client.ping()
+                if down_since is not None:
+                    longest = max(longest, int((time.monotonic() - down_since) * 1000))
+                    down_since = None
+                    if longest:
+                        break
+            except Exception:
+                if down_since is None:
+                    down_since = time.monotonic()
+                try:
+                    await client.connection_pool.disconnect()
+                except Exception:
+                    pass
+            await asyncio.sleep(0.1)
+    finally:
+        await client.aclose()
+    return longest
+
 
 async def outage_count() -> int:
     r = redis()
@@ -382,6 +439,8 @@ async def s5(pool: Pool, long: bool = False) -> Result:
     res.metrics["recover_after_client_kill_sec"] = round(time.monotonic() - t, 3)
 
     t = time.monotonic()
+    probe = asyncio.create_task(measure_downtime(30.0))   # 하네스가 공백을 직접 잰다(독립 검토 #2 Q4)
+    await asyncio.sleep(0.3)
     await docker.action("redis", "restart", t=10)
     await move_current(players, res, retry_busy_sec=10.0, strict=False)
     await resync_views(players, 2.0)
@@ -396,8 +455,15 @@ async def s5(pool: Pool, long: bool = False) -> Result:
         await r.aclose()
     new = recorded[base:]
     gaps = [int(m.split("-")[1]) - int(m.split("-")[0]) for m in new]
-    res.metrics["restart_outages_ms"] = gaps
-    res.check(len(new) <= 1 and all(g >= 3000 for g in gaps), f"restart outage records {gaps}")
+    downtime_ms = await probe
+    res.metrics["restart_outages_ms"], res.metrics["restart_downtime_ms"] = gaps, downtime_ms
+    # 직접 잰 공백이 하한(3 s)보다 확실히 길면 정확히 한 건, 확실히 짧으면 0건 — 경계 근처(±0.5 s)는 어느 쪽도 허용
+    if downtime_ms >= 3_500:
+        res.check(len(new) == 1, f"restart down {downtime_ms} ms but outage records {gaps}")
+    elif downtime_ms <= 2_500:
+        res.check(len(new) == 0, f"restart down {downtime_ms} ms but outage records {gaps}")
+    else:
+        res.check(len(new) <= 1, f"restart outage records {gaps}")
     base = await outage_count()
     state = json.loads(await (rr := redis()).get(f"game:{players[0].view['game_id']}:state"))
     await rr.aclose()
@@ -425,6 +491,8 @@ async def s5(pool: Pool, long: bool = False) -> Result:
         await r.aclose()
     overlap = sum(max(0, min(e, t_send_ms) - max(s_, turn_start)) for s_, e in recorded)
     res.metrics["paused_sec"], res.metrics["exempt_overlap_ms"] = round(paused, 2), overlap
+    # 면제량은 실제 정지에 붙어야 한다 — 하트비트 주기(1 s) 단위 오차만 허용(독립 검토 #2 Q4: 예전에는 2~5 s 더 면제됐다)
+    res.check(overlap <= paused * 1000 + 2_500, f"exempted {overlap} ms for a {paused:.1f} s stop")
     await move_current(players, res, retry_busy_sec=5.0, strict=False)
     after = next(c["remaining_ms"] for c in players[0].turn["clocks"] if c["seat_no"] == current.seat_no)
     expected = start_remaining - (t_send_ms - turn_start - overlap) + 2000
@@ -435,11 +503,36 @@ async def s5(pool: Pool, long: bool = False) -> Result:
 
 # ----- S6 SIGTERM 서버 유예 / SIGKILL 대조군 -----
 
+SETTLE_MS = 10_000 + 2 * 5_000 + 1_000   # 워커 사망 판정 유예(하트비트 타임아웃 + 2 × socket_timeout + 스위퍼 주기)
+
+
+async def new_outages(base: list[str]) -> list[tuple[int, int]]:
+    r = redis()
+    try:
+        members = await r.zrangebyscore("store:outages", "-inf", "+inf")
+    finally:
+        await r.aclose()
+    return [tuple(map(int, m.split("-"))) for m in members if m not in base]
+
+
+async def outage_members() -> list[str]:
+    r = redis()
+    try:
+        return await r.zrangebyscore("store:outages", "-inf", "+inf")
+    finally:
+        await r.aclose()
+
+
 async def s6(pool: Pool, signal_kind: str = "term") -> Result:
     res = Result(f"s6_{signal_kind}")
     cs = await pool.any(2)
     gid = await friend_game(cs, "duel")
     before = await clocks(gid)
+    base = await outage_members()
+    current = cs[0].turn["current_seat_no"]
+    seat_now = seat_clock(before, current)
+    t1_ms = await redis_ms()
+    r1 = seat_now["remaining_ms"] - (t1_ms - before["turn_started_at_ms"])   # 차례 좌석의 지금 게임 시계
     t = time.monotonic()
     if signal_kind == "term":
         await docker.action("server", "stop", t=30)
@@ -449,40 +542,73 @@ async def s6(pool: Pool, signal_kind: str = "term") -> Result:
     res.metrics["close_codes"] = codes
     if signal_kind == "term":
         res.check(all(code == 1012 for code in codes), f"close codes {codes}")
+    else:
+        await asyncio.sleep(12)                              # 전 워커 정지 — 접속 예산(30 s)을 가를 만큼 길게
     await docker.action("server", "start")
     await wait_server()
-    await asyncio.sleep(max(0, (15 if signal_kind == "kill" else 5) - (time.monotonic() - t)))
     res.metrics["downtime_sec"] = round(time.monotonic() - t, 2)
-    again = [await Client(c.user_id).open() for c in cs]
-    pool.clients.extend(again)
+
     if signal_kind == "term":
+        await asyncio.sleep(max(0, 5 - (time.monotonic() - t)))
+        mid = await clocks(gid)
+        disc = seat_clock(mid, current)["disconnected_at_ms"]
+        again = [await Client(c.user_id).open() for c in cs]
+        pool.clients.extend(again)
+        t_rc = await redis_ms()
+        views = {}
         for c in again:
-            await c.recv("game_state", timeout=8)
-    after = await clocks(gid)
-    if signal_kind == "term":
+            views[c.user_id] = (await c.recv("game_state", timeout=8))["payload"]
+        t2_ms = await redis_ms()
+        after = await clocks(gid)
         for c in cs:
             spent = seat_clock(before, c.seat_no)["conn_remaining_ms"] - seat_clock(after, c.seat_no)["conn_remaining_ms"]
             res.metrics[f"seat{c.seat_no}_connection_spent_ms"] = spent
             res.check(spent <= 1000, f"seat {c.seat_no} lost {spent} ms of connection clock across a deploy")
+        # 게임 시계는 끊긴 뒤 server_grace_game_ms(8 s)까지만 멈춘다 — 그 뒤는 흐른다(maze.md §8, 독립 검토 #2 Q8)
+        r2 = next(x["remaining_ms"] for x in views[cs[0].user_id]["clocks"] if x["seat_no"] == current)
+        frozen = min(8_000, t_rc - disc) if disc else 0
+        expected = r1 - ((t2_ms - t1_ms) - frozen)
+        res.metrics["game_clock_error_ms"] = round(r2 - expected)
+        res.metrics["game_clock_frozen_ms"] = frozen
+        res.check(abs(r2 - expected) <= 1500, f"game clock across deploy {r2} vs expected {expected:.0f}")
         logs = await docker.logs("server")
-        raw = [t for c in cs if (t := token(c.user_id)[:20]) in logs]
         res.check(not re.search(r"token=ey", logs), "raw token in server logs")
-        res.metrics["raw_token_hits"] = len(raw)
-    else:
-        # 서버 전체(워커 전부)가 함께 죽었다 — 전역 하트비트 공백 = 서비스 전체가 멈춘 시간이라 장애로 기록되고 면제된다
-        # (maze.md §8 "긴 Redis 장애 중 시계"). "크래시는 면제 없음"은 워커 하나의 크래시(S3)다.
-        # (계획서는 이 경우를 기권패로 적었다 — 설계서와 어긋난 기준이었다)
-        r = redis()
-        try:
-            state = json.loads(await r.get(f"game:{gid}:state") or "null")
-            outs = await r.zrangebyscore("store:outages", "-inf", "+inf")
-        finally:
-            await r.aclose()
-        reasons = [s["elimination_reason"] for s in (state or {}).get("seats", [])]
-        res.metrics["reasons"] = reasons
-        res.metrics["outages_recorded"] = len(outs)
-        res.check(not any(reasons), f"whole-server stop penalized a seat: {reasons}")
-        res.check(len(outs) >= 1, "whole-server stop was not recorded as an outage")
+        res.metrics["raw_token_hits"] = len([1 for c in cs if token(c.user_id)[:20] in logs])
+        return res
+
+    # 서버 전체(워커 전부)가 함께 죽었다 — 전역 하트비트 공백 = 서비스 전체가 멈춘 시간이라 장애로 면제된다(§8).
+    # 판별(독립 검토 #2 Q3): 스위퍼가 죽은 워커의 좌석을 끊김으로 처리한 뒤에(장애 끝 + 판정 유예) 재접속한다. 면제되면 소모량 ≈
+    # 재접속 − 장애 끝, 면제가 없으면 정지 시간만큼 더 크다(접속 예산 30 s 안에서 둘을 가른다)
+    for _ in range(40):
+        fresh = await new_outages(base)
+        if fresh:
+            break
+        await asyncio.sleep(0.5)
+    res.check(len(fresh) == 1, f"whole-server stop outage records {fresh}")
+    if not fresh:
+        return res
+    o_start, o_end = fresh[0]
+    stopped_ms = int(res.metrics["downtime_sec"] * 1000)
+    res.metrics["outage_ms"] = o_end - o_start
+    res.check(o_end - o_start >= stopped_ms - 3_000, f"outage {o_end - o_start} ms shorter than the stop {stopped_ms} ms")
+    wait_ms = o_end + SETTLE_MS + 2_000 - await redis_ms()
+    await asyncio.sleep(max(0, wait_ms / 1000))
+    mid = await clocks(gid)
+    res.check(all(s["disconnected_at_ms"] is not None for s in mid["seats"]), "dead workers' seats were not dropped after the settle window")
+    again = [await Client(c.user_id).open() for c in cs]
+    pool.clients.extend(again)
+    t_rc = await redis_ms()
+    after = await clocks(gid)
+    state = json.loads(await (rr := redis()).get(f"game:{gid}:state") or "null")
+    await rr.aclose()
+    reasons = [s["elimination_reason"] for s in (state or {}).get("seats", [])]
+    res.metrics["reasons"] = reasons
+    res.check(not any(reasons), f"whole-server stop penalized a seat: {reasons}")
+    for c in cs:
+        spent = seat_clock(before, c.seat_no)["conn_remaining_ms"] - seat_clock(after, c.seat_no)["conn_remaining_ms"]
+        res.metrics[f"seat{c.seat_no}_connection_spent_ms"] = spent
+        res.check(abs(spent - (t_rc - o_end)) <= 3_000,
+                  f"seat {c.seat_no} spent {spent} ms, expected ≈ {t_rc - o_end} ms after recovery (outage exempt)")
     return res
 
 
@@ -534,7 +660,8 @@ async def s8(pool: Pool) -> Result:
     code = await old.wait_closed(3)
     res.metrics["old_closed_after_sec"] = round(time.monotonic() - t, 3)
     res.check(code == 4000, f"old connection close code {code}")
-    noise = [m for m in await pa.drain(2.0) if m["type"] == "player_left"]
+    # 밀려난 연결의 끊김 확인은 정착 시간(3 s) 뒤 재시도 회차(1 s)에 돈다 — 그 뒤까지 본다(독립 검토 #2 Q3)
+    noise = [m for m in await pa.drain(3.0 + 1.0 + 1.5) if m["type"] == "player_left"]
     res.check(not noise, "replacement announced as a disconnect")
     raw = await clocks(gid)
     res.check(seat_clock(raw, 2)["disconnected_at_ms"] is None, "replacement charged the connection clock")
@@ -545,7 +672,8 @@ async def s8(pool: Pool) -> Result:
 
 async def s9(pool: Pool) -> Result:
     res = Result("s9_flood")
-    cs = await pool.any(2)
+    (a, b), = await pool.on_workers([2])     # 같은 워커 — 그 워커의 수신 루프·버스를 연타가 막지 않는지(독립 검토 #2 Q9)
+    cs = [a, b]
     await friend_game(cs, "duel")
     first, second = cs
 
