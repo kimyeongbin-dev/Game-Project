@@ -491,8 +491,8 @@ async def s5(pool: Pool, long: bool = False) -> Result:
         await r.aclose()
     overlap = sum(max(0, min(e, t_send_ms) - max(s_, turn_start)) for s_, e in recorded)
     res.metrics["paused_sec"], res.metrics["exempt_overlap_ms"] = round(paused, 2), overlap
-    # 면제량은 실제 정지에 붙어야 한다 — 하트비트 주기(1 s) 단위 오차만 허용(독립 검토 #2 Q4: 예전에는 2~5 s 더 면제됐다)
-    res.check(overlap <= paused * 1000 + 2_500, f"exempted {overlap} ms for a {paused:.1f} s stop")
+    # 면제량은 실제 정지에 붙어야 한다 — 하트비트 주기(200 ms) 단위 오차 + 명령 지연만 허용(독립 검토 #2 Q4: 예전에는 2~5 s 더 면제됐다)
+    res.check(overlap <= paused * 1000 + 1_000, f"exempted {overlap} ms for a {paused:.1f} s stop")
     await move_current(players, res, retry_busy_sec=5.0, strict=False)
     after = next(c["remaining_ms"] for c in players[0].turn["clocks"] if c["seat_no"] == current.seat_no)
     expected = start_remaining - (t_send_ms - turn_start - overlap) + 2000

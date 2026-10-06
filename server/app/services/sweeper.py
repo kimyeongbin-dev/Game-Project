@@ -9,7 +9,7 @@
   (§8 의 "ZREM 선점"은 ZREM 직후 크래시면 그 게임이 영원히 만료되지 않는다)
 - **정확성은 락 안 재계산이 보장한다.** 처리(`expire`·`expire_match`)는 게임·매치 락 안에서 저장된
   시계·기한으로 다시 판단한다. 이미 처리된 것은 아무 일도 없고, 점수만 낡았으면 올바른 점수로 다시 적힌다
-- **전역 하트비트를 갱신한다.** 회차마다 `store:alive` 를 지금 시각으로 바꾸고, 직전 값과의 공백이 하한
+- **전역 하트비트를 갱신한다.** 전용 루프(200 ms, `_alive_loop`)와 회차마다 `store:alive` 를 지금 시각으로 바꾸고, 직전 값과의 공백이 하한
   이상이면 그 구간을 `store:outages` 에 적는다(app/services/outages.py, Lua 한 번). 어느 워커든 성공하면
   갱신되므로 공백은 **전역** 장애(또는 전 워커 정지)뿐이고, 관측 상태가 Redis 안에 있어 재기동해도 잃지 않는다.
   구간이 `store_outage_void_sec` 이상이면 **장애 시작 전에** 시작한 진행 중 게임을 무효로 닫는다. 이 회차에
@@ -35,6 +35,7 @@ from app.core.time import Clock, redis_clock
 from app.core.worker import WORKER_ID
 from app.db import redis_keys as keys
 from app.db.config import get_session_factory, is_db_available
+from app.db.redis import new_heartbeat_client
 from app.db.redis_lock import StoreUnavailable, require_redis, store_errors
 from app.db.repository import GameSessionRepository
 from app.services import outages
@@ -148,6 +149,7 @@ class DeadlineSweeper:
         self._next_scan_ms: Optional[int] = None
         self._voided_outages: set[str] = set()
         self._task: Optional[asyncio.Task] = None
+        self._alive_task: Optional[asyncio.Task] = None
         # 관측용 — /health 가 보고한다
         self.last_tick_ok: Optional[bool] = None
         self.last_tick_at_ms: Optional[int] = None
@@ -161,16 +163,49 @@ class DeadlineSweeper:
     async def start(self) -> None:
         if self._task is None:
             self._task = asyncio.create_task(self._loop(), name="deadline-sweeper")
+        # 전역 하트비트는 Redis TIME 으로 찍는다 — 시계를 주입한 테스트(가짜 시각)와 섞지 않는다
+        if self._alive_task is None and self._clock is redis_clock:
+            self._alive_task = asyncio.create_task(self._alive_loop(), name="store-heartbeat")
 
     async def stop(self) -> None:
-        if self._task is None:
-            return
-        self._task.cancel()
+        for name in ("_task", "_alive_task"):
+            task = getattr(self, name)
+            if task is None:
+                continue
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            setattr(self, name, None)
+
+    async def _alive_loop(self) -> None:
+        """전역 하트비트만 짧은 주기로 — 회차(만료 처리·사망 판정)와 떼어 둔다
+
+        회차에 묶으면 장애 시작 추정이 최대 회차 주기만큼 이르고, 복구 뒤 첫 회차가 앱 풀의 긴 타임아웃에 걸려 장애 끝이
+        늦게 찍힌다(실측 S5: ≈1.9 s 재시작이 3.0~4.9 s 로, 10.3 s 정지가 12.8 s 로). 전용 연결·짧은 타임아웃·스크립트 안
+        시각으로 양 끝 오차를 이 주기 단위로 줄인다. 공백 기록·긴 장애 무효는 같은 Lua 라 회차의 `_heartbeat` 와 겹쳐도
+        한 번만 일어난다(무효 훑기는 회차가 한다).
+        """
+        client = new_heartbeat_client()
         try:
-            await self._task
-        except asyncio.CancelledError:
-            pass
-        self._task = None
+            while True:
+                try:
+                    outage = await outages.beat(client, min_ms=settings.store_outage_min_ms,
+                                                retention_ms=settings.outage_retention_sec * 1000)
+                    if outage is not None:
+                        logger.warning("Recorded store outage %d..%d (%d ms)",
+                                       outage[0], outage[1], outage[1] - outage[0])
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # 장애 중 — 다음 주기에 다시
+                    logger.debug("Store heartbeat failed: %s", exc)
+                await asyncio.sleep(settings.store_heartbeat_interval_ms / 1000)
+        finally:
+            try:
+                await client.aclose()
+            except Exception as exc:
+                logger.debug("Store heartbeat client close failed: %s", exc)
 
     async def _loop(self) -> None:
         while True:

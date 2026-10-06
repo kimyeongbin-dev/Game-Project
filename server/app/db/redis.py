@@ -124,6 +124,21 @@ def new_pubsub_client(client_name: str) -> Redis:
     )
 
 
+def new_heartbeat_client() -> Redis:
+    """전역 하트비트 전용 클라이언트 — 앱 풀과 따로 둔다 (`app/services/sweeper.py`)
+
+    장애 중 앱 풀의 연결은 걸린 명령으로 묶이고 타임아웃(5 s)도 길다. 하트비트는 복구 즉시 다시 성공해야 장애 끝이 실제
+    복구에 붙는다 — 짧은 타임아웃의 연결 하나로 따로 돈다.
+    """
+    return Redis.from_url(
+        settings.redis_url,
+        socket_timeout=settings.store_heartbeat_timeout_sec,
+        socket_connect_timeout=settings.store_heartbeat_timeout_sec,
+        retry=_retry(),
+        decode_responses=True,
+    )
+
+
 async def close_redis() -> None:
     """Redis 연결 종료."""
     global _available
