@@ -297,3 +297,35 @@ async def test_worker_that_really_died_during_outage_is_still_reaped(games, mm, 
         if report.dropped:
             break
     assert report.dropped == [(state.game_id, 2)]
+
+
+async def test_reconnect_before_reaping_still_pays_from_the_dead_workers_last_beat(games, mm, fake_clock, redis_client):
+    """크래시한 워커의 좌석이 스위퍼 처리 전에 다른 워커로 다시 붙어도, 그 워커의 마지막 하트비트부터 끊겨 있던 시간이 과금된다
+    (§8 크래시 = 일반 끊김. 예전에는 소유만 옮겨 하트비트 타임아웃 안의 재접속이 무료였다)"""
+    state, users = await start(games)
+    dead, alive = worker(games, mm, fake_clock, "w-dead"), worker(games, mm, fake_clock, "w-alive")
+    await games.mark_connected(state.game_id, users[1], owner="w-dead:c1")
+    await dead.tick()
+    last_beat = fake_clock.ms
+    await alive.tick()
+    await passes(fake_clock, TIMEOUT + 2 * S)                 # w-dead 는 SIGKILL — 스위퍼가 아직 그 좌석을 처리하기 전
+    seat = (await clocks_of(redis_client, state.game_id)).seat(2)
+    assert seat.connected and seat.owner == "w-dead:c1"       # 처리 전이다(이 경로를 판별한다)
+    before = seat.conn_remaining_ms
+    assert await games.mark_connected(state.game_id, users[1], owner="w-alive:c2")   # 재접속(이었다)
+    seat = (await clocks_of(redis_client, state.game_id)).seat(2)
+    assert seat.connected and seat.owner == "w-alive:c2"
+    assert before - seat.conn_remaining_ms == fake_clock.ms - last_beat
+
+
+async def test_moving_from_a_live_worker_is_free(games, mm, fake_clock, redis_client):
+    """대조군 — 살아 있는 워커에서 다른 워커로 옮기는 교체(4000)는 끊김이 아니다"""
+    state, users = await start(games)
+    a, b = worker(games, mm, fake_clock, "w-a"), worker(games, mm, fake_clock, "w-b")
+    await games.mark_connected(state.game_id, users[1], owner="w-a:c1")
+    await a.tick()
+    await b.tick()
+    await passes(fake_clock, 3 * S)
+    before = (await clocks_of(redis_client, state.game_id)).seat(2).conn_remaining_ms
+    await games.mark_connected(state.game_id, users[1], owner="w-b:c2")
+    assert (await clocks_of(redis_client, state.game_id)).seat(2).conn_remaining_ms == before

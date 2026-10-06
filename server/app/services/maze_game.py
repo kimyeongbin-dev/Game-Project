@@ -545,10 +545,31 @@ class MazeGameService:
         owner 는 이 연결의 id(`<worker_id>:<연결>`, 서버가 넘긴다). 그 워커가 죽으면 다른 워커의 스위퍼가 이 좌석을
         끊김으로 처리한다(검토 H4). 연결 상태 그대로 연결만 바뀌는 재접속도 기록한다 — 옛 연결의 끊김을 거르는 기준이다.
         """
+        # 좌석이 아직 "연결 중"인데 그 연결의 워커가 하트비트를 멈췄다 — 크래시한 워커의 좌석에 스위퍼가 처리하기 전에 다시
+        # 붙었다. 그 워커의 마지막 하트비트부터 끊겨 있었던 것이다(§8). 그대로 소유만 옮기면 끊긴 시간이 과금되지 않는다
+        # (독립 검토 #2 Q3 분석 — 크래시 뒤 하트비트 타임아웃 안의 재접속은 무료였다). 전역 장애 직후의 판정 유예는 스위퍼와 같다
+        beats: dict[str, float] = {}
+        recent_outage_end: Optional[int] = None
+        if owner is not None:
+            redis = require_redis()
+            async with store_errors():
+                beats = dict(await redis.zrange(keys.workers(), 0, -1, withscores=True))
+                last = await redis.zrevrange(keys.store_outages(), 0, 0, withscores=True)
+            recent_outage_end = int(last[0][1]) if last else None
+
         def step(tx: _Tx) -> bool:
             seat_no = tx.meta.seat_of(user_id)
             if seat_no is None or tx.closed or tx.state.seat(seat_no).is_eliminated:
                 return False
+            seat = tx.clocks.seat(seat_no)
+            prev = owner_worker(seat.owner)
+            if owner is not None and seat.connected and prev is not None and prev != owner_worker(owner):
+                beat = beats.get(prev)
+                settle = (settings.worker_heartbeat_timeout_ms + int(2 * settings.redis_socket_timeout * 1000)
+                          + settings.sweeper_interval_ms)
+                settling = recent_outage_end is not None and tx.now - recent_outage_end < settle
+                if beat is not None and beat < tx.now - settings.worker_heartbeat_timeout_ms and not settling:
+                    tx.clocks.disconnect(seat_no, max(int(beat), tx.clocks.latest_ms()))
             reconnected = self._reconnect(tx, seat_no)
             if owner is not None:
                 tx.clocks.set_owner(seat_no, owner)
