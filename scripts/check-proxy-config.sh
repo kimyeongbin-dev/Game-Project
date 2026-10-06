@@ -6,7 +6,7 @@
 #
 # 검사
 #   1. Caddyfile 에 `log` 지시어가 없다 — URI 의 ?token= 이 접속 로그로 샌다(maze.md §2)
-#   2. Caddyfile: admin off · auto_https off(TLS 는 엣지) · 신뢰 대역과 업스트림이 환경변수
+#   2. Caddyfile: admin off · auto_https off(TLS 는 엣지) · 신뢰 대역과 업스트림이 환경변수 · XFF = {client_ip} 하나
 #   3. compose: server 가 호스트 포트를 열지 않는다(Caddy 를 우회하는 경로 없음)
 #   4. compose: server 의 FORWARDED_ALLOW_IPS 기본값 = proxy 의 고정 주소 기본값
 #   5. 어디에도 `--forwarded-allow-ips *` 가 없다(Dockerfile·compose·하네스)
@@ -32,6 +32,7 @@ grep -qE '^[[:space:]]*admin[[:space:]]+off' <<<"$body" && ok "$CADDYFILE: admin
 grep -qE '^[[:space:]]*auto_https[[:space:]]+off' <<<"$body" && ok "$CADDYFILE: auto_https off" || bad "$CADDYFILE: auto_https off 없음(TLS 는 엣지)"
 grep -qF 'trusted_proxies static {$CADDY_TRUSTED_PROXIES' <<<"$body" && ok "$CADDYFILE: 신뢰 대역 = 환경변수" || bad "$CADDYFILE: trusted_proxies 가 환경변수가 아니다"
 grep -qF 'reverse_proxy {$CADDY_UPSTREAM' <<<"$body" && ok "$CADDYFILE: 업스트림 = 환경변수" || bad "$CADDYFILE: 업스트림이 환경변수가 아니다"
+grep -qE 'header_up[[:space:]]+X-Forwarded-For[[:space:]]+\{client_ip\}' <<<"$body" && ok "$CADDYFILE: XFF = 판정한 클라이언트 하나"   || bad "$CADDYFILE: XFF 를 {client_ip} 로 다시 쓰지 않는다 — 배포에서 엣지 주소를 클라이언트로 본다"
 
 # compose 의 server 서비스 블록(다음 2칸 들여쓰기 서비스 이름 전까지)
 server_block="$(awk '/^  server:$/{on=1; next} on && /^  [a-z][a-z0-9_-]*:$/{exit} on' "$COMPOSE")"

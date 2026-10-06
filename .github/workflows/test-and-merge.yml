@@ -121,6 +121,44 @@ jobs:
         run: docker compose down -v
 
   # ===================================================
+  # Job 1b: Proxy E2E (Caddy → uvicorn, M4-1) — 로컬과 같은 명령
+  # ===================================================
+  proxy-e2e:
+    name: Proxy E2E (Caddy in Docker)
+    needs: version-guard
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+
+      - name: Generate Redis password
+        run: |
+          pw="$(openssl rand -hex 24)"
+          echo "::add-mask::$pw"
+          echo "REDIS_PASSWORD=$pw" >> "$GITHUB_ENV"
+
+      - name: Start stack behind the proxy
+        run: docker compose up -d --build --wait proxy
+
+      - name: Build test image
+        run: docker compose build server-test
+
+      - name: Run proxy E2E
+        run: docker compose run --rm -T -e E2E_BASE_URL=http://proxy:8080 server-test pytest e2e -v --tb=long
+
+      - name: Dump service logs on failure
+        if: failure()
+        run: docker compose logs --no-color
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  # ===================================================
   # Job 2: Client Tests (Flutter analyze + test)
   # ===================================================
   client-tests:
@@ -174,7 +212,7 @@ jobs:
   auto-merge:
     name: Auto-Merge to Develop
     runs-on: ubuntu-latest
-    needs: [version-guard, server-tests, client-tests]
+    needs: [version-guard, server-tests, proxy-e2e, client-tests]
     if: success()
 
     permissions:
