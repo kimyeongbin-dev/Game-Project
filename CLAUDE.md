@@ -99,10 +99,12 @@ bash scripts/check-flutter-version.sh   # 기준 / Dockerfile / 로컬 SDK 3자 
 
 **API Base URL (클라이언트에서 Docker 서버 접속):** Web/iOS 시뮬레이터 `http://localhost:8000`, Android 에뮬레이터 `http://10.0.2.2:8000`, 실기기 `http://<PC IP>:8000`
 
-**호스트 :8000 은 리버스 프록시(Caddy, `infra/caddy/Caddyfile`)다**(M4-1). server 컨테이너는 호스트 포트를 열지 않는다 — 로컬·CI·배포가 같은 경로(Caddy → uvicorn)를 탄다. 네트워크는 고정 서브넷(`GAMEMOA_SUBNET`, 기본 `172.30.0.0/24`)이고 proxy 는 고정 주소(`GAMEMOA_PROXY_IP`, `.10`)다 — 호스트의 다른 네트워크와 겹치면 두 값을 `.env` 에서 바꾼다. 네트워크 설정이 바뀌면 `docker compose down` 후 다시 올린다.
+**호스트 :8000 은 리버스 프록시(Caddy, `infra/caddy/Caddyfile`)다**(M4-1). server 컨테이너는 호스트 포트를 열지 않는다 — 로컬·CI·배포가 같은 경로(Caddy → uvicorn)를 탄다. 네트워크는 고정 서브넷(`GAMEMOA_SUBNET`, 기본 `10.231.0.0/24` — Docker 기본 주소 풀 밖)이고 proxy 는 고정 주소(`GAMEMOA_PROXY_IP`, `.10`)다 — 호스트의 다른 네트워크(VPN 등)와 겹치면 `GAMEMOA_SUBNET`·`GAMEMOA_DYNAMIC_RANGE`·`GAMEMOA_PROXY_IP` 를 `.env` 에서 함께 바꾼다. 네트워크 설정이 바뀌면 `docker compose down` 후 다시 올린다.
+
+**운영 이미지는 기본 `ENVIRONMENT=production`** 이다(prod 스테이지 `ENV`) — 오리진 fail-closed·JWT 키 32자·pubsub `test` 금지가 켜진다. 운영 오버레이는 `CADDY_TRUSTED_PROXIES`(엣지 대역)를 필수로 받는다.
 ```bash
-docker compose up -d --wait proxy                                                   # 프록시 경유 E2E (CI 와 같은 명령)
-docker compose run --rm -e E2E_BASE_URL=http://proxy:8080 server-test pytest e2e -q
+bash scripts/e2e-proxy.sh            # 프록시 경유 E2E — 운영 이미지·운영 설정(CI proxy-e2e 와 같은 스크립트)
+docker compose up -d --build         # 그 뒤 개발로 복귀 — 반드시 --build(같은 이미지 이름이라 prod 이미지를 재사용한다)
 bash scripts/check-proxy-config.sh                                                  # 신뢰 경계·토큰 로그 가드
 ```
 

@@ -673,7 +673,8 @@ async def s6(pool: Pool, signal_kind: str = "term") -> Result:
         res.metrics["game_clock_error_ms"] = round(r2 - expected)
         res.metrics["game_clock_frozen_ms"] = frozen
         res.check(abs(r2 - expected) <= 1500, f"game clock across deploy {r2} vs expected {expected:.0f}")
-        logs = await docker.logs("server") + await docker.logs("proxy")   # 프록시 경유(M4-1) — 두 로그 모두
+        logs = (await docker.logs("server", since=RUN_STARTED[0])
+                + await docker.logs("proxy", since=RUN_STARTED[0]))   # 프록시 경유(M4-1) — 두 로그 모두, 이 회차만
         res.check(not re.search(r"token=ey", logs), "raw token in server/proxy logs")
         res.metrics["raw_token_hits"] = len([1 for c in cs if token(c.user_id)[:20] in logs])
         return res
@@ -828,6 +829,7 @@ async def s9(pool: Pool) -> Result:
 # ----- M4-1 프록시 경유 (P1~P4·오리진) — 클라이언트는 전부 Caddy 를 거친다 -----
 
 REST_LIMIT = int(os.environ.get("HARNESS_REST_LIMIT", "1000"))
+RUN_STARTED = [None]   # 회차 시작(epoch 초) — 로그 검사는 이 회차의 로그만 본다
 IP_LIMIT = int(os.environ.get("HARNESS_IP_LIMIT", "600"))
 
 
@@ -947,7 +949,7 @@ async def p4(pool: Pool) -> Result:
     res.metrics["while_down"] = statuses
     res.check(any(s == 502 for s in statuses), f"no 502 while the server was down: {statuses}")
     for service in ("proxy", "server"):
-        logs = await docker.logs(service)
+        logs = await docker.logs(service, since=RUN_STARTED[0])     # 이 회차만
         hits = len(re.findall(r"token=ey", logs)) + len(re.findall(r"eyJhbGciOi", logs))
         res.metrics[f"{service}_raw_token_hits"] = hits
         res.check(hits == 0, f"raw token in {service} logs")
@@ -998,6 +1000,7 @@ async def main():
     out = Path("results")
     out.mkdir(exist_ok=True)
     for run in range(1, args.runs + 1):
+        RUN_STARTED[0] = time.time() - 1
         results = []
         for name in names:
             pool = Pool(await seed_users(200, f"r{run}{name}"))   # 분배가 치우쳐(E1) 양쪽을 채우려면 넉넉해야 한다

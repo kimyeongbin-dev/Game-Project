@@ -59,9 +59,14 @@ class Docker:
         if r.status_code not in (204, 304):
             raise RuntimeError(f"{verb} {service}: {r.status_code} {r.text}")
 
-    async def logs(self, service: str) -> str:
+    async def logs(self, service: str, since: Optional[float] = None) -> str:
+        """since(epoch 초) 이후만 — 컨테이너 로그는 재시작 뒤에도 남아, 앞선 판별력 실행(필터를 일부러 뺀 변이)의 흔적을
+        다시 읽었다(M4-1 실측)"""
         cid = await self.container(service)
-        r = await self.http.get(f"/containers/{cid}/logs", params={"stdout": "true", "stderr": "true"})
+        params = {"stdout": "true", "stderr": "true"}
+        if since is not None:
+            params["since"] = str(int(since))
+        r = await self.http.get(f"/containers/{cid}/logs", params=params)
         return r.content.decode("utf-8", "replace")
 
 
