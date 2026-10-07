@@ -173,26 +173,34 @@ async def test_connect_flood_is_cut_before_identity_lookup(server, redis, monkey
 
 # ----- M4-1 IP 별 접속 리밋 — 토큰 검증 전 -----
 
-async def test_ip_flood_is_cut_before_the_token_is_even_checked(server, redis, monkeypatch):
-    """무효 토큰 연타 — 한도 안에서는 4001, 넘으면 토큰을 보지 않고 1013. 유효 토큰도 같은 IP 면 막힌다"""
-    import app.ws.maze_handler as handler_module
+async def test_ip_failures_are_cut_without_blocking_valid_users_on_the_same_ip(server, redis, monkeypatch, caplog):
+    """무효 토큰 연타 — 한도 안에서는 4001(로그), 넘으면 1013(로그 없음). 같은 IP 의 **유효 토큰**은 그대로 들어온다
+    (NAT 공유자 보호 — M4-1 독립 검토: 예전에는 유효 토큰도 1013 이었다)"""
+    import logging
+    caplog.set_level(logging.INFO, logger="app.ws.maze_handler")
     monkeypatch.setattr(settings, "ws_connect_per_minute_ip", 3)
-    checked = []
-    real_verify = handler_module.verify_access_token
-
-    def counting_verify(token):
-        checked.append(token)
-        return real_verify(token)
-
-    monkeypatch.setattr(handler_module, "verify_access_token", counting_verify)
     codes = []
     for _ in range(5):
         c = await Client(server, 1).open("garbage", expect_connected=False)
         codes.append(await c.closed_code())
     assert codes == [4001, 4001, 4001, 1013, 1013]
-    assert len(checked) == 3                                   # 넘은 접속은 서명 검증을 하지 않았다
-    c = await Client(server, 7).open(mint_token(7), expect_connected=False)
-    assert await c.closed_code() == 1013
+    assert caplog.text.count("WS rejected: invalid token") == 3     # 넘은 실패는 로그를 남기지 않는다
+    c = await Client(server, 7).open()                               # 같은 IP 의 정상 사용자
+    assert c.received and c.received[0]["type"] == "connected"
+    await c.close()
+
+
+async def test_disallowed_origins_count_as_failures(server, redis, monkeypatch):
+    from websockets.asyncio.client import connect
+    from websockets.exceptions import InvalidStatus
+
+    monkeypatch.setattr(settings, "ws_connect_per_minute_ip", 2)
+    monkeypatch.setattr(settings, "cors_allowed_origins", ["https://app.example"])
+    for _ in range(2):
+        with pytest.raises(InvalidStatus):
+            await connect(server.url(mint_token(1)), origin="https://evil.example")
+    c = await Client(server, 1).open("garbage", expect_connected=False)
+    assert await c.closed_code() == 1013                             # Origin 실패 2회로 이미 한도
 
 
 async def test_ip_limit_is_independent_of_the_user_limit(redis, monkeypatch):
@@ -203,9 +211,18 @@ async def test_ip_limit_is_independent_of_the_user_limit(redis, monkeypatch):
     monkeypatch.setattr(settings, "ws_connect_per_minute", 1)
     monkeypatch.setattr(settings, "ws_connect_per_minute_ip", 3)
     limiter = ConnectLimiter(lambda: redis)
-    assert [await limiter.allow_ip("203.0.113.9") for _ in range(4)] == [True, True, True, False]
+    assert [await limiter.fail_ip("203.0.113.9") for _ in range(4)] == [True, True, True, False]
     assert await limiter.allow(4_243) and not await limiter.allow(4_243)   # 유저 한도 1 — IP 카운터와 무관
     assert 0 < await redis.ttl(keys.ws_connect_ip_rate("203.0.113.9")) <= 60
+
+
+def test_ipv6_clients_are_counted_per_64():
+    """/128 마다 세면 한 가입자가 /64 안에서 무한히 우회하고 키가 쌓인다"""
+    from app.ws.rate_limit import client_network
+    assert client_network("2001:db8:1:2::1") == client_network("2001:db8:1:2:ffff::9") == "2001:db8:1:2::/64"
+    assert client_network("2001:db8:1:3::1") != client_network("2001:db8:1:2::1")
+    assert client_network("203.0.113.9") == "203.0.113.9"
+    assert client_network("::ffff:203.0.113.9") == "203.0.113.9"
 
 
 async def test_ip_limiter_fails_open_when_the_store_is_down():
@@ -216,5 +233,5 @@ async def test_ip_limiter_fails_open_when_the_store_is_down():
         def pipeline(self, **kw):
             raise ConnectionError("down")
 
-    assert await ConnectLimiter(lambda: Down()).allow_ip("203.0.113.9")
-    assert await ConnectLimiter(lambda: None).allow_ip("203.0.113.9")
+    assert await ConnectLimiter(lambda: Down()).fail_ip("203.0.113.9")
+    assert await ConnectLimiter(lambda: None).fail_ip("203.0.113.9")

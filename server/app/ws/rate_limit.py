@@ -8,12 +8,13 @@ WS 레이트 리밋 (M3 7단계 판단 7, 6단계 검토 H8 나머지)
 | 메시지 | 소켓별 토큰 버킷(프로세스 안 — 메시지마다 Redis 왕복 없음) | `rate_limit_exceeded`, 처리·락 없음 |
 | 지속 위반 | 소켓별 누적 | close 1008 |
 | 접속 | 유저별 분당 카운터(리미터 DB, 워커 공통) | 인증 직후 close 1013 — `mark_connected` 전 |
-| 접속(IP) | 클라이언트 IP 별 분당 카운터(리미터 DB, 워커 공통) | **토큰 검증 전** close 1013 — 무효 토큰 연타가 서명 검증·로그를 태우지 못하게(M4-1) |
+| 접속 실패(IP) | 클라이언트 IP 별 분당 **실패** 카운터(무효 토큰·허용 안 된 Origin, 리미터 DB) | 넘으면 1013 — 앱 로그도 남기지 않는다(M4-1) |
 
 같은 계정 연결은 클러스터에 하나(4000 교체)라 소켓별 버킷이 사실상 유저 단위다. 다른 워커로 다시 붙어 버킷을 초기화하는
 경로는 접속 카운터가 막는다. 리미터 Redis 장애는 허용(fail-open) — 멀티플레이 자체는 앱 Redis 가 막는다.
 """
 
+import ipaddress
 import logging
 import time
 from typing import Callable, Optional
@@ -81,11 +82,17 @@ class ConnectLimiter:
     async def allow(self, user_id: int) -> bool:
         return await self._hit(keys.ws_connect_rate(user_id), settings.ws_connect_per_minute)
 
-    async def allow_ip(self, ip: Optional[str]) -> bool:
-        """클라이언트 IP 별 — 토큰 검증 전. 통신사 NAT 로 여럿이 한 IP 를 쓰므로 한도는 유저 단위보다 넉넉하다(config)"""
+    async def fail_ip(self, ip: Optional[str]) -> bool:
+        """접속 **실패**(무효 토큰·허용 안 된 Origin)를 IP 별로 센다. 한도 안이면 True
+
+        유효 토큰은 세지도 막지도 않는다 — 통신사 NAT·사내망처럼 여럿이 한 IP 를 쓸 때 누군가의 무효 토큰 연타가 같은 IP 의
+        정상 사용자를 막으면 안 된다(M4-1 독립 검토). 유효 토큰의 연타는 계정 리밋이 막는다. 넘은 실패는 1013 으로 끊고
+        앱 로그를 남기지 않는다 — 실패마다 찍히는 거절 로그가 연타의 실제 비용이다(서명 검증은 µs). IPv6 는 /64 로 묶는다
+        (한 가입자가 /64 를 받는다 — /128 마다 세면 무한히 우회하고 키가 쌓인다).
+        """
         if not ip:
             return True
-        return await self._hit(keys.ws_connect_ip_rate(ip), settings.ws_connect_per_minute_ip)
+        return await self._hit(keys.ws_connect_ip_rate(client_network(ip)), settings.ws_connect_per_minute_ip)
 
     async def _hit(self, key: str, limit: int) -> bool:
         client = self._client()
@@ -100,6 +107,19 @@ class ConnectLimiter:
             logger.warning("WS connect limiter unavailable (allowing): %s", exc)
             return True
         return count <= limit
+
+
+def client_network(ip: str) -> str:
+    """리밋 키의 단위 — IPv4 는 주소 그대로, IPv6 는 /64 네트워크"""
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    if address.version == 6:
+        if address.ipv4_mapped is not None:
+            return str(address.ipv4_mapped)
+        return str(ipaddress.ip_network(f"{address}/64", strict=False))
+    return str(address)
 
 
 connect_limiter = ConnectLimiter()

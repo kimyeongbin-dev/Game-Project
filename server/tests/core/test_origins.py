@@ -50,3 +50,12 @@ def test_cors_middleware_uses_the_list_without_credentials():
     assert r.status_code == 200
     assert r.headers.get("access-control-allow-origin") == "*"
     assert "access-control-allow-credentials" not in r.headers
+
+
+def test_cors_and_ws_use_the_same_normalized_list():
+    """설정의 끝 '/'·대소문자·기본 포트를 정규화해 두 곳에 같은 목록 — CORS 미들웨어는 정확 일치다(M4-1 독립 검토)"""
+    from app.core.origins import normalize_origin
+    config = Settings(**PROD, cors_allowed_origins=["HTTPS://App.Example:443/", "http://dev.example:8080"])
+    assert allowed_origins(config) == ["https://app.example", "http://dev.example:8080"]
+    assert origin_allowed("https://app.example", config)
+    assert normalize_origin("https://app.example:8443") == "https://app.example:8443"

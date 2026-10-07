@@ -145,7 +145,8 @@ class Settings(BaseSettings):
     ws_msg_per_sec: float = Field(default=5.0, gt=0)
     ws_violation_close: int = Field(default=50, ge=1)
     ws_connect_per_minute: int = Field(default=20, ge=1)
-    # 클라이언트 IP 별 분당 접속(토큰 검증 전, M4-1) — 통신사 NAT 로 여럿이 한 IP 를 쓴다. 유저 한도의 6배
+    # 클라이언트 IP(IPv6 는 /64) 별 분당 접속 **실패**(무효 토큰·허용 안 된 Origin, M4-1) — 넘으면 1013·로그 없음.
+    # 유효 토큰은 세지 않는다(NAT 공유자 보호 — 계정 리밋이 따로 막는다)
     ws_connect_per_minute_ip: int = Field(default=120, ge=1)
     # 소켓 하나에 메시지를 쓰는 시간 상한 — 넘기면 그 연결을 닫는다(버스가 한 루프로 보낸다, 독립 검토 #1 R8)
     ws_send_timeout_sec: float = Field(default=2.0, gt=0)

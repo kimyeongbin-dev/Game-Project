@@ -136,18 +136,20 @@ class MazeSocketHandler:
             await self._closed(session, close_code)
 
     async def _open(self, websocket: WebSocket) -> Optional[Session]:
+        ip = websocket.client.host if websocket.client else None
         # 브라우저 오리진 — 토큰을 보기 전에. accept 전 close 는 HTTP 403 이다(브라우저는 어차피 close 코드를 못 읽는다).
         # Starlette CORS 미들웨어는 WS 에 적용되지 않는다 (M4-1, app/core/origins.py)
         if not origin_allowed(websocket.headers.get("origin")):
-            logger.info("WS rejected: origin not allowed")
+            if await self.limiter.fail_ip(ip):              # 넘은 실패는 로그도 남기지 않는다(M4-1 독립 검토)
+                logger.info("WS rejected: origin not allowed")
             await websocket.close(code=CLOSE_POLICY_VIOLATION)
             return None
-        # IP 별 접속 연타 — 토큰을 보기 전에(무효 토큰 연타가 서명 검증·로그를 태우지 못하게, 검토 #1 R11 나머지 · M4-1)
-        if not await self.limiter.allow_ip(websocket.client.host if websocket.client else None):
-            return await _reject(websocket, CLOSE_TRY_AGAIN_LATER)
         try:
             claims = verify_access_token(websocket.query_params.get("token"))
         except InvalidToken as exc:
+            # IP 별 접속 **실패** — 유효 토큰은 세지 않는다(NAT 공유자 보호, 검토 #1 R11 나머지 · M4-1 독립 검토)
+            if not await self.limiter.fail_ip(ip):
+                return await _reject(websocket, CLOSE_TRY_AGAIN_LATER)
             logger.info("WS rejected: invalid token (%s)", exc)
             return await _reject(websocket, CLOSE_INVALID_TOKEN)
         if claims.is_anonymous:

@@ -9,21 +9,41 @@
 """
 
 from typing import Optional
+from urllib.parse import urlsplit
 
 from app.core.config import Settings, settings
 
 WILDCARD = "*"
 
 
+DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def normalize_origin(origin: str) -> str:
+    """브라우저가 보내는 형태로 — 소문자 scheme·host, 기본 포트·끝 '/' 없음. 설정 목록도 이 형태로 바꿔 CORS 미들웨어(정확
+    일치)와 WS 대조가 같은 판정을 하게 한다(M4-1 독립 검토)"""
+    if origin == WILDCARD:
+        return origin
+    parts = urlsplit(origin.strip().rstrip("/"))
+    if not parts.scheme or not parts.hostname:
+        return origin.strip().rstrip("/")
+    host = parts.hostname.lower()
+    if ":" in host:
+        host = f"[{host}]"
+    port = parts.port
+    netloc = host if port is None or DEFAULT_PORTS.get(parts.scheme.lower()) == port else f"{host}:{port}"
+    return f"{parts.scheme.lower()}://{netloc}"
+
+
 def allowed_origins(config: Settings = settings) -> list[str]:
     if config.cors_allowed_origins is not None:
-        return list(config.cors_allowed_origins)
+        return list(dict.fromkeys(normalize_origin(o) for o in config.cors_allowed_origins))
     return [] if config.is_production else [WILDCARD]
 
 
 def origin_allowed(origin: Optional[str], config: Settings = settings) -> bool:
-    """WS 핸드셰이크의 Origin — 없으면(네이티브 앱) 허용, 있으면 목록과 정확히 일치해야 한다"""
+    """WS 핸드셰이크의 Origin — 없으면(네이티브 앱) 허용, 있으면 정규화한 목록과 일치해야 한다"""
     if origin is None:
         return True
     allowed = allowed_origins(config)
-    return WILDCARD in allowed or origin.rstrip("/") in {o.rstrip("/") for o in allowed}
+    return WILDCARD in allowed or normalize_origin(origin) in allowed
