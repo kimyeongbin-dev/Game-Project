@@ -99,6 +99,13 @@ bash scripts/check-flutter-version.sh   # 기준 / Dockerfile / 로컬 SDK 3자 
 
 **API Base URL (클라이언트에서 Docker 서버 접속):** Web/iOS 시뮬레이터 `http://localhost:8000`, Android 에뮬레이터 `http://10.0.2.2:8000`, 실기기 `http://<PC IP>:8000`
 
+**호스트 :8000 은 리버스 프록시(Caddy, `infra/caddy/Caddyfile`)다**(M4-1). server 컨테이너는 호스트 포트를 열지 않는다 — 로컬·CI·배포가 같은 경로(Caddy → uvicorn)를 탄다. 네트워크는 고정 서브넷(`GAMEMOA_SUBNET`, 기본 `172.30.0.0/24`)이고 proxy 는 고정 주소(`GAMEMOA_PROXY_IP`, `.10`)다 — 호스트의 다른 네트워크와 겹치면 두 값을 `.env` 에서 바꾼다. 네트워크 설정이 바뀌면 `docker compose down` 후 다시 올린다.
+```bash
+docker compose up -d --wait proxy                                                   # 프록시 경유 E2E (CI 와 같은 명령)
+docker compose run --rm -e E2E_BASE_URL=http://proxy:8080 server-test pytest e2e -q
+bash scripts/check-proxy-config.sh                                                  # 신뢰 경계·토큰 로그 가드
+```
+
 ## 아키텍처
 
 ### 모노레포 2분할
@@ -152,7 +159,8 @@ games/ ┘
 | `server/app/db/` | **2인 전제 제거 완료**(M3 2단계) — `game_sessions` 는 시작·종료 기록만, 좌석은 `game_participants` 행. `match_queue`·`game_rooms`·`daily_champions`·스케줄러 폐기. 마이그레이션 도구 없음(`create_all`) — Alembic 은 첫 운영 배포 전 |
 | `server/app/core/` | `config.py`(환경변수 단일 진입점), `time.py`(표준 utcnow·Redis TIME 시계), `security.py`(access token **검증만** — 발급은 인증 작업), `redaction.py`(로그의 `token=` 마스킹), `worker.py`(워커 id) |
 | Redis | 연결 계층(`app/db/redis.py`) + lifespan 배선 완료. graceful degradation |
-| 레이트 리미터 | **배선 완료** — Redis 저장소, 커스텀 429, `main.py` 등록. 테스트 10건 |
+| 레이트 리미터 | **배선 완료** — Redis 저장소, 커스텀 429, `main.py` 등록. 테스트 10건. 프록시 경유 IP 정확도는 M4-1 하네스 P1 |
+| 리버스 프록시 | **M4-1 완료** — Caddy(`infra/caddy/Caddyfile`, TLS 는 엣지), 신뢰 경계(Caddy → uvicorn), CORS·WS Origin(운영 fail-closed), WS IP 접속 리밋, 프록시 경유 E2E(`server/e2e`, CI `proxy-e2e`) |
 | `server/app/ws/` | **완료**(M3 7단계) — `maze_handler`(`/api/v1/ws/maze`, §12 10종·인증 4001~4003·accept 후 close), `delivery`·`wire`(내부 이벤트 → §12 와이어, 게임별 `version`), `runtime`(lifespan: 버스·스위퍼·큐 티커·SIGTERM 기준 서버 유예·끊김 재시도), `rate_limit`(소켓 버킷·접속 카운터), `connection_manager`(연결 맵, 같은 계정은 클러스터에 하나). 좌석 소유는 연결 id 단위. 독립 검토 #1~#3 반영 |
 | 시간 체계 | **완료**(M3 6단계) — `services/maze_clock.py`(두 시계 분리, 지연 정산), `services/sweeper.py`(리스 클레임, 장애 구간, 유실 점검), `ws/server_grace.py`(서버 유예 소급). Redis 장애는 전역 하트비트(`store:alive` — 워커마다 전용 200 ms 루프·전용 연결, 7단계 실측), 크래시 워커의 좌석은 워커 하트비트(`store:workers`)로 처리. 독립 검토 반영(`docs/research/2026-10-04-M3-6단계-독립검토.md`). 스위퍼·유예의 lifespan 배선은 7단계 완료 |
 | `client/lib/**` | 디렉토리 골격 + 허브 placeholder만 존재 |
@@ -187,7 +195,7 @@ curl -s http://localhost:8000/health | python -m json.tool
 
 - **핸들러는 반드시 동기 함수(`def`)여야 한다.** `SlowAPIMiddleware` 는 동기 컨텍스트에서 핸들러를 호출하고, 코루틴 함수를 발견하면 **조용히 slowapi 기본 응답으로 대체**한다. `async def` 로 바꾸면 커스텀 429 가 전혀 쓰이지 않는다 — `tests/api/test_rate_limit.py` 가 이 회귀를 잡는다.
 - 저장소가 메모리로 강등되면 워커마다 따로 카운트해 실효 제한이 워커 수만큼 곱해진다. Redis 저장소 여부도 테스트가 검증한다.
-- `get_remote_address` 는 프록시 뒤에서 프록시 IP 를 본다. prod CMD 의 `--proxy-headers --forwarded-allow-ips *` 가 `X-Forwarded-For` 를 반영해 교정한다.
+- **리밋 키는 실제 클라이언트 IP 다(M4-1).** Caddy 가 신뢰한 엣지(`CADDY_TRUSTED_PROXIES`)의 `X-Forwarded-For` 로 클라이언트를 판정해 그 주소 하나로 다시 쓰고(`header_up X-Forwarded-For {client_ip}`), uvicorn 은 **환경변수 `FORWARDED_ALLOW_IPS` = proxy 주소**에서 온 값만 믿는다. 이 변수는 앱이 아니라 uvicorn 이 직접 읽는다 — "환경변수는 `config.py` 에서만" 원칙의 유일한 예외다. **`--forwarded-allow-ips *` 를 쓰지 않는다** — 서버에 닿는 누구든 IP 를 위조한다(`scripts/check-proxy-config.sh`·CI 가 막는다).
 
 ## 폐기된 레거시 경로 — 되살리지 않는다
 
