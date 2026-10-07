@@ -1,4 +1,4 @@
-"""프록시 경유 E2E — 헬스, WS 업그레이드·close 코드 보존, X-Forwarded-For 위조 무시, CORS 프리플라이트 (M4-1)"""
+"""프록시 경유 E2E(운영 설정) — 헬스, WS 업그레이드·close 코드 보존, X-Forwarded-For 위조 무시, 브라우저 오리진 거부 (M4-1)"""
 
 import asyncio
 
@@ -38,9 +38,21 @@ def test_spoofed_forwarded_for_does_not_open_new_rate_limit_windows(base):
     assert 429 in statuses, f"no 429 after {len(statuses)} spoofed requests"
 
 
-def test_cors_preflight_through_the_proxy(base):
+def test_production_refuses_browser_origins_through_the_proxy(base):
+    """운영 기본(오리진 없음) — 프리플라이트에 허용 헤더가 없다"""
     r = httpx.options(f"{base}/health", headers={"Origin": "https://x.example",
                                                  "Access-Control-Request-Method": "GET"}, timeout=5)
-    assert r.status_code == 200
-    assert r.headers.get("access-control-allow-origin") == "*"     # 개발 기본 — 운영 빈 목록은 하네스가 본다
+    assert r.headers.get("access-control-allow-origin") is None
     assert "access-control-allow-credentials" not in r.headers
+
+
+async def test_ws_with_a_browser_origin_is_refused_through_the_proxy(ws_base):
+    """Starlette CORS 는 WS 에 적용되지 않는다 — 핸들러가 거른다. accept 전 거절이라 HTTP 403"""
+    from websockets.exceptions import InvalidStatus
+    try:
+        sock = await connect(f"{ws_base}/api/v1/ws/maze?token=garbage", origin="https://x.example")
+    except InvalidStatus as refused:
+        assert refused.response.status_code == 403
+    else:
+        await sock.close()
+        raise AssertionError("WS with a browser origin was accepted")

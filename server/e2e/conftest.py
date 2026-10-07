@@ -1,12 +1,11 @@
 """
-프록시 경유 E2E (M4-1) — 실제 Caddy → uvicorn 경로. 로컬과 CI 가 같은 명령이다:
+프록시 경유 E2E (M4-1) — 실제 Caddy → uvicorn 경로, **운영 이미지·운영 설정**(prod 타깃, 워커 2개, ENVIRONMENT=production,
+오리진 없음). 로컬과 CI 가 같은 명령이다(scripts/e2e-proxy.sh):
 
-    docker compose up -d --wait proxy
-    docker compose run --rm -e E2E_BASE_URL=http://proxy:8080 server-test pytest e2e -q
+    bash scripts/e2e-proxy.sh
 
 `E2E_BASE_URL` 이 없으면 전부 건너뛴다(기본 `pytest` 는 testpaths=tests 라 여기를 모으지도 않는다).
-대상은 개발 compose 의 server(ENVIRONMENT=local — 오리진 "*", REST 리밋 켜짐)다. 운영 설정(오리진 빈 목록)·다중 워커
-경유는 하네스(server/harness/multiworker)가 맡는다.
+정상 세션 중 닫힘 코드(1012·4000)·다중 워커 경합·장애는 하네스(server/harness/multiworker)가 맡는다.
 """
 
 import os
