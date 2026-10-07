@@ -536,8 +536,8 @@ async def s5(pool: Pool, long: bool = False) -> Result:
     # 장애 정의는 하트비트 전용 연결 기준이다(maze.md §8). 그보다 늦게 처리되는 만큼은 면제 없이 흐른다(독립 검토 #3 높음 2).
     # 둘을 나눠 잰다(2026-10-07 사용자 결정 — 기록하고 M4-2 에서 수정):
     # - 복구 뒤 시작한 새 접속(250 ms 간격) 중 첫 성공 / 장애 중 들어와 붙잡힌 행동이 처리된 시각
-    # 둘 다 같은 원인(Redis 가 꺼진 동안 이름 조회 3.3 s + 기본 스레드 풀 포화 → 워커의 Redis 클라이언트마다 재접속이 늦다)으로
-    # 복구 뒤 최대 ≈1.3 s 늦을 수 있다(M4-1 실측). 알려진 한계다 — 여기서는 퇴행만 잡는다(상한 2 s). 수정은 M4-2(앱 풀 주소 고정)
+    # 원인이었던 것: Redis 가 꺼진 동안 이름 조회 3.3 s + 기본 스레드 풀 포화 → 장애 시작부터 ≈4~4.7 s 가 지나야 앱 풀·리미터가
+    # 되살아났다(짧은 재시작이면 복구 뒤 2~3 s). 연결 주소 고정(app/db/redis.py PinnedConnection, M4-1)으로 고쳤다 — 상한 1 s
     if recovered_at:
         rec = recovered_at[0]
         rel = [(int((a - rec) * 1000), int((b - rec) * 1000), r) for a, b, r in attempts]
@@ -548,10 +548,10 @@ async def s5(pool: Pool, long: bool = False) -> Result:
         ok_after = [b for a, b, r in fresh_rel if a >= 0 and r == "connected"]
         res.metrics["fresh_request_after_recovery_ms"] = ok_after[0] if ok_after else None
         res.metrics["fresh_probes"] = len(fresh_rel)
-        res.check(bool(ok_after) and ok_after[0] <= 2_000,
+        res.check(bool(ok_after) and ok_after[0] <= 1_000,
                   f"a fresh request after recovery took {ok_after[0] if ok_after else None} ms")
         held = res.metrics["held_action_done_after_recovery_ms"]
-        res.check(held is not None and held <= 2_000, f"a held action finished {held} ms after recovery")
+        res.check(held is not None and held <= 1_000, f"a held action finished {held} ms after recovery")
     # 기록됐다면 그 길이가 직접 잰 공백에 붙어야 한다 — 기록은 마지막 성공 → 첫 성공, 공백은 첫 실패 → 첫 성공이라
     # 하트비트 간격(200 ms) + 탐침 간격(100 ms)만큼 길 수 있다(검토 #3 중간: 재시작 구간도 면제량을 본다)
     for gap in gaps:
@@ -857,7 +857,15 @@ async def p1(pool: Pool) -> Result:
               f"client {a}: {got['ok']} allowed, {got['limited']} limited (limit {REST_LIMIT})")
     other = await edge("rest", b, "1")
     res.check(other["ok"] == 1, f"another client {b} was limited by {a}'s window")
-    # 서버 직결, 요청마다 새 연결 — 두 워커에 나뉘어도 한 창(Redis 저장소). edge 는 서버가 믿지 않아 edge 주소 단위다
+    # 실제 엣지 형식 "위조, 실제" — 왼쪽 위조 값이 매번 달라도 한 창(Caddy trusted_proxies_strict, M4-1 독립 검토 치명)
+    hop_ip = fake_client_ip()
+    hop = await edge("rest", hop_ip, str(REST_LIMIT + 1), "hop")
+    res.metrics["via_edge_multi_hop"] = hop
+    res.check(hop["sec"] < 50, f"multi-hop probe took {hop['sec']} s — inconclusive")
+    res.check(hop["ok"] == REST_LIMIT and hop["limited"] == 1,
+              f"multi-hop XFF: {hop['ok']} allowed, {hop['limited']} limited — the spoofed left value became the key")
+    # 서버 직결, 요청마다 새 연결·매번 다른 위조 XFF — 두 워커에 나뉘어도 한 창(Redis 저장소), 서버는 edge 를 믿지 않아
+    # edge 주소 단위다(서버 단 FORWARDED_ALLOW_IPS 판별 — 서버가 모두를 믿으면 요청마다 새 창이 된다)
     direct = await edge("direct", str(REST_LIMIT + 1))
     res.metrics["direct_new_connections"] = direct
     res.check(direct["sec"] < 50, f"direct probe took {direct['sec']} s — longer than one window, inconclusive")
@@ -905,7 +913,8 @@ async def p3(pool: Pool) -> Result:
     await docker.action("proxy", "restart", t=10)
     codes = [await c.wait_closed(15) for c in cs]
     res.metrics["close_codes"] = codes
-    res.check(all(code not in (1000, 1012) for code in codes), f"close codes {codes}")
+    # 1001(going away) — 계획서는 1006 으로 적었으나 실측 뒤 정정했다(실측 보고서·독립 검토 지적 — 결과를 본 뒤의 정정)
+    res.check(all(code == 1001 for code in codes), f"close codes {codes}")
     await wait_server()
     again = [await Client(c.user_id).open() for c in cs]
     pool.clients.extend(again)
@@ -921,8 +930,22 @@ async def p3(pool: Pool) -> Result:
 
 
 async def p4(pool: Pool) -> Result:
-    """로그 — 프록시·서버 로그 전체에 원문 토큰이 없다(Caddy 접속 로그 없음 + 서버 마스킹)"""
+    """로그 — 프록시·서버 로그 전체에 원문 토큰이 없다(Caddy 접속 로그 없음 + 기본 로거 쿼리 필터 + 서버 마스킹).
+    위험 경로를 일부러 만든다: 서버가 내려간 동안 토큰을 실은 접속 → Caddy 502 오류 로그가 URI 를 남긴다(독립 검토 높음)"""
+    import httpx
     res = Result("p4_logs")
+    await docker.action("server", "stop", t=10)
+    statuses = []
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            for user_id in pool.free[-3:]:
+                r = await client.get(f"{os.environ['SERVER_WS'].replace('ws://', 'http://')}?token={token(user_id)}")
+                statuses.append(r.status_code)
+    finally:
+        await docker.action("server", "start")
+        await wait_server()
+    res.metrics["while_down"] = statuses
+    res.check(any(s == 502 for s in statuses), f"no 502 while the server was down: {statuses}")
     for service in ("proxy", "server"):
         logs = await docker.logs(service)
         hits = len(re.findall(r"token=ey", logs)) + len(re.findall(r"eyJhbGciOi", logs))

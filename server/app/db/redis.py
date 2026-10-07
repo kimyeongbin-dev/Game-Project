@@ -20,6 +20,7 @@ from typing import Callable, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from redis.asyncio import ConnectionPool, Redis
+from redis.asyncio.connection import Connection
 from redis.asyncio.retry import Retry
 from redis.backoff import NoBackoff
 from redis.exceptions import ConnectionError
@@ -70,6 +71,120 @@ def _retry() -> Retry:
     return Retry(NoBackoff(), 1, supported_errors=(ConnectionError,))
 
 
+# ----- 주소 장부 · 고정 주소 연결 (M4-1 — 검토 #3 높음 2, 2026-10-07 사용자 결정으로 지금 수정) -----
+
+Resolver = Callable[..., list]
+
+
+class AddressBook:
+    """Redis 호스트 이름 → 해석한 주소들. 조회는 따로 도는 daemon 스레드 하나, 결과는 스레드 잠금으로 보관한다
+
+    Redis 가 꺼진 동안 이름 조회 하나가 수 초 걸리고(Docker 내장 DNS NXDOMAIN 실측 3.3 s), 연결 타임아웃이 끝나도 조회
+    스레드는 계속 돈다. 워커의 재접속들이 asyncio 기본 스레드 풀을 그렇게 채워, Redis 가 돌아온 뒤에도 장애 **시작**부터
+    ≈4~4.7 s 가 지나야 앱 풀·리미터 연결이 되살아났다 — 짧은 재시작(≈2 s)이면 복구 뒤 2~3 s 동안 행동이 면제 없이
+    차감됐다(M4-1 실측). 접속은 아는 주소로 하고, 실패하면 다음 주소로 넘기며 다시 조회한다(주소가 바뀌었을 수 있다).
+    조회가 실패해도(꺼진 동안의 NXDOMAIN) 아는 주소를 유지한다. 이벤트 루프에 묶이지 않는다(테스트는 루프를 여러 번 만든다).
+    """
+
+    def __init__(self, name: str, port: int, resolve: Resolver = socket.getaddrinfo):
+        self.name, self.port = name, port
+        self._resolve = resolve
+        self._lock = threading.Lock()
+        self._addresses: list[str] = []
+        self._index = 0
+        self._looking = False
+        self._looked = threading.Event()
+
+    def current(self) -> Optional[str]:
+        with self._lock:
+            return self._addresses[self._index] if self._addresses else None
+
+    def refresh(self) -> None:
+        """다시 조회한다(진행 중이면 그대로) — 기다리지 않는다"""
+        with self._lock:
+            if self._looking:
+                return
+            self._looking = True
+        threading.Thread(target=self._lookup, name="redis-address-lookup", daemon=True).start()
+
+    def failed(self) -> None:
+        """그 주소로 접속하지 못했다 — 다음 주소로 넘기고(IPv6 우선·다중 주소) 다시 조회한다"""
+        with self._lock:
+            if len(self._addresses) > 1:
+                self._index = (self._index + 1) % len(self._addresses)
+        self.refresh()
+
+    def wait(self, timeout: float) -> bool:
+        """첫 조회가 끝날 때까지(기동 시) — 끝났으면 True"""
+        if self.current() is None:
+            self.refresh()
+        return self._looked.wait(timeout)
+
+    def _lookup(self) -> None:
+        try:
+            infos = self._resolve(self.name, self.port, type=socket.SOCK_STREAM)
+            addresses = list(dict.fromkeys(info[4][0] for info in infos))
+        except Exception as exc:  # 꺼진 동안의 NXDOMAIN 등 — 아는 주소를 유지한다
+            logger.debug("Redis address lookup for %s failed: %s", self.name, exc)
+            addresses = []
+        with self._lock:
+            if addresses and addresses != self._addresses:
+                current = self._addresses[self._index] if self._addresses else None
+                self._addresses = addresses
+                self._index = addresses.index(current) if current in addresses else 0
+            self._looking = False
+        self._looked.set()
+
+
+_books: dict[tuple[str, int], AddressBook] = {}
+_books_lock = threading.Lock()
+
+
+def address_book(name: str, port: int) -> Optional[AddressBook]:
+    """이름이면 그 장부(프로세스에 하나), 이미 주소면 None — 고정할 것이 없다"""
+    if _is_ip(name):
+        return None
+    with _books_lock:
+        book = _books.get((name, port))
+        if book is None:
+            book = _books[(name, port)] = AddressBook(name, port)
+        return book
+
+
+class PinnedConnection(Connection):
+    """평문 TCP Redis 연결 — 이름 대신 장부의 주소로 접속한다. rediss·unix URL 은 redis-py 가 자기 연결 클래스로 바꾼다
+    (TLS 는 인증서 호스트명·SNI 에 이름이 필요하다 — 고정하지 않는다)"""
+
+    def _connection_arguments(self):
+        args = dict(super()._connection_arguments())
+        book = address_book(self.host, int(self.port))
+        address = book.current() if book else None
+        if address is not None:
+            args["host"] = address
+        elif book is not None:
+            book.refresh()   # 아직 모른다 — 이번 접속은 이름으로(기동 직후뿐), 다음부터 주소로
+        return args
+
+    async def _connect(self):
+        try:
+            await super()._connect()
+        except BaseException:
+            book = address_book(self.host, int(self.port))
+            if book is not None:
+                book.failed()
+            raise
+
+
+
+def _prime_address(url: str) -> None:
+    """기동 때 한 번 — 첫 조회를 기다린다(상한 = 연결 타임아웃). 그 뒤 모든 연결이 주소로 접속한다"""
+    parts = urlsplit(url)
+    if parts.scheme == "redis" and parts.hostname:
+        book = address_book(parts.hostname, parts.port or 6379)
+        if book is not None:
+            book.wait(settings.redis_socket_connect_timeout)
+
+
 async def init_redis() -> None:
     """Redis 연결 풀 생성 및 헬스 확인 (실패 시 graceful degradation)."""
     global _pool, _client, _limiter_client, _available
@@ -80,8 +195,10 @@ async def init_redis() -> None:
         return
 
     try:
+        await asyncio.to_thread(_prime_address, settings.redis_url)
         _pool = ConnectionPool.from_url(
             settings.redis_url,
+            connection_class=PinnedConnection,
             retry=_retry(),
             max_connections=settings.redis_max_connections,
             socket_timeout=settings.redis_socket_timeout,
@@ -93,6 +210,7 @@ async def init_redis() -> None:
         await _client.ping()
         _limiter_client = Redis.from_url(
             settings.redis_limiter_url,
+            connection_class=PinnedConnection,
             retry=_retry(),
             max_connections=settings.redis_max_connections,
             socket_timeout=settings.redis_socket_timeout,
@@ -121,6 +239,7 @@ def new_pubsub_client(client_name: str) -> Redis:
     """
     return Redis.from_url(
         settings.redis_url,
+        connection_class=PinnedConnection,
         client_name=client_name,
         socket_timeout=None,
         socket_connect_timeout=settings.redis_socket_connect_timeout,
@@ -150,8 +269,6 @@ def _heartbeat_redis(host: Optional[str]) -> Redis:
         decode_responses=True,
     )
 
-
-Resolver = Callable[..., list]
 
 
 class HeartbeatConnection:
