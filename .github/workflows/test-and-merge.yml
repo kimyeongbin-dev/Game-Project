@@ -127,6 +127,10 @@ jobs:
     name: Proxy E2E (Caddy in Docker)
     needs: version-guard
     runs-on: ubuntu-latest
+    env:
+      # 운영 오버레이의 필수 변수 — 엣지가 없는 CI 에서는 Caddy 컨테이너 자신(어떤 클라이언트의 XFF 도 믿지 않는다).
+      # 로그·정리 단계의 compose 도 이 값이 있어야 해석된다
+      CADDY_TRUSTED_PROXIES: 127.0.0.1/32
 
     steps:
       - name: Checkout repository
