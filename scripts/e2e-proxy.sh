@@ -8,8 +8,9 @@
 # - 운영 오버레이(docker-compose.prod.yml): server = prod 타깃(워커 2개, ENVIRONMENT=production, 오리진 없음)
 # - 앞단 엣지가 없으므로 CADDY_TRUSTED_PROXIES=127.0.0.1/32(Caddy 컨테이너 자신 — 어떤 클라이언트의 XFF 도 믿지 않는다)
 # - JWT 비밀키는 실행마다 무작위(production 은 32자 이상이 아니면 기동하지 않는다)
-# - 개발 스택과 같은 compose 프로젝트다 — 개발 server(dev 타깃)가 떠 있으면 prod 로 바뀐다. 끝난 뒤 개발로 돌아가려면
-#   `docker compose up -d`
+# - 개발 스택과 같은 compose 프로젝트·같은 이미지 이름(gamemoa-server)이다 — 개발 server(dev 타깃)가 prod 이미지로 바뀐다.
+#   끝난 뒤 개발로 돌아가려면 **반드시 --build**: `docker compose up -d --build` (빌드 없이 올리면 prod 이미지를 그대로 써
+#   --reload·소스 마운트 없이 뜬다 — 실측)
 # =============================================================================
 set -euo pipefail
 cd "$(dirname "$0")/.."
