@@ -10,6 +10,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **단일 기준 문서(SSOT): [`PLATFORM_ARCHITECTURE.md`](PLATFORM_ARCHITECTURE.md)** — 기술 스택, 보안 원칙, 게임별 구현 명세, 디렉토리 청사진이 모두 여기에 있다. 구조나 스택에 관한 판단은 이 문서를 우선한다.
 
+### 작업 재개 — 무엇을 언제 읽나 (통째로 읽지 말 것)
+
+| 시점 | 읽을 것 | 목적 |
+| :-- | :-- | :-- |
+| 세션 시작 | 이 파일 + 메모리 인덱스(자동) → [`docs/ROADMAP.md`](docs/ROADMAP.md) 맨 위 "현재 위치" 문단과 진행 중인 마일스톤 절만 | 다음 할 일 |
+| 계획 수립 | [`docs/plans/README.md`](docs/plans/README.md) "검증 관문과 독립 검토"·"모델 분할 표시" → **직전 계획서의 상태 머리글**(계획 이탈·계획 오류 = 반복하지 말 것) | 규약·교훈 |
+| 이관 항목을 다룰 때 | ROADMAP 항목이 가리키는 `docs/research/*독립검토*.md` 의 **채택표 해당 행만**, 필요하면 그 원문 항목 | 지적의 원래 근거 |
+| 동작·수치를 인용할 때 | `docs/research/*실측*.md` 의 "알려진 한계"·해당 시나리오 절 | 실측 근거(추정 금지) |
+| 와이어·키·규칙 | `docs/api/games/maze.md`·`docs/api/platform.md` 의 해당 절(§ 번호로) | 설계 정본 |
+
+계획서 본문·검토 원문 전체·결과 원자료(`server/harness/multiworker/results/`, git 밖)는 근거를 확인할 때만 연다.
+
 ### 핵심 운영 정책 (Hybrid Play Model)
 - **솔로 플레이**: 비로그인 / 100% 오프라인. 게임 루프·판정·로컬 AI·세이브가 전부 클라이언트 내부에서 수행된다.
 - **멀티플레이 및 공유**: 카카오 로그인 필수 / 온라인. 승패·전적·MMR은 **반드시 서버가 판정**하고 클라이언트 주장은 신뢰하지 않는다 (Zero-Trust, §3.3 원칙 2).
@@ -146,11 +158,11 @@ games/ ┘
 ### 알아둘 설계 패턴
 - **Graceful Degradation**: DB 연결 실패 시 서버는 메모리 전용 모드로 계속 동작한다. DB 작업 전에 `is_db_available()`을 확인한다.
 - **게임 상태 직렬화**: `GameState.to_dict()` / `from_dict()` 가 Redis `game:<id>:state` 값 전체다(M3 3단계에서 저장). `schema_version` 이 다르면 복원을 거부한다.
-- **멀티플레이 상태는 Redis 에만**: `services/maze_game.py`(게임 상태·락·종료 기록), `services/matchmaking.py`(큐), `services/rooms.py`(방), `services/activity.py`(유저당 활동 하나). 서비스 인스턴스는 상태를 갖지 않는다. 상태를 쓴 직후 `services/events.py` 로 이벤트를 **발행만** 하고(권위 없음, at-most-once), 워커마다 `ws/bus.py` 가 구독해 자기 소켓에만 보낸다. 좌석별 누적 시야(`game:{id}:vision:{seat_no}`)는 수락된 행동마다 state 와 **같은 락 토큰의 펜싱 쓰기 한 번**(`fenced_mset`)으로 기록하고, 화면(`services/maze_view.py`)은 자기 좌석 관측만 읽는다. 시계(`game:{id}:clocks`)와 데드라인 색인(`deadlines:{game}`)도 같은 쓰기 한 번(`fenced_write`)이고, 시각은 Redis `TIME` 이다. 만료는 워커마다 도는 `services/sweeper.py` 가 리스 클레임으로 꺼내고 게임 락 안에서 다시 계산한다(점수는 힌트). 키는 `app/db/redis_keys.py` 에서만 만들고, 스키마 표는 `docs/api/platform.md` "Redis 키 스키마"에 있다.
+- **멀티플레이 상태는 Redis 에만**: `services/maze_game.py`(게임 상태·락·종료 기록), `services/matchmaking.py`(큐), `services/rooms.py`(방), `services/activity.py`(유저당 활동 하나). 서비스 인스턴스는 상태를 갖지 않는다. 상태를 쓴 직후 `services/events.py` 로 이벤트를 **발행만** 하고(권위 없음, at-most-once), 워커마다 `ws/bus.py` 가 구독해 자기 소켓에만 보낸다. 좌석별 누적 시야(`game:{id}:vision:{seat_no}`)는 수락된 행동마다 state 와 **같은 락 토큰의 펜싱 쓰기 한 번**(`fenced_mset`)으로 기록하고, 화면(`services/maze_view.py`)은 자기 좌석 관측만 읽는다. 시계(`game:{id}:clocks`)와 데드라인 색인(`deadlines:{game}`)도 같은 쓰기 한 번(`fenced_write`)이고, 시각은 Redis `TIME` 이다. **게임 이벤트 발행도 그 쓰기와 같은 Lua 안의 `PUBLISH`** 다(`RedisPublisher.in_commit` — 쓰기 직후·발행 전 워커가 죽으면 통지가 영영 사라졌다, M4-1). 발행 경로를 바꿀 때 이 원자성을 깨지 말 것. 만료는 워커마다 도는 `services/sweeper.py` 가 리스 클레임으로 꺼내고 게임 락 안에서 다시 계산한다(점수는 힌트). 키는 `app/db/redis_keys.py` 에서만 만들고, 스키마 표는 `docs/api/platform.md` "Redis 키 스키마"에 있다.
 - **하드웨어 금고 키 보관**: AES/HMAC 키를 소스에 하드코딩하지 않는다. 앱 최초 실행 시 기기 내부에서 난수 생성해 Keystore/Keychain에만 보관한다 (§3.2).
 - **개수를 박지 않는다**: 인원·게임·모드 수를 코드나 스키마에 고정값으로 쓰지 않는다. 판단 기준은 "인원이 4명이 되면 무엇을 고쳐야 하는가?" — 행 추가 외에 변경이 필요하면 하드코딩이다 (`docs/api/platform.md` §5 확장성 원칙).
 
-## 진행 상태 — 리팩토링 중 (인프라 M3 완료, 다음 M4)
+## 진행 상태 — 리팩토링 중 (인프라 M4-1 완료, 다음 M4-2)
 
 | 영역 | 상태 |
 | :-- | :-- |
@@ -160,7 +172,7 @@ games/ ┘
 | 큐·방·게임 상태 | **Redis 이전 완료**(M3 3단계) — 게임별 락 + 펜싱 쓰기, Lua 원자 매칭, N인 좌석. 종료 시 `game_sessions` 기록. 2·3·4좌석 파라미터화 테스트 |
 | `server/app/db/` | **2인 전제 제거 완료**(M3 2단계) — `game_sessions` 는 시작·종료 기록만, 좌석은 `game_participants` 행. `match_queue`·`game_rooms`·`daily_champions`·스케줄러 폐기. 마이그레이션 도구 없음(`create_all`) — Alembic 은 첫 운영 배포 전 |
 | `server/app/core/` | `config.py`(환경변수 단일 진입점), `time.py`(표준 utcnow·Redis TIME 시계), `security.py`(access token **검증만** — 발급은 인증 작업), `redaction.py`(로그의 `token=` 마스킹), `worker.py`(워커 id) |
-| Redis | 연결 계층(`app/db/redis.py`) + lifespan 배선 완료. graceful degradation |
+| Redis | 연결 계층(`app/db/redis.py`) + lifespan 배선 완료. graceful degradation. **연결은 해석해 둔 주소로**(`AddressBook`·`PinnedConnection`, M4-1 — Redis 가 꺼진 동안의 느린 이름 조회가 재접속을 막지 않게). 새 Redis 클라이언트를 만들 때 `connection_class=PinnedConnection` |
 | 레이트 리미터 | **배선 완료** — Redis 저장소, 커스텀 429, `main.py` 등록. 테스트 10건. 프록시 경유 IP 정확도는 M4-1 하네스 P1 |
 | 리버스 프록시 | **M4-1 완료** — Caddy(`infra/caddy/Caddyfile`, TLS 는 엣지), 신뢰 경계(Caddy → uvicorn), CORS·WS Origin(운영 fail-closed), WS IP 접속 리밋, 프록시 경유 E2E(`server/e2e`, CI `proxy-e2e`) |
 | `server/app/ws/` | **완료**(M3 7단계) — `maze_handler`(`/api/v1/ws/maze`, §12 10종·인증 4001~4003·accept 후 close), `delivery`·`wire`(내부 이벤트 → §12 와이어, 게임별 `version`), `runtime`(lifespan: 버스·스위퍼·큐 티커·SIGTERM 기준 서버 유예·끊김 재시도), `rate_limit`(소켓 버킷·접속 카운터), `connection_manager`(연결 맵, 같은 계정은 클러스터에 하나). 좌석 소유는 연결 id 단위. 독립 검토 #1~#3 반영 |
