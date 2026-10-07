@@ -46,3 +46,12 @@ def test_no_cmd_trusts_forwarded_headers_from_everyone(stage):
     cmd = stage_cmd(stage)
     assert "--forwarded-allow-ips" not in cmd
     assert "--no-proxy-headers" not in cmd
+
+
+def test_prod_image_defaults_to_production():
+    """변수를 빠뜨린 운영 배포가 local(오리진 *·검증 꺼짐)으로 뜨지 않게 — 이미지 기본값이 production 이다(M4-1 독립 검토)"""
+    text = DOCKERFILE.read_text(encoding="utf-8")
+    prod = text[text.index("FROM base AS prod"):]
+    assert re.search(r"^ENV ENVIRONMENT=production\s*$", prod, re.M)
+    dev = text[text.index("FROM base AS dev"):text.index("FROM base AS test")]
+    assert "ENVIRONMENT=production" not in dev

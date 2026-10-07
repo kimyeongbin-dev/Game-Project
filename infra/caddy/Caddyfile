@@ -4,19 +4,36 @@
 #   클라이언트 ─(엣지: TLS 종료, 배포만)─> Caddy :8080 ──> uvicorn (CADDY_UPSTREAM)
 #
 # - TLS 는 플랫폼 엣지가 끝낸다(2026-10-07 결정). Caddy 는 HTTP 만 — auto_https off
-# - 신뢰 경계: Caddy 는 CADDY_TRUSTED_PROXIES(엣지 대역)에서 온 X-Forwarded-For 만 믿는다. 그 밖에서 온 값은 버리고
-#   접속 주소를 클라이언트로 쓴다. 로컬·CI 는 기본값(루프백 — 앞에 아무 프록시도 없다). 배포 값은 배포 작업 때
+# - 신뢰 경계: Caddy 는 CADDY_TRUSTED_PROXIES(엣지 대역)에서 온 X-Forwarded-For 만 믿고, **strict** 로 오른쪽부터 읽어
+#   신뢰 대역이 아닌 첫 주소를 클라이언트로 본다. 엣지는 받은 XFF 뒤에 접속 주소를 덧붙이므로("위조, 실제"),
+#   비엄격(왼쪽 끝)이면 클라이언트가 보낸 값이 그대로 클라이언트 IP 가 된다(M4-1 독립 검토 치명).
+#   로컬·CI 는 기본값(루프백 — 앞에 아무 프록시도 없다). 운영 오버레이는 이 값을 필수로 받는다(docker-compose.prod.yml)
 #   서버(uvicorn)는 FORWARDED_ALLOW_IPS = 이 Caddy 의 주소만 믿는다(server/Dockerfile 주석). Caddy 는 판정한 클라이언트
 #   주소 하나만 XFF 로 넘긴다(아래 header_up) — 서버가 엣지 대역을 몰라도 된다
 # - WebSocket: 업그레이드 뒤에는 바이트 터널이라 ping/pong·close 코드(1012·4000·4001 …)가 그대로 지난다
-# - **접속 로그를 켜지 않는다.** WS 토큰이 쿼리 문자열(?token=)에 있어 URI 가 로그에 남으면 토큰이 샌다(maze.md §2).
-#   켜야 한다면 반드시 `format filter` 로 `request>uri` 의 쿼리를 지운다. scripts/check-proxy-config.sh 가 `log` 를 막는다
+# - **토큰이 로그에 남지 않게 한다.** WS 토큰이 쿼리 문자열(?token=)에 있다(maze.md §2). 사이트 접속 로그는 켜지 않고,
+#   기본 로거(오류 로그 포함 — 업스트림이 내려간 동안의 502 가 URI 를 통째로 남겼다, 독립 검토)는 `request>uri` 의 token
+#   쿼리를 지운다. scripts/check-proxy-config.sh 가 사이트 `log` 금지와 이 필터를 검사한다
+# - `admin off` — 설정을 바꾸려면 재시작해야 하고, 그때 소켓 전원이 1001 로 끊긴다(재접속은 일반 끊김, 하네스 P3)
 # =============================================================================
 {
 	admin off
 	auto_https off
 	servers {
 		trusted_proxies static {$CADDY_TRUSTED_PROXIES:127.0.0.1/32}
+		trusted_proxies_strict
+	}
+	log default {
+		output stderr
+		format filter {
+			wrap json
+			fields {
+				request>uri query {
+					delete token
+				}
+				request>headers>Authorization delete
+			}
+		}
 	}
 }
 
@@ -25,8 +42,11 @@
 		flush_interval -1
 		# X-Forwarded-For 를 Caddy 가 판정한 클라이언트 주소 **하나**로 다시 쓴다. 기본 동작(받은 값 뒤에 접속 주소를
 		# 덧붙임)이면 배포에서 "클라이언트, 엣지" 가 되고, 서버(uvicorn)는 Caddy 만 믿으므로 오른쪽 끝 = 엣지 주소를
-		# 클라이언트로 본다 — 모든 사용자가 한 IP 를 공유한다. client_ip 는 trusted_proxies 로 계산된다
-		# (신뢰한 엣지면 그 XFF 의 클라이언트, 아니면 접속 주소)
+		# 클라이언트로 본다 — 모든 사용자가 한 IP 를 공유한다
 		header_up X-Forwarded-For {client_ip}
+		# 업스트림 keep-alive 를 uvicorn(5 s)보다 짧게 — uvicorn 이 닫는 순간 재사용하는 경합(멱등 아닌 요청의 502)을 피한다
+		transport http {
+			keepalive 4s
+		}
 	}
 }

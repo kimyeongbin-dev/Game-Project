@@ -94,7 +94,7 @@ services:
       RATE_LIMIT_PER_MINUTE: "${RATE_LIMIT_PER_MINUTE:-60}"
       # X-Forwarded-For 를 믿을 주소 — proxy(Caddy) 하나뿐. uvicorn 이 직접 읽는 변수다(app/core/config.py 가 아니다).
       # 다른 컨테이너가 보낸 XFF 는 무시된다. 미설정이면 uvicorn 기본 127.0.0.1(아무 XFF 도 믿지 않는다)
-      FORWARDED_ALLOW_IPS: ${GAMEMOA_PROXY_IP:-172.30.0.10}
+      FORWARDED_ALLOW_IPS: ${GAMEMOA_PROXY_IP:-10.231.0.10}
     # 호스트 포트 없음 — 접속은 proxy 로만(M4-1). 직접 열면 XFF 신뢰 경계를 우회하는 경로가 생긴다
     volumes:
       # 소스 볼륨 마운트로 --reload 동작 (의존성은 이미지의 /opt/venv 사용)
@@ -134,7 +134,7 @@ services:
       - server
     networks:
       gamemoa:
-        ipv4_address: ${GAMEMOA_PROXY_IP:-172.30.0.10}
+        ipv4_address: ${GAMEMOA_PROXY_IP:-10.231.0.10}
 
   # ---------------------------------------------------------------------------
   # pytest 실행 전용 (서버 API + 게임 엔진). 개발 DB와 분리된 gamemoa_test 사용
@@ -238,9 +238,10 @@ volumes:
 networks:
   gamemoa:
     driver: bridge
-    # 고정 서브넷 — proxy 의 고정 주소(FORWARDED_ALLOW_IPS)를 위해. 호스트의 다른 네트워크와 겹치면 GAMEMOA_SUBNET 으로 바꾼다
+    # 고정 서브넷 — proxy 의 고정 주소(FORWARDED_ALLOW_IPS)를 위해. Docker 기본 주소 풀(172.17~31, 192.168) 밖의 10.231 —
+    # 호스트의 다른 네트워크(VPN 등)와 겹치면 GAMEMOA_SUBNET·GAMEMOA_DYNAMIC_RANGE·GAMEMOA_PROXY_IP 를 함께 바꾼다
     ipam:
       config:
-        - subnet: ${GAMEMOA_SUBNET:-172.30.0.0/24}
+        - subnet: ${GAMEMOA_SUBNET:-10.231.0.0/24}
           # 동적 할당은 위쪽 절반 — proxy 고정 주소(.10)를 proxy 보다 먼저 만들어진 컨테이너가 가져가지 않게
-          ip_range: ${GAMEMOA_DYNAMIC_RANGE:-172.30.0.128/25}
+          ip_range: ${GAMEMOA_DYNAMIC_RANGE:-10.231.0.128/25}

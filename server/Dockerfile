@@ -96,6 +96,10 @@ CMD ["pytest", "-v", "--tb=short"]
 # -----------------------------------------------------------------------------
 FROM base AS prod
 
+# 운영 이미지의 기본 환경은 production — 변수를 빠뜨려도 운영 검증(오리진 fail-closed·JWT 키 길이·pubsub test 금지)이
+# 꺼지지 않는다(M4-1 독립 검토). 개발·CI 는 compose 가 local·ci 를 명시한다. tests/test_dockerfile_flags.py 가 검사한다
+ENV ENVIRONMENT=production
+
 RUN groupadd --system gamemoa && useradd --system --gid gamemoa --no-create-home gamemoa
 
 COPY --from=deps /opt/venv /opt/venv

@@ -9,7 +9,7 @@ import pytest
 import uvicorn
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
-PROXY = "172.30.0.10"
+PROXY = "10.231.0.10"
 
 
 async def _client_seen(trusted_env, monkeypatch, peer: str, xff: str):
@@ -37,7 +37,7 @@ async def test_forwarded_for_from_the_proxy_is_applied(monkeypatch):
     assert await _client_seen(PROXY, monkeypatch, PROXY, "203.0.113.7") == "203.0.113.7"
 
 
-@pytest.mark.parametrize("peer", ["172.30.0.99", "203.0.113.50"])
+@pytest.mark.parametrize("peer", ["10.231.0.99", "203.0.113.50"])
 async def test_forwarded_for_from_anyone_else_is_ignored(monkeypatch, peer):
     """같은 네트워크의 다른 컨테이너든 외부든 — 위조한 XFF 는 무시하고 접속 주소를 쓴다"""
     assert await _client_seen(PROXY, monkeypatch, peer, "198.51.100.1") == peer

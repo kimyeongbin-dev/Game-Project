@@ -54,7 +54,7 @@ services:
               "--proxy-headers"]
     environment:
       ENVIRONMENT: production
-      FORWARDED_ALLOW_IPS: 172.31.7.10
+      FORWARDED_ALLOW_IPS: 10.231.7.10
       DATABASE_URL: postgresql+asyncpg://postgres:harness@db:5432/gamemoa
       DB_ENABLED: "true"
       REDIS_URL: redis://:${HARNESS_REDIS_PASSWORD:?set HARNESS_REDIS_PASSWORD}@redis:6379/0
@@ -79,7 +79,7 @@ services:
     image: caddy:2.11-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
     environment:
       CADDY_UPSTREAM: server:8000
-      CADDY_TRUSTED_PROXIES: 172.31.7.30/32      # edge 만 — 배포의 엣지 대역에 해당
+      CADDY_TRUSTED_PROXIES: 10.231.7.30/32      # edge 만 — 배포의 엣지 대역에 해당
     volumes:
       - ../../../infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
     depends_on: [server]
@@ -88,7 +88,7 @@ services:
     cpus: 0.5
     networks:
       default:
-        ipv4_address: 172.31.7.10
+        ipv4_address: 10.231.7.10
 
   edge:
     build:
@@ -101,7 +101,7 @@ services:
     cpus: 0.25
     networks:
       default:
-        ipv4_address: 172.31.7.30
+        ipv4_address: 10.231.7.30
 
   client:
     profiles: [client]
@@ -129,5 +129,5 @@ networks:
   default:
     ipam:
       config:
-        - subnet: 172.31.7.0/24
-          ip_range: 172.31.7.128/25    # 동적 할당은 위쪽 절반 — 고정 주소(proxy .10·edge .30)와 겹치지 않게
+        - subnet: 10.231.7.0/24
+          ip_range: 10.231.7.128/25    # 동적 할당은 위쪽 절반 — 고정 주소(proxy .10·edge .30)와 겹치지 않게
