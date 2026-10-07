@@ -329,3 +329,57 @@ async def test_moving_from_a_live_worker_is_free(games, mm, fake_clock, redis_cl
     before = (await clocks_of(redis_client, state.game_id)).seat(2).conn_remaining_ms
     await games.mark_connected(state.game_id, users[1], owner="w-b:c2")
     assert (await clocks_of(redis_client, state.game_id)).seat(2).conn_remaining_ms == before
+
+
+# ----- M4-1 독립 검토 — 쓰기와 통지의 원자성 (S4 kill 간헐 실패의 원인) -----
+
+async def test_events_are_published_inside_the_commit_so_a_crash_after_writing_loses_nothing(
+        redis_client, fake_clock, monkeypatch):
+    """쓰기 직후·발행 전에 워커가 죽는 창 — 상태는 바뀌었는데 통지가 영영 없었다. 실제 발행자는 쓰기 Lua 안에서 PUBLISH 한다:
+    커밋 직후 예외(워커 사망 흉내)가 나도 구독자는 이미 받았다"""
+    import asyncio
+    from app.db.redis import new_pubsub_client
+    from app.services import events as events_module
+    from app.services.maze_game import MazeGameService as Service
+
+    games = Service(lambda: None, clock=fake_clock, publisher=events_module.RedisPublisher())
+    state = await games.create_game(mode="duel", is_ranked=False,
+                                    players=[SeatPlayer(1, 1, "a"), SeatPlayer(2, 2, "b")])
+    client = new_pubsub_client("test-atomic-publish")
+    pubsub = client.pubsub()
+    await pubsub.subscribe(keys.events("game", state.game_id))
+    await pubsub.get_message(timeout=1.0)                       # 구독 확인
+
+    real_commit = Service._commit
+
+    async def commit_then_die(self, *args, **kwargs):
+        await real_commit(self, *args, **kwargs)
+        raise SystemExit("worker killed right after the write")   # 발행 루프에 닿기 전
+
+    monkeypatch.setattr(Service, "_commit", commit_then_die)
+    target = state.get_valid_pawn_moves()[0]
+    try:
+        await games.move(state.game_id, 1, target.row, target.col)
+    except SystemExit:
+        pass
+    got = None
+    for _ in range(20):
+        message = await pubsub.get_message(timeout=0.2)
+        if message and message["type"] == "message":
+            got = events_module.Event.from_json(message["data"])
+            break
+    await pubsub.aclose()
+    await client.aclose()
+    assert (await games.load_game(state.game_id)).turn_count == 1      # 쓰기는 됐다
+    assert got is not None and got.kind == events_module.GAME_UPDATED   # 통지도 함께 나갔다
+
+
+async def test_recording_publishers_still_receive_events_after_the_commit(redis_client, fake_clock):
+    """in_commit 이 없는 발행자(테스트 기록용)는 지금처럼 쓰기 뒤에 받는다 — 테스트들이 기대는 경로"""
+    pub = RecordingPublisher()
+    games = MazeGameService(lambda: None, clock=fake_clock, publisher=pub)
+    state = await games.create_game(mode="duel", is_ranked=False,
+                                    players=[SeatPlayer(1, 1, "a"), SeatPlayer(2, 2, "b")])
+    target = state.get_valid_pawn_moves()[0]
+    await games.move(state.game_id, 1, target.row, target.col)
+    assert any(e.kind == "game_updated" for e in pub.events)

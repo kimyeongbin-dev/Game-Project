@@ -87,7 +87,14 @@ class Publisher(Protocol):
 
 
 class RedisPublisher:
-    """앱 Redis 로 PUBLISH. 실패는 로그만 남긴다"""
+    """앱 Redis 로 PUBLISH. 실패는 로그만 남긴다
+
+    in_commit: 게임 서비스가 상태 쓰기(펜싱 Lua)와 **같은 스크립트에서** 발행해도 되는 발행자다 — 쓰기 직후·발행 전에
+    워커가 죽어 통지가 사라지는 창을 없앤다(M4-1 독립 검토, S4 kill 간헐 실패). 테스트의 기록용 발행자는 이 속성이 없어
+    지금처럼 쓰기 뒤에 받는다.
+    """
+
+    in_commit = True
 
     async def publish(self, event: Event) -> None:
         client = get_redis()

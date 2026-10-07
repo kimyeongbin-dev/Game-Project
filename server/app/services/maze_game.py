@@ -818,12 +818,15 @@ class MazeGameService:
                 # 커밋되는 이벤트만 번호를 받는다 — 같은 쓰기에서 version 을 올린다(검토 L23)
                 tx.outbox = [replace(e, seq=tx.version + i) for i, e in enumerate(tx.outbox, start=1)]
                 # 이미 닫힌 게임은 쓰지 않는다 — 바뀔 것이 없고, 쓰면 종료 TTL 이 키마다 엇갈려 연장된다(검토 L22)
+                in_commit = not was_closed and getattr(self._publisher, "in_commit", False)
                 if not was_closed:
-                    await self._commit(redis, lock_key, token, tx)
+                    # 실제 발행자면 통지를 쓰기와 같은 Lua 에서 — 쓰기 직후 워커가 죽어도 통지가 사라지지 않는다(M4-1 독립 검토)
+                    await self._commit(redis, lock_key, token, tx, publish=tx.outbox if in_commit else ())
                 # 락 안에서 발행한다 — 같은 게임의 이벤트가 상태 순서대로 나간다.
                 # 종료 처리(activity·DB)보다 먼저 — 그것이 실패해도 종료 통지는 나간다(검토 H5)
-                for event in tx.outbox:
-                    await self._publisher.publish(event)
+                if not in_commit:
+                    for event in tx.outbox:
+                        await self._publisher.publish(event)
         except LockTimeout as exc:
             raise GameBusy(str(exc)) from exc
 
@@ -898,8 +901,8 @@ class MazeGameService:
         tx.outbox.append(events.seat_reconnected(tx.meta, seat_no))
         return True
 
-    async def _commit(self, redis, lock_key: str, token: str, tx: _Tx) -> None:
-        """state·clocks(·vision)·데드라인을 같은 토큰으로 한 번에 — 전부 또는 전무"""
+    async def _commit(self, redis, lock_key: str, token: str, tx: _Tx, *, publish: Sequence = ()) -> None:
+        """state·clocks(·vision)·데드라인(·통지)을 같은 토큰으로 한 번에 — 전부 또는 전무"""
         gid = tx.state.game_id
         items = {
             keys.game_state(gid): json.dumps(tx.state.to_dict()),
@@ -919,7 +922,8 @@ class MazeGameService:
             zadd, zrem = {}, [*zadd, *zrem]
         zsets = {keys.deadlines(GAME): (zadd, zrem), **owner_index_ops(tx.state, tx.clocks, tx.prev_owners)}
         ttl = settings.game_finished_ttl_sec if tx.closed else None
-        written = await fenced_write(redis, lock_key, token, items, ex=ttl, zsets=zsets)
+        written = await fenced_write(redis, lock_key, token, items, ex=ttl, zsets=zsets,
+                                     publish=[(e.channel, e.to_json()) for e in publish])
         if not written:
             raise GameBusy(f"lost lock on {gid} before write")
 

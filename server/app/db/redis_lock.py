@@ -39,8 +39,8 @@ return 0
 
 # KEYS[1]=락, KEYS[2..n+1]=대상 문자열, KEYS[n+2..]=ZSET 들
 # ARGV[1]=토큰, ARGV[2]=EX 초('' 이면 없음), ARGV[3]=n, ARGV[4..3+n]=값, ARGV[4+n]=ZSET 개수 z,
-#   이어서 ZSET 마다: m, (member, score)×m, k, member×k
-# 스크립트 하나라 원자적이다 — 토큰이 내 것이면 전부를, 아니면 아무것도 쓰지 않는다
+#   이어서 ZSET 마다: m, (member, score)×m, k, member×k, 이어서 발행 수 q, (channel, message)×q
+# 스크립트 하나라 원자적이다 — 토큰이 내 것이면 전부를(발행 포함), 아니면 아무것도 쓰지 않는다
 _FENCED_WRITE_LUA = """
 if redis.call('GET', KEYS[1]) ~= ARGV[1] then
     return 0
@@ -67,6 +67,10 @@ for zi = 1, z do
         redis.call('ZREM', key, ARGV[p + 1 + j])
     end
     p = p + 1 + k
+end
+local q = tonumber(ARGV[p + 1] or '0')
+for j = 1, q do
+    redis.call('PUBLISH', ARGV[p + 2 * j], ARGV[p + 1 + 2 * j])
 end
 return 1
 """
@@ -171,6 +175,7 @@ async def fenced_write(
     zadd: Optional[Mapping[str, int]] = None,
     zrem: Sequence[str] = (),
     zsets: Optional[Mapping[str, ZsetOps]] = None,
+    publish: Sequence[tuple[str, str]] = (),
 ) -> bool:
     """락 토큰이 아직 내 것일 때만 items 를 쓰고 ZSET 들에 ZADD/ZREM 한다 — 전부 또는 전무. 썼으면 True
 
@@ -178,6 +183,8 @@ async def fenced_write(
     장애로 "턴은 바뀌었는데 데드라인이 없다" 가 남고, 그 게임은 영원히 만료되지 않는다.
     ZSET 하나는 zset/zadd/zrem 으로, 여럿은 zsets={key: (zadd, zrem)} 로 넘긴다. 같은 member 를 ZADD 와 ZREM
     양쪽에 넣으면 ZADD 가 이긴다.
+    publish=[(channel, message)] 는 **같은 스크립트 안에서** PUBLISH 한다 — 쓰기와 통지가 함께 일어나거나 함께 일어나지
+    않는다. 쓰기 뒤 따로 발행하면 그 사이 프로세스가 죽을 때 상태는 바뀌었는데 통지가 영영 없다(M4-1 독립 검토).
     """
     if not items:
         raise ValueError("fenced_write needs at least one key")
@@ -195,6 +202,9 @@ async def fenced_write(
         for member, score in adds.items():
             args += [member, score]
         args += [len(rems), *rems]
+    args.append(len(publish))
+    for channel, message in publish:
+        args += [channel, message]
     async with store_errors():
         written = await redis.eval(_FENCED_WRITE_LUA, len(keys), *keys, *args)
     return bool(written)
