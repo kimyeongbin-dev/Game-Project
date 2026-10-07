@@ -2,7 +2,7 @@
 # M3 7단계 C — 실제 uvicorn 워커 2개 + 실제 Redis·PostgreSQL 완료 판정 하네스
 #
 #   export HARNESS_REDIS_PASSWORD=$(python -c "import secrets;print(secrets.token_hex(16))")
-#   docker compose -p m3s7 -f server/harness/multiworker/compose.yml up -d --build server
+#   docker compose -p m3s7 -f server/harness/multiworker/compose.yml up -d --build server proxy edge
 #   docker compose -p m3s7 -f server/harness/multiworker/compose.yml run --rm client python scenarios.py all --runs 3
 #   docker compose -p m3s7 -f server/harness/multiworker/compose.yml down -v
 #
@@ -10,6 +10,10 @@
 # 짧은 시계(초기 30 s·증분 2 s, 접속 30 s)로 만료를 빨리 본다 — 규칙이 아니라 숫자만 바꾼다(운영 조정 항목).
 # 포트를 호스트에 열지 않는다(Redis 침입 이력, CLAUDE.md). client 만 같은 네트워크에서 접속한다.
 # client 는 Docker 엔진 소켓으로 워커 kill·Redis pause·서버 stop 을 한다 — 로컬 하네스 전용이다.
+#
+# M4-1: 클라이언트는 **프록시(Caddy, 개발 compose 와 같은 Caddyfile·이미지)를 거쳐** 접속한다. 서버는 프록시 주소만 XFF 를
+# 믿는다. `edge` 는 배포의 엣지(Fly·ALB)를 흉내 낸다 — Caddy 가 이 주소만 신뢰하므로 edge 가 붙인 XFF 가 클라이언트 IP 가 된다
+# (edge_probe.py). 진단용 /health 워커별 조회만 서버에 직접 간다(Caddy 의 업스트림 연결 재사용이 한 워커만 보여 준다).
 # =============================================================================
 name: m3s7
 
@@ -50,6 +54,7 @@ services:
               "--proxy-headers"]
     environment:
       ENVIRONMENT: production
+      FORWARDED_ALLOW_IPS: 172.31.7.10
       DATABASE_URL: postgresql+asyncpg://postgres:harness@db:5432/gamemoa
       DB_ENABLED: "true"
       REDIS_URL: redis://:${HARNESS_REDIS_PASSWORD:?set HARNESS_REDIS_PASSWORD}@redis:6379/0
@@ -60,11 +65,43 @@ services:
       CLOCK_INITIAL_MS: "30000"
       CLOCK_INCREMENT_MS: "2000"
       CONNECTION_BUDGET_MS: "30000"
-      RATE_LIMIT_ENABLED: "false"
+      # REST 리밋 — 프록시·엣지 경유 IP 별 정확도(P1). 하네스 자체의 /health 조회가 걸리지 않게 넉넉히
+      RATE_LIMIT_ENABLED: "true"
+      RATE_LIMIT_PER_MINUTE: "${HARNESS_REST_LIMIT:-1000}"
+      # WS IP 접속 리밋 — 시나리오가 한 컨테이너에서 많이 접속한다. P2 는 이 값을 넘긴다
+      WS_CONNECT_PER_MINUTE_IP: "${HARNESS_IP_LIMIT:-600}"
     depends_on:
       redis: {condition: service_healthy}
       db: {condition: service_healthy}
-    cpus: 2
+    cpus: 1.75          # 합 4 유지(proxy 0.5) — M3 하네스는 2
+
+  proxy:
+    image: caddy:2.11-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
+    environment:
+      CADDY_UPSTREAM: server:8000
+      CADDY_TRUSTED_PROXIES: 172.31.7.30/32      # edge 만 — 배포의 엣지 대역에 해당
+    volumes:
+      - ../../../infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on: [server]
+    # 0.25 에서는 한 소켓의 연타(500 프레임) 중계가 프록시 CPU 를 다 써 다른 플레이어 왕복이 55 ms 까지 늘었다(S9, M4-1 실측).
+    # 1.0 이면 8~13 ms(직결과 같다). 운영도 프록시 CPU 여유가 필요하다 — 서버의 메시지 리밋은 프록시를 보호하지 않는다
+    cpus: 0.5
+    networks:
+      default:
+        ipv4_address: 172.31.7.10
+
+  edge:
+    build:
+      context: ../..
+      target: deps
+    working_dir: /srv/harness
+    command: ["sleep", "infinity"]
+    volumes:
+      - .:/srv/harness
+    cpus: 0.25
+    networks:
+      default:
+        ipv4_address: 172.31.7.30
 
   client:
     profiles: [client]
@@ -76,11 +113,21 @@ services:
       REDIS_URL: redis://:${HARNESS_REDIS_PASSWORD:?set HARNESS_REDIS_PASSWORD}@redis:6379/0
       DATABASE_URL: postgresql://postgres:harness@db:5432/gamemoa
       JWT_SECRET_KEY: harness-only-jwt-secret-0123456789abcdef
-      SERVER_WS: ws://server:8000/api/v1/ws/maze
-      SERVER_HTTP: http://server:8000
+      SERVER_WS: ws://proxy:8080/api/v1/ws/maze
+      SERVER_HTTP: http://proxy:8080
+      SERVER_HTTP_DIRECT: http://server:8000
+      HARNESS_REST_LIMIT: "${HARNESS_REST_LIMIT:-1000}"
+      HARNESS_IP_LIMIT: "${HARNESS_IP_LIMIT:-600}"
       COMPOSE_PROJECT: m3s7
       HARNESS_FALSIFY: ${HARNESS_FALSIFY:-}
     volumes:
       - .:/srv/harness
       - /var/run/docker.sock:/var/run/docker.sock
-    cpus: 1
+    cpus: 0.5
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.31.7.0/24
+          ip_range: 172.31.7.128/25    # 동적 할당은 위쪽 절반 — 고정 주소(proxy .10·edge .30)와 겹치지 않게

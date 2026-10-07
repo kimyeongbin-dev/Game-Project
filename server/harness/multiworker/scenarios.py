@@ -82,7 +82,61 @@ async def server_turn(players) -> int:
     return json.loads(raw)["turn_count"] if raw else -1
 
 
-async def move_current(players, res: Result, *, retry_busy_sec: float = 0.0, strict: bool = True) -> dict:
+async def probe_fresh_connects(pool: Pool, stop: asyncio.Event, out: list, *, every: float = 0.25) -> None:
+    """장애 중·직후 — 새 유저로 새 접속을 every 마다 시작한다(기다리지 않고 겹쳐서). (시작, 끝, 결과) 를 남긴다.
+    같은 소켓의 요청은 차례로 처리돼, 장애 중 붙잡힌 요청이 있으면 그 소켓으로는 '복구 뒤 새 요청'을 잴 수 없다(M4-1 실측)"""
+    async def one(user_id: int):
+        started = time.monotonic()
+        try:
+            c = await Client(user_id).open()
+            pool.clients.append(c)
+            out.append((started, time.monotonic(), "connected"))
+        except Exception as exc:
+            out.append((started, time.monotonic(), type(exc).__name__))
+
+    tasks = []
+    while not stop.is_set() and pool.free:
+        tasks.append(asyncio.create_task(one(pool.free.pop())))
+        try:
+            await asyncio.wait_for(stop.wait(), every)
+        except asyncio.TimeoutError:
+            pass
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def move_until_accepted(players, attempts: list, *, deadline_sec: float = 15.0) -> None:
+    """장애 중·직후 — 100 ms 마다 같은 이동을 보낸다. 응답을 기다리는 동안 다른 확인(하네스 자신의 Redis 조회)을 끼우지
+    않는다: 그 대기가 끼면 재개 지연이 서버가 아니라 하네스 루프를 잰다(M4-1 실측 — 1.0~1.7 s 로 보였던 것이 그것이었다).
+    attempts 에 (보낸 시각, 응답 시각, 결과) 를 남긴다. 결과 not_your_turn = 응답을 잃은 이전 시도가 이미 반영됐다"""
+    current = next(p for p in players if p.seat_no == players[0].turn["current_seat_no"])
+    expected = players[0].turn["turn_count"] + 1
+    row, col = legal_move(current.view)
+    end = time.monotonic() + deadline_sec
+
+    def is_turn(m):
+        return m["type"] == "turn_change" and m["payload"]["turn_count"] == expected
+
+    while time.monotonic() < end:
+        sent = time.monotonic()
+        seq = await current.send("move", {"row": row, "col": col})
+        try:
+            got = await current.take(lambda m: m.get("ack_seq") == seq or is_turn(m), timeout=8)
+        except Exception:
+            attempts.append((sent, time.monotonic(), "timeout"))
+            continue
+        outcome = "turn" if is_turn(got) else got["payload"].get("error")
+        attempts.append((sent, time.monotonic(), outcome))
+        if outcome == "turn":
+            current._pending.insert(0, got)
+            return
+        if outcome == "not_your_turn":
+            return
+        await asyncio.sleep(0.1)
+    raise AssertionError(f"move never accepted: {attempts[-3:]}")
+
+
+async def move_current(players, res: Result, *, retry_busy_sec: float = 0.0, strict: bool = True,
+                       trace: Optional[list] = None) -> dict:
     """현재 좌석이 유효한 한 칸 이동 → 전원이 그 턴(turn_count+1)의 game_state·turn_change 를 받는다
 
     strict: 장애가 없는 시나리오 — 두 메시지가 같은 version 이어야 한다. 장애 뒤에는 재동기화가 같은 턴의 화면을 다른
@@ -97,8 +151,11 @@ async def move_current(players, res: Result, *, retry_busy_sec: float = 0.0, str
         return m["type"] == "turn_change" and m["payload"]["turn_count"] == expected
 
     while True:
+        sent = time.monotonic()
         seq = await current.send("move", {"row": row, "col": col})
         got = await current.take(lambda m: m.get("ack_seq") == seq or is_turn(m), timeout=8)
+        if trace is not None:   # 시도별 (보낸 시각, 응답 시각, 결과) — 재개 지연 분석용(M4-1)
+            trace.append((sent, time.monotonic(), "turn" if is_turn(got) else got["payload"].get("error")))
         if is_turn(got):
             current._pending.insert(0, got)
             break
@@ -334,6 +391,12 @@ async def s4(pool: Pool, variant: str = "plain", games: int = 20) -> Result:
                 ends.append(await c.recv("game_end", timeout=max(1, deadline_sec - (time.monotonic() - t_start))))
             except Exception:
                 res.check(False, f"no game_end for a seat within {deadline_sec:.0f}s")
+                # 진단 — 어느 워커의 어느 좌석이, 무엇을 마지막으로 받았나(M4-1: 20게임 중 한 좌석만 통지를 못 받았다)
+                res.metrics.setdefault("missing", []).append({
+                    "user": c.user_id, "worker": c.worker, "killed_pid": killed_pid, "seat": c.seat_no,
+                    "game": c.view.get("game_id") if c.view else None,
+                    "closed": c.ws.close_code if c.ws is not None else None,
+                    "last": [m["type"] for m in c.received[-6:]]})
     res.metrics["last_end_sec"] = round(max((e["_t"] for e in ends), default=t_start) - t_start, 2)
     for pair in pairs:
         for c in pair:
@@ -447,9 +510,15 @@ async def s5(pool: Pool, long: bool = False) -> Result:
     recovered_at: list = []
     probe = asyncio.create_task(measure_downtime(30.0, recovered_at))   # 하네스가 공백을 직접 잰다(독립 검토 #2 Q4)
     await asyncio.sleep(0.3)
+    fresh: list = []
+    stop_fresh = asyncio.Event()
+    fresh_task = asyncio.create_task(probe_fresh_connects(pool, stop_fresh, fresh))
     await docker.action("redis", "restart", t=10)
-    await move_current(players, res, retry_busy_sec=10.0, strict=False)
-    action_ok = time.monotonic()
+    attempts: list = []
+    await move_until_accepted(players, attempts)
+    await asyncio.sleep(1.5)                  # 복구 뒤 새 접속을 몇 번 더 본다
+    stop_fresh.set()
+    await fresh_task
     await resync_views(players, 2.0)
     res.metrics["recover_after_restart_sec"] = round(time.monotonic() - t, 3)
     await asyncio.sleep(2)
@@ -464,12 +533,25 @@ async def s5(pool: Pool, long: bool = False) -> Result:
     gaps = [int(m.split("-")[1]) - int(m.split("-")[0]) for m in new]
     downtime_ms = await probe
     res.metrics["restart_outages_ms"], res.metrics["restart_downtime_ms"] = gaps, downtime_ms
-    # 장애 정의는 하트비트 전용 연결 기준이다(maze.md §8). 행동이 그보다 얼마나 늦게 되살아나는지 — 그만큼은 면제 없이
-    # 흐른다(독립 검토 #3 높음 2). 실측 0.2~0.4 s. 행동 재시도 간격 0.2 s + 처리 시간을 넘는 지연이면 실패
+    # 장애 정의는 하트비트 전용 연결 기준이다(maze.md §8). 그보다 늦게 처리되는 만큼은 면제 없이 흐른다(독립 검토 #3 높음 2).
+    # 둘을 나눠 잰다(2026-10-07 사용자 결정 — 기록하고 M4-2 에서 수정):
+    # - 복구 뒤 시작한 새 접속(250 ms 간격) 중 첫 성공 / 장애 중 들어와 붙잡힌 행동이 처리된 시각
+    # 둘 다 같은 원인(Redis 가 꺼진 동안 이름 조회 3.3 s + 기본 스레드 풀 포화 → 워커의 Redis 클라이언트마다 재접속이 늦다)으로
+    # 복구 뒤 최대 ≈1.3 s 늦을 수 있다(M4-1 실측). 알려진 한계다 — 여기서는 퇴행만 잡는다(상한 2 s). 수정은 M4-2(앱 풀 주소 고정)
     if recovered_at:
-        lag_ms = int((action_ok - recovered_at[0]) * 1000)
-        res.metrics["action_after_recovery_ms"] = lag_ms
-        res.check(lag_ms <= 1_000, f"actions resumed {lag_ms} ms after Redis answered PING")
+        rec = recovered_at[0]
+        rel = [(int((a - rec) * 1000), int((b - rec) * 1000), r) for a, b, r in attempts]
+        res.metrics["attempts_vs_recovery_ms"] = rel
+        accepted = [b for a, b, r in rel if r in ("turn", "not_your_turn")]
+        res.metrics["held_action_done_after_recovery_ms"] = accepted[-1] if accepted else None
+        fresh_rel = sorted((int((a - rec) * 1000), int((b - rec) * 1000), r) for a, b, r in fresh)
+        ok_after = [b for a, b, r in fresh_rel if a >= 0 and r == "connected"]
+        res.metrics["fresh_request_after_recovery_ms"] = ok_after[0] if ok_after else None
+        res.metrics["fresh_probes"] = len(fresh_rel)
+        res.check(bool(ok_after) and ok_after[0] <= 2_000,
+                  f"a fresh request after recovery took {ok_after[0] if ok_after else None} ms")
+        held = res.metrics["held_action_done_after_recovery_ms"]
+        res.check(held is not None and held <= 2_000, f"a held action finished {held} ms after recovery")
     # 기록됐다면 그 길이가 직접 잰 공백에 붙어야 한다 — 기록은 마지막 성공 → 첫 성공, 공백은 첫 실패 → 첫 성공이라
     # 하트비트 간격(200 ms) + 탐침 간격(100 ms)만큼 길 수 있다(검토 #3 중간: 재시작 구간도 면제량을 본다)
     for gap in gaps:
@@ -591,8 +673,8 @@ async def s6(pool: Pool, signal_kind: str = "term") -> Result:
         res.metrics["game_clock_error_ms"] = round(r2 - expected)
         res.metrics["game_clock_frozen_ms"] = frozen
         res.check(abs(r2 - expected) <= 1500, f"game clock across deploy {r2} vs expected {expected:.0f}")
-        logs = await docker.logs("server")
-        res.check(not re.search(r"token=ey", logs), "raw token in server logs")
+        logs = await docker.logs("server") + await docker.logs("proxy")   # 프록시 경유(M4-1) — 두 로그 모두
+        res.check(not re.search(r"token=ey", logs), "raw token in server/proxy logs")
         res.metrics["raw_token_hits"] = len([1 for c in cs if token(c.user_id)[:20] in logs])
         return res
 
@@ -743,10 +825,142 @@ async def s9(pool: Pool) -> Result:
     return res
 
 
+# ----- M4-1 프록시 경유 (P1~P4·오리진) — 클라이언트는 전부 Caddy 를 거친다 -----
+
+REST_LIMIT = int(os.environ.get("HARNESS_REST_LIMIT", "1000"))
+IP_LIMIT = int(os.environ.get("HARNESS_IP_LIMIT", "600"))
+
+
+def fake_client_ip() -> str:
+    """엣지가 붙일 클라이언트 주소 — 회차·시나리오마다 새 창이 되게 무작위(198.18.0.0/15, 벤치마크 대역)"""
+    import random
+    return f"198.{random.randint(18, 19)}.{random.randint(0, 255)}.{random.randint(1, 254)}"
+
+
+async def edge(*args: str) -> dict:
+    """edge 컨테이너에서 edge_probe.py — Caddy 가 신뢰하는 엣지로서 XFF 를 붙인다. 출력의 마지막 JSON 을 읽는다"""
+    out = await docker.exec("edge", "python", "edge_probe.py", *args)
+    found = re.findall(r"\{.*\}", out)
+    if not found:
+        raise RuntimeError(f"edge probe gave no JSON: {out[-300:]!r}")
+    return json.loads(found[-1])
+
+
+async def p1(pool: Pool) -> Result:
+    """REST 리밋이 실제 클라이언트 IP 단위로 정확하다 — 엣지가 알려 준 IP 별 한 창, 위조 XFF 는 새 창을 못 연다"""
+    res = Result("p1_rest_limit")
+    a, b = fake_client_ip(), fake_client_ip()
+    got = await edge("rest", a, str(REST_LIMIT + 1))
+    res.metrics["via_edge"] = got
+    res.check(got["sec"] < 50, f"edge probe took {got['sec']} s — longer than one window, inconclusive")
+    res.check(got["ok"] == REST_LIMIT and got["limited"] == 1,
+              f"client {a}: {got['ok']} allowed, {got['limited']} limited (limit {REST_LIMIT})")
+    other = await edge("rest", b, "1")
+    res.check(other["ok"] == 1, f"another client {b} was limited by {a}'s window")
+    # 서버 직결, 요청마다 새 연결 — 두 워커에 나뉘어도 한 창(Redis 저장소). edge 는 서버가 믿지 않아 edge 주소 단위다
+    direct = await edge("direct", str(REST_LIMIT + 1))
+    res.metrics["direct_new_connections"] = direct
+    res.check(direct["sec"] < 50, f"direct probe took {direct['sec']} s — longer than one window, inconclusive")
+    res.check(len(direct["workers"]) >= 2, f"direct requests did not spread over workers: {direct['workers']}")
+    res.check(direct["ok"] == REST_LIMIT and direct["limited"] == 1,
+              f"direct: {direct['ok']} allowed, {direct['limited']} limited across workers (limit {REST_LIMIT})")
+    # 하네스 클라이언트(신뢰 안 됨)가 위조 XFF 를 매번 바꿔 보낸다 — 자기 IP 한 창이라 한도 안에서 429 가 나와야 한다
+    import httpx
+    statuses = []
+    async with httpx.AsyncClient(timeout=5) as client:
+        for i in range(REST_LIMIT + 1):
+            r = await client.get(f"{os.environ['SERVER_HTTP']}/", headers={"X-Forwarded-For": fake_client_ip()})
+            statuses.append(r.status_code)
+            if r.status_code == 429:
+                break
+    res.metrics["spoofed_until_429"] = len(statuses)
+    res.check(429 in statuses, f"spoofed XFF opened a new window every time ({len(statuses)} requests, no 429)")
+    return res
+
+
+async def p2(pool: Pool) -> Result:
+    """IP 접속 폭주 — 한 IP 의 한도 초과분은 토큰을 보기 전에 1013, 다른 IP·하네스 접속은 영향 없음"""
+    res = Result("p2_ip_flood")
+    flood, other = fake_client_ip(), fake_client_ip()
+    got = await edge("ws", flood, str(IP_LIMIT + 5), "garbage")
+    codes = got["codes"]
+    res.metrics["flood"] = got["summary"]
+    res.check(codes[:IP_LIMIT] == [4001] * IP_LIMIT, f"within the limit: {dict(got['summary'])}")
+    res.check(codes[IP_LIMIT:] == [1013] * 5, f"over the limit: {codes[IP_LIMIT:]}")
+    single = await edge("ws", other, "1", "garbage")
+    res.check(single["codes"] == [4001], f"another IP {other} was cut: {single['codes']}")
+    c = await Client(pool.free.pop()).open()                 # 하네스 자신(다른 IP) — 정상 접속
+    pool.clients.append(c)
+    res.check(c.connected is not None, "harness client could not connect")
+    return res
+
+
+async def p3(pool: Pool) -> Result:
+    """프록시 재시작 — Caddy 가 소켓을 1001(going away)로 닫는다. 서버는 정상이었으므로 서버 유예가 아니다 — 재접속까지의
+    공백은 일반 끊김으로 접속 시계에서 빠진다(1012 서버 유예와 구분)"""
+    res = Result("p3_proxy_restart")
+    cs = await pool.any(2)
+    gid = await friend_game(cs, "duel")
+    t0 = await redis_ms()
+    await docker.action("proxy", "restart", t=10)
+    codes = [await c.wait_closed(15) for c in cs]
+    res.metrics["close_codes"] = codes
+    res.check(all(code not in (1000, 1012) for code in codes), f"close codes {codes}")
+    await wait_server()
+    again = [await Client(c.user_id).open() for c in cs]
+    pool.clients.extend(again)
+    t1 = await redis_ms()
+    raw = await clocks(gid)
+    budget = int(os.environ.get("CONNECTION_BUDGET_MS", "30000"))
+    spent = [budget - seat_clock(raw, s)["conn_remaining_ms"] for s in (1, 2)]
+    res.metrics["gap_ms"], res.metrics["connection_spent_ms"] = t1 - t0, spent
+    for s in spent:
+        res.check(0 < s <= t1 - t0 + 1_000, f"connection clock spent {s} ms for a {t1 - t0} ms proxy restart")
+    res.check(all(seat_clock(raw, s)["disconnected_at_ms"] is None for s in (1, 2)), "seat still disconnected")
+    return res
+
+
+async def p4(pool: Pool) -> Result:
+    """로그 — 프록시·서버 로그 전체에 원문 토큰이 없다(Caddy 접속 로그 없음 + 서버 마스킹)"""
+    res = Result("p4_logs")
+    for service in ("proxy", "server"):
+        logs = await docker.logs(service)
+        hits = len(re.findall(r"token=ey", logs)) + len(re.findall(r"eyJhbGciOi", logs))
+        res.metrics[f"{service}_raw_token_hits"] = hits
+        res.check(hits == 0, f"raw token in {service} logs")
+    return res
+
+
+async def p_origin(pool: Pool) -> Result:
+    """운영 설정(오리진 빈 목록) — 브라우저 오리진이 붙은 WS 는 토큰 전 403, Origin 없는 앱은 통과, CORS 헤더 없음"""
+    import httpx
+    from websockets.asyncio.client import connect as ws_connect
+    from websockets.exceptions import InvalidStatus
+    res = Result("p_origin")
+    status = None
+    try:
+        sock = await ws_connect(f"{os.environ['SERVER_WS']}?token={token(pool.free[-1])}", origin="https://evil.example")
+        await sock.close()
+    except InvalidStatus as refused:
+        status = refused.response.status_code
+    res.metrics["ws_with_origin"] = status
+    res.check(status == 403, f"WS with a browser origin got {status}")
+    c = await Client(pool.free.pop()).open()
+    pool.clients.append(c)
+    res.check(c.connected is not None, "app (no Origin) could not connect")
+    async with httpx.AsyncClient(timeout=5) as client:
+        r = await client.options(f"{os.environ['SERVER_HTTP']}/health",
+                                 headers={"Origin": "https://evil.example", "Access-Control-Request-Method": "GET"})
+    res.metrics["preflight"] = [r.status_code, r.headers.get("access-control-allow-origin")]
+    res.check(r.headers.get("access-control-allow-origin") is None, "production allowed a browser origin")
+    return res
+
+
 SCENARIOS = {
     "s1": lambda p: s1(p, "duel"), "s1t": lambda p: s1(p, "trio"), "s2": s2, "s3": s3,
     "s4": lambda p: s4(p, "plain"), "s4c": lambda p: s4(p, "claim"), "s4k": lambda p: s4(p, "kill"),
     "s5": s5, "s6": lambda p: s6(p, "term"), "s6k": lambda p: s6(p, "kill"), "s7": s7, "s8": s8, "s9": s9,
+    "p1": p1, "p2": p2, "p3": p3, "porigin": p_origin, "p4": p4,
 }
 
 

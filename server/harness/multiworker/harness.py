@@ -21,6 +21,8 @@ from websockets.exceptions import ConnectionClosed
 
 WS_URL = os.environ["SERVER_WS"]
 HTTP_URL = os.environ["SERVER_HTTP"]
+# 워커별 /health 진단만 서버에 직접 — 프록시는 업스트림 연결을 재사용해 한 워커만 보여 준다(M4-1)
+HTTP_DIRECT = os.environ.get("SERVER_HTTP_DIRECT", HTTP_URL)
 SECRET = os.environ["JWT_SECRET_KEY"]
 PROJECT = os.environ["COMPOSE_PROJECT"]
 RECV_SEC = 5.0
@@ -110,16 +112,16 @@ def token(user_id: int) -> str:
                       SECRET, algorithm="HS256")
 
 
-async def health() -> dict:
+async def health(base: str = HTTP_URL) -> dict:
     async with httpx.AsyncClient(timeout=5) as client:
-        return (await client.get(f"{HTTP_URL}/health")).json()
+        return (await client.get(f"{base}/health")).json()
 
 
 async def health_by_worker(tries: int = 60) -> dict[str, dict]:
     """/health 는 요청이 닿은 워커 하나의 값이다 — 두 워커가 다 보일 때까지 여러 번 묻는다"""
     seen: dict[str, dict] = {}
     for _ in range(tries):
-        rt = (await health())["realtime"]
+        rt = (await health(HTTP_DIRECT))["realtime"]
         seen[rt["worker_id"]] = rt
         if len(seen) >= 2:
             break
